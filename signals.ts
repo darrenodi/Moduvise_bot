@@ -6,11 +6,10 @@ dotenv.config();
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
-// Define available models from highest performance to backup tiers
+// Define available models based on 2026 free-tier daily quotas
 const MODEL_TIERS = [
-    'gemini-2.5-flash', // Tier 1: Fastest, but strictest free rate limits
-    'gemini-1.5-flash', // Tier 2: Strong backup, fast context
-    'gemini-1.5-pro'    // Tier 3: Emergency high-intelligence backup
+    'gemini-3.1-flash-lite', // Tier 1: Primary engine (500 requests/day)
+    'gemini-3.5-flash'       // Tier 2: Emergency backup (20 requests/day)
 ];
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
@@ -227,6 +226,6 @@ Direction must be exactly: "long", "short", or "neutral"
             console.error(`[Signal] Error processing ${asset.symbol}:`, error);
         }
     }
- 
+
     return signals;
 }
