@@ -7,7 +7,7 @@ dotenv.config();
 
 const STRATEGY = {
     // Asset
-    SYMBOL: 'BTC/USDT:USDT',
+    SYMBOL: 'BTC/USDC:USDC',
 
     // Capital & leverage
     LEVERAGE: 40,
@@ -99,7 +99,7 @@ function calcContractSize(balance: number, price: number): number {
 async function getAvailableBalance(): Promise<number> {
     try {
         const balance = await exchange.fetchBalance({ type: 'swap' });
-        const usdt = balance['USDT'] || balance['USD'];
+        const usdt = balance['USDC'] || balance['USD'];
         return parseFloat((usdt?.free || usdt?.total || 0).toString());
     } catch (e: any) {
         console.error(`[Execute] Balance fetch error: ${e.message}`);
@@ -159,7 +159,7 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
 
         // ── STEP 2: GET BALANCE ───────────────────────────────────────────
         const balance = await getAvailableBalance();
-        console.log(`[Execute] Balance: $${balance.toFixed(4)} USDT`);
+        console.log(`[Execute] Balance: $${balance.toFixed(4)} USDC`);
 
         if (balance < STRATEGY.MIN_BALANCE) {
             console.log(`[Execute] ❌ Balance $${balance.toFixed(4)} below minimum $${STRATEGY.MIN_BALANCE}`);

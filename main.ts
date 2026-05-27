@@ -8,8 +8,8 @@ dotenv.config();
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 
 const CONFIG = {
-    SYMBOL: 'BTC/USDT:USDT',
-    DISPLAY_SYMBOL: 'BTC/USDT:USDT',
+    SYMBOL: 'BTC/USDC:USDC',
+    DISPLAY_SYMBOL: 'BTC/USDC:USDC',
 
     // 60-90 second cycles targeting 100-200 trades/day
     // 86400s / 75s avg = 1152 possible cycles
