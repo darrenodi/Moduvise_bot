@@ -6,10 +6,10 @@ dotenv.config();
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
-// Define available models based on 2026 free-tier daily quotas
+// Use the 3.x infrastructure you have access to
 const MODEL_TIERS = [
-    'gemini-3.1-flash-lite', // Tier 1: Primary engine (500 requests/day)
-    'gemini-3.5-flash'       // Tier 2: Emergency backup (20 requests/day)
+    'gemini-3.1-flash-lite', // Primary engine (500 requests/day)
+    'gemini-3.5-flash'       // Emergency backup (20 requests/day)
 ];
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
@@ -195,6 +195,13 @@ Direction must be exactly: "long", "short", or "neutral"
                 parsed = JSON.parse(text);
             } catch {
                 console.error(`[Signal] JSON parse failed via ${activeModelUsed}: ${text.slice(0, 100)}`);
+                // CRITICAL FIX: If parsing fails, do not continue down to iterate over an undefined array.
+                continue; 
+            }
+
+            // Only attempt to iterate if parsed is an actual array
+            if (!Array.isArray(parsed)) {
+                console.error(`[Signal] Model returned valid JSON, but not an Array: ${text.slice(0, 50)}`);
                 continue;
             }
 
