@@ -1,0 +1,77 @@
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+/.turbo/
+
+# Environment
+.env
+.env.local
+.env.*.local
+.venv/
+venv/
+env/
+ENV/
+
+# Logs
+logs/
+*.log
+*.log.*
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+coverage/
+htmlcov/
+
+# Virtual environments
+venv/
+ENV/
+.venv/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Docker
+docker-compose.override.yml
+docker-compose.*.yml
+
+# Secrets
+*.pem
+*.key
+
+# Misc
+.cache/
+.next/
+.parcel-cache/
+/.pnp/
+.pnp.js
+.DS_Store
+
+# Lock files (optional - usually you should commit lockfiles)
+# package-lock.json
+# yarn.lock
+
+# Bot / project specific
+logs/
+tmp/
+*.pid
