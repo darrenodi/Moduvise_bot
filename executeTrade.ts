@@ -98,11 +98,15 @@ function calcContractSize(balance: number, price: number): number {
 
 async function getAvailableBalance(): Promise<number> {
     try {
-        const balance = await exchange.fetchBalance({ type: 'swap' });
-        const usdt = balance['USDC'] || balance['USD'];
-        return parseFloat((usdt?.free || usdt?.total || 0).toString());
+        // Hyperliquid requires the 'user' parameter to read a specific wallet balance
+        const balances = await exchange.fetchBalance({
+            'user': process.env.HYPERLIQUID_WALLET_ADDRESS // Points to your Main account containing the USDC
+        });
+        
+        const usdc = balances['USDC'];
+        return usdc?.free || (usdc as any)?.available || 0;
     } catch (e: any) {
-        console.error(`[Execute] Balance fetch error: ${e.message}`);
+        console.warn('[Execute] Balance fetch warning:', e.message || e);
         return 0;
     }
 }
