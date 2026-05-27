@@ -50,7 +50,8 @@ const STRATEGY = {
  */
 const exchange = new ccxt.hyperliquid({
     apiKey: process.env.HYPERLIQUID_WALLET_ADDRESS || '',      // Main wallet 0x address
-    secret: process.env.HYPERLIQUID_API_SECRET || '',   // Agent wallet private key
+    secret: process.env.HYPERLIQUID_API_SECRET || '',
+    privateKey: process.env.HYPERLIQUID_API_SECRET,   // Agent wallet private key
     walletAddress: process.env.HYPERLIQUID_WALLET_ADDRESS || '',
     options: {
         defaultType: 'swap',
@@ -188,6 +189,7 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         console.log(`[Execute] Max loss:  $${grossLoss.toFixed(4)}`);
 
         // ── STEP 4: SET LEVERAGE ──────────────────────────────────────────
+        /*
         console.log(`[Execute] Setting ${STRATEGY.LEVERAGE}x leverage...`);
         try {
             await exchange.setLeverage(STRATEGY.LEVERAGE, STRATEGY.SYMBOL, {
@@ -202,7 +204,7 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
                 console.warn(`[Execute] Leverage warning: ${msg}`);
             }
         }
-
+        */
         // ── STEP 5: PLACE LIMIT ENTRY WITH LINKED TP AND SL ──────────────
         /**
          * Hyperliquid supports linked TP/SL orders attached to the entry order
