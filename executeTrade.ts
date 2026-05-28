@@ -193,7 +193,7 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
                 side,
                 contractSize,
                 entryPrice,
-                { timeInForce: 'PostOnly' }   // pure maker — exchange rejects if it would cross
+                { timeInForce: 'Alo' }   // pure maker — exchange rejects if it would cross
             );
         } catch (e: any) {
             console.error(`[Execute] Entry order failed: ${e.message}`);
@@ -245,7 +245,7 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
                 contractSize,
                 tpPrice,
                 {
-                    timeInForce: 'PostOnly',
+                    timeInForce: 'Alo',
                     reduceOnly: true,
                 }
             );
@@ -259,18 +259,10 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         // SL — market trigger (taker on SL is acceptable — it's emergency protection)
         console.log(`[Execute] Placing SL trigger @ $${slPrice.toFixed(2)} (market, reduceOnly)...`);
         try {
-            const slOrder = await exchange.createOrder(
-                STRATEGY.SYMBOL,
-                'market',
-                isBuy ? 'sell' : 'buy',
-                contractSize,
-                undefined,
-                {
-                    triggerPrice: slPrice,
-                    reduceOnly: true,
-                    stopLoss: true,
-                }
-            );
+            const slOrder = await exchange.createOrder(STRATEGY.SYMBOL, 'market', isBuy ? 'sell' : 'buy', contractSize, undefined, {
+    triggerPrice: slPrice,
+    reduceOnly: true
+});
             slOrderId = getCleanOrderId(slOrder);
             console.log(`[Execute] SL order ID: ${slOrderId}`);
         } catch (e: any) {
