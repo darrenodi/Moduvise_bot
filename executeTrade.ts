@@ -77,8 +77,15 @@ function calcSLPrice(entry: number, direction: 'long' | 'short'): number {
 }
 
 function calcContractSize(balance: number, price: number): number {
-    const positionValue = balance * STRATEGY.LEVERAGE;
-    return Math.max(0.001, parseFloat((positionValue / price).toFixed(4)));
+    // Use 98% of balance to leave a safety buffer for fees and rounding
+    const usableBalance = balance * 0.98;
+    const positionValue = usableBalance * STRATEGY.LEVERAGE;
+    const btcVolume = positionValue / price;
+    
+    // Floor to 4 decimal places instead of rounding up
+    const flooredSize = Math.floor(btcVolume * 10000) / 10000;
+    
+    return Math.max(0.001, flooredSize);
 }
 
 async function getAvailableBalance(): Promise<number> {
