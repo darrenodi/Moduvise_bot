@@ -9,38 +9,27 @@ const STRATEGY = {
     SYMBOL: 'BTC/USDC:USDC',
     LEVERAGE: 40,
 
-    // TP: dynamic from signal ($50–$80)
-    // SL: $300 adverse move — survivable on $13.89 balance
+    // SL: $300 adverse BTC move
     SL_PRICE_MOVE: 300,
 
-    // Hyperliquid maker fee per leg: 0.015%
+    // Hyperliquid maker fee: 0.015% per leg
     MAKER_FEE: 0.00015,
 
     /**
-     * MAKER ENTRY OFFSET
-     * To guarantee PostOnly (maker) fill we place the entry INSIDE the book:
-     *   Long  → limit price = market_price - ENTRY_OFFSET  (sits below best ask)
-     *   Short → limit price = market_price + ENTRY_OFFSET  (sits above best bid)
-     *
-     * $3 offset = ~0.004% on $73k BTC. Small enough not to miss trades,
-     * large enough to never cross the spread on a slow tick.
+     * MAKER ENTRY OFFSET — place limit $3 INSIDE the book so PostOnly never crosses.
+     *   Long  → entry = market_price - 3  (rests below current ask)
+     *   Short → entry = market_price + 3  (rests above current bid)
      */
     ENTRY_OFFSET: 3,
 
-    // Fill window: 90 seconds. If not filled, cancel and recycle.
-    // Prevents sitting dead as the market moves away.
-    FILL_CHECK_INTERVAL_MS: 3_000,   // poll every 3s
-    FILL_MAX_ATTEMPTS: 30,           // 30 × 3s = 90s total window
+    // Fill window: 90s (30 polls × 3s each)
+    FILL_CHECK_INTERVAL_MS: 3_000,
+    FILL_MAX_ATTEMPTS: 30,
 
-    /**
-     * MAX HOLD TIME: 10 minutes (600 000ms)
-     * After this, cancel everything and close position at market.
-     * Addresses the "6-hour sitting trade" problem.
-     */
-    MAX_HOLD_MS: 10 * 60 * 1000,    // 10 minutes
+    // Hard max hold time: 10 minutes, then force-close at market
+    MAX_HOLD_MS: 10 * 60 * 1000,
 
     MONITOR_INTERVAL_MS: 2_000,
-
     MIN_BALANCE: 2.0,
 };
 
@@ -72,7 +61,6 @@ interface TradeResult {
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 function makerEntryPrice(marketPrice: number, direction: 'long' | 'short'): number {
-    // Offset INTO the book so the order rests and never crosses
     return direction === 'long'
         ? marketPrice - STRATEGY.ENTRY_OFFSET
         : marketPrice + STRATEGY.ENTRY_OFFSET;
@@ -90,8 +78,7 @@ function calcSLPrice(entry: number, direction: 'long' | 'short'): number {
 
 function calcContractSize(balance: number, price: number): number {
     const positionValue = balance * STRATEGY.LEVERAGE;
-    const btcVolume = positionValue / price;
-    return Math.max(0.001, parseFloat(btcVolume.toFixed(4)));
+    return Math.max(0.001, parseFloat((positionValue / price).toFixed(4)));
 }
 
 async function getAvailableBalance(): Promise<number> {
@@ -137,12 +124,8 @@ async function forceClosePosition(direction: 'long' | 'short', contractSize: num
     console.log(`[Execute] 🚨 Force-closing position (market ${closeSide})...`);
     try {
         await exchange.createOrder(
-            STRATEGY.SYMBOL,
-            'market',
-            closeSide,
-            contractSize,
-            undefined,
-            { reduceOnly: true }
+            STRATEGY.SYMBOL, 'market', closeSide, contractSize,
+            undefined, { reduceOnly: true }
         );
         console.log(`[Execute] Force close submitted.`);
     } catch (e: any) {
@@ -161,8 +144,8 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
 
     const tradeDirection = direction as 'long' | 'short';
     const isBuy = tradeDirection === 'long';
-    const side   = isBuy ? 'buy' : 'sell';
-    const label  = isBuy ? 'LONG 📈' : 'SHORT 📉';
+    const side  = isBuy ? 'buy' : 'sell';
+    const label = isBuy ? 'LONG 📈' : 'SHORT 📉';
 
     console.log(`\n${'─'.repeat(65)}`);
     console.log(`[Execute] ${label} | Market: $${market_price.toFixed(2)} | Regime: ${regime}`);
@@ -173,39 +156,36 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         // ── STEP 1: NO EXISTING POSITION ─────────────────────────────────
         const existingPos = await getOpenPosition(STRATEGY.SYMBOL);
         if (existingPos) {
-            console.log(`[Execute] 🛑 Position already open. Waiting for resolution.`);
+            console.log(`[Execute] 🛑 Position already open. Skipping.`);
             return { success: false, outcome: 'skipped', message: 'Position already active' };
         }
 
         // ── STEP 2: BALANCE CHECK ─────────────────────────────────────────
         const balance = await getAvailableBalance();
         console.log(`[Execute] Balance: $${balance.toFixed(4)} USDC`);
-
         if (balance < STRATEGY.MIN_BALANCE) {
-            console.log(`[Execute] ❌ Balance $${balance.toFixed(4)} below minimum $${STRATEGY.MIN_BALANCE}`);
             return { success: false, outcome: 'skipped', message: `Balance too low: $${balance.toFixed(4)}` };
         }
 
         // ── STEP 3: CALCULATE PRICES & SIZES ─────────────────────────────
-        const entryPrice     = makerEntryPrice(market_price, tradeDirection);
-        const tpPrice        = calcTPPrice(entryPrice, tradeDirection, target_move);
-        const slPrice        = calcSLPrice(entryPrice, tradeDirection);
-        const contractSize   = calcContractSize(balance, entryPrice);
-        const positionValue  = contractSize * entryPrice;
-        const grossProfit    = contractSize * target_move;
-        const fees           = positionValue * STRATEGY.MAKER_FEE * 2;  // entry maker + exit maker
-        const netProfit      = grossProfit - fees;
+        const entryPrice    = makerEntryPrice(market_price, tradeDirection);
+        const tpPrice       = calcTPPrice(entryPrice, tradeDirection, target_move);
+        const slPrice       = calcSLPrice(entryPrice, tradeDirection);
+        const contractSize  = calcContractSize(balance, entryPrice);
+        const positionValue = contractSize * entryPrice;
+        const grossProfit   = contractSize * target_move;
+        const fees          = positionValue * STRATEGY.MAKER_FEE * 2; // both legs maker
+        const netProfit     = grossProfit - fees;
 
-        console.log(`[Execute] Entry (maker):  $${entryPrice.toFixed(2)}  (offset -${STRATEGY.ENTRY_OFFSET} from $${market_price.toFixed(2)})`);
-        console.log(`[Execute] TP (maker):     $${tpPrice.toFixed(2)}  (+$${target_move} move)`);
-        console.log(`[Execute] SL (trigger):   $${slPrice.toFixed(2)}  (-$${STRATEGY.SL_PRICE_MOVE} move)`);
-        console.log(`[Execute] Size:           ${contractSize} BTC ($${positionValue.toFixed(2)} notional at ${STRATEGY.LEVERAGE}x)`);
-        console.log(`[Execute] Expected net:   $${netProfit.toFixed(4)}  (gross $${grossProfit.toFixed(4)} − fees $${fees.toFixed(4)})`);
+        console.log(`[Execute] Entry (PostOnly): $${entryPrice.toFixed(2)}  (mkt $${market_price.toFixed(2)} − offset $${STRATEGY.ENTRY_OFFSET})`);
+        console.log(`[Execute] TP (PostOnly):    $${tpPrice.toFixed(2)}  (+$${target_move.toFixed(2)} move)`);
+        console.log(`[Execute] SL (market trig): $${slPrice.toFixed(2)}  (-$${STRATEGY.SL_PRICE_MOVE} move)`);
+        console.log(`[Execute] Size: ${contractSize} BTC | Notional: $${positionValue.toFixed(2)} | Net: $${netProfit.toFixed(4)}`);
 
-        // ── STEP 4: PLACE MAKER ENTRY ORDER (PostOnly) ────────────────────
+        // ── STEP 4: PLAIN PostOnly ENTRY — no linked TP/SL params ────────
+        // Linked takeProfitPrice/stopLossPrice via CCXT produce inverted
+        // trigger conditions on Hyperliquid. Always bracket manually after fill.
         let entryOrder: any;
-        let usedLinkedOrders = false;
-
         try {
             entryOrder = await exchange.createOrder(
                 STRATEGY.SYMBOL,
@@ -213,125 +193,107 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
                 side,
                 contractSize,
                 entryPrice,
-                {
-                    timeInForce: 'PostOnly',    // Rejected by exchange if it would cross — never taker
-                    takeProfitPrice: tpPrice,
-                    takeProfitType: 'limit',
-                    stopLossPrice: slPrice,
-                    stopLossType: 'market',
-                    reduceOnly: false,
-                }
+                { timeInForce: 'PostOnly' }   // pure maker — exchange rejects if it would cross
             );
-            usedLinkedOrders = true;
-            console.log(`[Execute] ✅ Maker entry placed with linked TP/SL`);
-        } catch {
-            // If linked orders aren't supported, plain PostOnly entry
-            console.log(`[Execute] Linked TP/SL unsupported. Placing plain maker entry...`);
-            entryOrder = await exchange.createOrder(
-                STRATEGY.SYMBOL,
-                'limit',
-                side,
-                contractSize,
-                entryPrice,
-                { timeInForce: 'PostOnly' }
-            );
+        } catch (e: any) {
+            console.error(`[Execute] Entry order failed: ${e.message}`);
+            return { success: false, outcome: 'error', message: e.message };
         }
 
         const entryOrderId = getCleanOrderId(entryOrder);
         console.log(`[Execute] Entry order ID: ${entryOrderId}`);
 
-        // ── STEP 5: WAIT FOR FILL (90s window) ───────────────────────────
-        console.log(`[Execute] Waiting for maker fill (max ${STRATEGY.FILL_MAX_ATTEMPTS * STRATEGY.FILL_CHECK_INTERVAL_MS / 1000}s)...`);
-
+        // ── STEP 5: WAIT FOR FILL (90s) ───────────────────────────────────
+        console.log(`[Execute] Waiting for maker fill (max 90s)...`);
         let filled = false;
+
         for (let i = 0; i < STRATEGY.FILL_MAX_ATTEMPTS; i++) {
             await new Promise(r => setTimeout(r, STRATEGY.FILL_CHECK_INTERVAL_MS));
-
             const pos = await getOpenPosition(STRATEGY.SYMBOL);
             if (pos) {
                 filled = true;
-                console.log(`[Execute] ✅ Filled at check ${i + 1}`);
+                console.log(`[Execute] ✅ Position confirmed at check ${i + 1} (~${(i + 1) * 3}s)`);
                 break;
             }
-
-            if ((i + 1) % 10 === 0) {
-                console.log(`[Execute] Still waiting... ${((i + 1) * STRATEGY.FILL_CHECK_INTERVAL_MS / 1000).toFixed(0)}s elapsed`);
+            if ((i + 1) % 5 === 0) {
+                console.log(`[Execute] Waiting... ${(i + 1) * 3}s / 90s`);
             }
         }
 
         // ── STEP 6: CANCEL IF NOT FILLED ─────────────────────────────────
         if (!filled) {
-            console.log(`[Execute] ⏱️ No fill after ${STRATEGY.FILL_MAX_ATTEMPTS * STRATEGY.FILL_CHECK_INTERVAL_MS / 1000}s. Cancelling.`);
-            try {
-                await exchange.cancelOrder(entryOrderId, STRATEGY.SYMBOL);
-            } catch {
-                await exchange.cancelAllOrders(STRATEGY.SYMBOL);
-            }
+            console.log(`[Execute] ⏱️ No fill after 90s. Cancelling entry.`);
+            try { await exchange.cancelOrder(entryOrderId, STRATEGY.SYMBOL); }
+            catch { await exchange.cancelAllOrders(STRATEGY.SYMBOL); }
             return { success: false, outcome: 'cancelled', message: 'Entry not filled within 90s' };
         }
 
-        // ── STEP 7: MANUAL TP / SL (if linked orders weren't used) ───────
+        // ── STEP 7: PLACE TP AND SL AFTER CONFIRMED FILL ─────────────────
+        // TP: PostOnly limit on the reduce side
+        // SL: market trigger on the reduce side
+        // Both placed AFTER fill so trigger conditions reflect actual position.
         let tpOrderId = '';
         let slOrderId = '';
 
-        if (!usedLinkedOrders) {
-            console.log(`[Execute] Placing maker TP @ $${tpPrice.toFixed(2)}...`);
-            try {
-                const tpOrder = await exchange.createOrder(
-                    STRATEGY.SYMBOL,
-                    'limit',
-                    isBuy ? 'sell' : 'buy',
-                    contractSize,
-                    tpPrice,
-                    {
-                        timeInForce: 'PostOnly',   // TP is also maker
-                        reduceOnly: true,
-                    }
-                );
-                tpOrderId = getCleanOrderId(tpOrder);
-                console.log(`[Execute] TP placed: ${tpOrderId}`);
-            } catch (e: any) {
-                console.error(`[Execute] TP placement failed: ${e.message}`);
-            }
-
-            console.log(`[Execute] Placing market SL trigger @ $${slPrice.toFixed(2)}...`);
-            try {
-                const slOrder = await exchange.createOrder(
-                    STRATEGY.SYMBOL,
-                    'market',
-                    isBuy ? 'sell' : 'buy',
-                    contractSize,
-                    undefined,
-                    {
-                        triggerPrice: slPrice,
-                        reduceOnly: true,
-                        stopLoss: true,
-                    }
-                );
-                slOrderId = getCleanOrderId(slOrder);
-                console.log(`[Execute] SL placed: ${slOrderId}`);
-            } catch (e: any) {
-                console.error(`[Execute] SL placement failed: ${e.message}`);
-            }
+        // TP — maker limit, reduce only
+        console.log(`[Execute] Placing TP @ $${tpPrice.toFixed(2)} (PostOnly, reduceOnly)...`);
+        try {
+            const tpOrder = await exchange.createOrder(
+                STRATEGY.SYMBOL,
+                'limit',
+                isBuy ? 'sell' : 'buy',
+                contractSize,
+                tpPrice,
+                {
+                    timeInForce: 'PostOnly',
+                    reduceOnly: true,
+                }
+            );
+            tpOrderId = getCleanOrderId(tpOrder);
+            console.log(`[Execute] TP order ID: ${tpOrderId}`);
+        } catch (e: any) {
+            // TP failure is recoverable — SL will still protect capital
+            console.error(`[Execute] TP placement failed: ${e.message}`);
         }
 
-        // ── STEP 8: MONITOR WITH 10-MINUTE HARD TIMEOUT ───────────────────
-        console.log(`[Execute] Monitoring (max ${STRATEGY.MAX_HOLD_MS / 60000} min)...`);
+        // SL — market trigger (taker on SL is acceptable — it's emergency protection)
+        console.log(`[Execute] Placing SL trigger @ $${slPrice.toFixed(2)} (market, reduceOnly)...`);
+        try {
+            const slOrder = await exchange.createOrder(
+                STRATEGY.SYMBOL,
+                'market',
+                isBuy ? 'sell' : 'buy',
+                contractSize,
+                undefined,
+                {
+                    triggerPrice: slPrice,
+                    reduceOnly: true,
+                    stopLoss: true,
+                }
+            );
+            slOrderId = getCleanOrderId(slOrder);
+            console.log(`[Execute] SL order ID: ${slOrderId}`);
+        } catch (e: any) {
+            // SL failure is serious — log loudly
+            console.error(`[Execute] ⚠️ SL PLACEMENT FAILED: ${e.message}. Position is unprotected.`);
+        }
 
+        // ── STEP 8: MONITOR WITH 10-MIN HARD TIMEOUT ─────────────────────
+        console.log(`[Execute] Monitoring position (max 10 min)...`);
         let resolved = false;
         let outcome: TradeResult['outcome'] = 'error';
-        let cycles = 0;
         const holdStart = Date.now();
+        let cycles = 0;
 
         while (!resolved) {
             await new Promise(r => setTimeout(r, STRATEGY.MONITOR_INTERVAL_MS));
             cycles++;
 
-            // ── TIMEOUT CHECK ──────────────────────────────────────────
             const elapsed = Date.now() - holdStart;
+
+            // Hard timeout
             if (elapsed >= STRATEGY.MAX_HOLD_MS) {
-                console.warn(`[Execute] ⏰ 10-min hold limit reached (${(elapsed / 1000).toFixed(0)}s). Force-closing.`);
-                // Cancel bracket orders first
+                console.warn(`[Execute] ⏰ 10-min timeout. Force-closing position.`);
                 try { await exchange.cancelAllOrders(STRATEGY.SYMBOL); } catch { /* ok */ }
                 await forceClosePosition(tradeDirection, contractSize);
                 outcome = 'timeout_exit';
@@ -343,52 +305,52 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
                 const pos = await getOpenPosition(STRATEGY.SYMBOL);
 
                 if (!pos) {
-                    // Determine which order closed the position
+                    // Position is gone — determine TP vs SL
+                    let determinedOutcome = false;
+
                     if (tpOrderId) {
                         try {
                             const tpCheck = await exchange.fetchOrder(tpOrderId, STRATEGY.SYMBOL);
-                            if (tpCheck.status === 'closed') {
-                                console.log(`\n[Execute] 🎯 TAKE PROFIT HIT @ $${tpPrice.toFixed(2)} | Net: +$${netProfit.toFixed(4)}`);
+                            if (tpCheck.status === 'closed' || tpCheck.status === 'filled') {
+                                console.log(`\n[Execute] 🎯 TP HIT @ $${tpPrice.toFixed(2)} | Net: +$${netProfit.toFixed(4)}`);
                                 outcome = 'tp_hit';
-                                resolved = true;
-                                break;
+                                determinedOutcome = true;
                             }
-                        } catch { /* linked order — not queryable */ }
+                        } catch { /* linked / already consumed */ }
                     }
 
-                    if (slOrderId && !resolved) {
+                    if (!determinedOutcome && slOrderId) {
                         try {
                             const slCheck = await exchange.fetchOrder(slOrderId, STRATEGY.SYMBOL);
-                            if (slCheck.status === 'closed') {
+                            if (slCheck.status === 'closed' || slCheck.status === 'filled') {
                                 const loss = contractSize * STRATEGY.SL_PRICE_MOVE;
-                                console.log(`\n[Execute] 🛑 STOP LOSS HIT @ $${slPrice.toFixed(2)} | Loss: -$${loss.toFixed(4)}`);
+                                console.log(`\n[Execute] 🛑 SL HIT @ $${slPrice.toFixed(2)} | Loss: -$${loss.toFixed(4)}`);
                                 outcome = 'sl_hit';
-                                resolved = true;
-                                break;
+                                determinedOutcome = true;
                             }
                         } catch { /* ok */ }
                     }
 
-                    if (!resolved) {
-                        // Position gone without matching a known order — treat as TP
-                        console.log(`[Execute] Position closed (linked order or manual).`);
+                    if (!determinedOutcome) {
+                        // Can't determine which closed it — default tp_hit (conservative)
+                        console.log(`[Execute] Position closed (order indeterminate — assuming TP).`);
                         outcome = 'tp_hit';
-                        resolved = true;
                     }
+
+                    resolved = true;
                 }
 
                 if (cycles % 30 === 0) {
-                    const secs = (elapsed / 1000).toFixed(0);
-                    console.log(`[Execute] Still open... ${secs}s | TP=$${tpPrice.toFixed(2)} SL=$${slPrice.toFixed(2)}`);
+                    console.log(`[Execute] Open... ${(elapsed / 1000).toFixed(0)}s | TP $${tpPrice.toFixed(2)} | SL $${slPrice.toFixed(2)}`);
                 }
 
             } catch (e: any) {
-                console.warn(`[Execute] Monitor lag: ${e.message}`);
+                console.warn(`[Execute] Monitor poll error: ${e.message}`);
             }
         }
 
         // ── STEP 9: CLEANUP ───────────────────────────────────────────────
-        try { await exchange.cancelAllOrders(STRATEGY.SYMBOL); } catch { /* already settled */ }
+        try { await exchange.cancelAllOrders(STRATEGY.SYMBOL); } catch { /* settled */ }
 
         const result: TradeResult = {
             success:     outcome === 'tp_hit',
@@ -400,9 +362,8 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
             exitPrice:   outcome === 'tp_hit' ? tpPrice : slPrice,
         };
 
-        console.log(`[Execute] ✅ Cycle complete. Outcome: ${outcome.toUpperCase()}`);
+        console.log(`[Execute] Cycle complete. Outcome: ${outcome.toUpperCase()}`);
         console.log(`${'─'.repeat(65)}\n`);
-
         return result;
 
     } catch (error: any) {
