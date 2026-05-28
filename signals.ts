@@ -17,10 +17,12 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
  *
  * We burn the high-quota model first, fall to smarter ones only when needed.
  */
+// Strict 3.x Model Tiers with 2.5 Fallback
 const MODEL_TIERS = [
-    'gemini-2.0-flash-lite',   // 500 RPD — primary workhorse
-    'gemini-2.0-flash',        // 20  RPD — secondary
-    'gemini-1.5-flash',        // 20  RPD — tertiary
+    'gemini-3.1-flash-lite', // Tier 1: Primary high-volume workhorse (~500 RPD)
+    'gemini-3.1-flash',      // Tier 2: Balanced mid-tier backup
+    'gemini-3.5-flash',      // Tier 3: Emergency frontier backup (~20 RPD)
+    'gemini-2.5-flash'       // Tier 4: Legacy stable fallback
 ];
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
