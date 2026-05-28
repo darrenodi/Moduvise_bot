@@ -2,14 +2,25 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-// ─── GEMINI CLIENT & FAILOVER TIERS ───────────────────────────────────────────
+// ─── GEMINI CLIENT ────────────────────────────────────────────────────────────
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
-// Use the 3.x infrastructure you have access to
+/**
+ * MODEL TIERS — ordered by daily quota (highest first) so we preserve
+ * the smarter models for when we need them.
+ *
+ * Actual API model strings (as of May 2025):
+ *   gemini-2.0-flash-lite  → maps to what the dashboard calls "3.1 Flash Lite" (500 RPD, 15 RPM)
+ *   gemini-2.0-flash       → 20 RPD, 15 RPM (smart, fast)
+ *   gemini-1.5-flash       → 20 RPD, 15 RPM (fallback)
+ *
+ * We burn the high-quota model first, fall to smarter ones only when needed.
+ */
 const MODEL_TIERS = [
-    'gemini-3.1-flash-lite', // Primary engine (500 requests/day)
-    'gemini-3.5-flash'       // Emergency backup (20 requests/day)
+    'gemini-2.0-flash-lite',   // 500 RPD — primary workhorse
+    'gemini-2.0-flash',        // 20  RPD — secondary
+    'gemini-1.5-flash',        // 20  RPD — tertiary
 ];
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
@@ -22,10 +33,10 @@ export interface TechnicalIndicators {
     ema8: number;
     ema21: number;
     ema50: number;
-    momentum1m: number;    
-    momentum5m: number;    
+    momentum1m: number;
+    momentum5m: number;
     priceStructure: 'uptrend' | 'downtrend' | 'ranging';
-    atr1m: number;         
+    atr1m: number;
     atrPct: number;
     nearestResistance: number;
     nearestSupport: number;
@@ -34,8 +45,8 @@ export interface TechnicalIndicators {
     high24h: number;
     low24h: number;
     regime: MarketRegime;
-    adx: number;           
-    volumeSpike: boolean;  
+    adx: number;
+    volumeSpike: boolean;
 }
 
 export interface MarketData {
@@ -54,11 +65,11 @@ export interface GeneratedSignal {
     direction: SignalDirection;
     market_price: number;
     regime: MarketRegime;
-    target_move: number; // The dynamic TP target ($50 to $80)
+    target_move: number;
     reasoning: string;
 }
 
-// ─── REGIME CLASSIFIER ───────────────────────────────────────────────────────
+// ─── REGIME CLASSIFIER ────────────────────────────────────────────────────────
 
 function classifyRegime(indicators: TechnicalIndicators): MarketRegime {
     const { adx, atr1m, momentum5m, volumeSpike, priceStructure } = indicators;
@@ -66,11 +77,61 @@ function classifyRegime(indicators: TechnicalIndicators): MarketRegime {
     if (volumeSpike && atr1m > 150 && Math.abs(momentum5m) > 0.3) {
         return 'breakout_pause';
     }
-
-    if (adx > 25 && priceStructure === 'uptrend') return 'trending_bull';
+    if (adx > 25 && priceStructure === 'uptrend')   return 'trending_bull';
     if (adx > 25 && priceStructure === 'downtrend') return 'trending_bear';
-
     return 'range_scalp';
+}
+
+// ─── LOCAL SIGNAL FALLBACK ────────────────────────────────────────────────────
+/**
+ * Pure-math fallback — no API required.
+ * Called when every Gemini tier is exhausted or rate-limited.
+ *
+ * Logic:
+ *  - trending_bull  → long on any pullback (momentum1m > -0.05)
+ *  - trending_bear  → short on any bounce  (momentum1m < +0.05)
+ *  - range_scalp    → buy near support, sell near resistance, mid = follow 1m momentum
+ */
+function localFallbackSignal(
+    asset: MarketData,
+    regime: MarketRegime
+): GeneratedSignal {
+    const { indicators, price, symbol } = asset;
+    let direction: SignalDirection = 'neutral';
+    let reasoning = '';
+
+    if (regime === 'breakout_pause') {
+        reasoning = 'LOCAL: Breakout pause — standing down';
+    } else if (regime === 'trending_bull') {
+        direction = 'long';
+        reasoning = `LOCAL: Bull trend (ADX ${indicators.adx.toFixed(1)}) — riding uptrend`;
+    } else if (regime === 'trending_bear') {
+        direction = 'short';
+        reasoning = `LOCAL: Bear trend (ADX ${indicators.adx.toFixed(1)}) — riding downtrend`;
+    } else {
+        // range_scalp
+        const nearSupport = indicators.distanceToSupport < 30;
+        const nearResistance = indicators.distanceToResistance < 30;
+        if (nearSupport && !nearResistance) {
+            direction = 'long';
+            reasoning = `LOCAL: Near support $${indicators.nearestSupport.toFixed(0)} — scalp long`;
+        } else if (nearResistance && !nearSupport) {
+            direction = 'short';
+            reasoning = `LOCAL: Near resistance $${indicators.nearestResistance.toFixed(0)} — fade spike`;
+        } else {
+            // mid-range: follow 1m momentum
+            direction = indicators.momentum1m > 0 ? 'long' : 'short';
+            reasoning = `LOCAL: Mid-range, momentum ${indicators.momentum1m.toFixed(4)}%`;
+        }
+    }
+
+    // Dynamic target: scale ATR between $50–$80
+    const rawTarget = 50 + Math.min(30, indicators.atr1m * 0.2);
+    const target_move = Math.min(80, Math.max(50, rawTarget));
+
+    console.log(`[Signal] ⚙️  LOCAL fallback → ${direction.toUpperCase()} | $${target_move.toFixed(2)} target | ${reasoning}`);
+
+    return { symbol, direction, market_price: price, regime, target_move, reasoning };
 }
 
 // ─── SIGNAL ENGINE ────────────────────────────────────────────────────────────
@@ -83,9 +144,9 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
             const { indicators, price } = asset;
             const regime = classifyRegime(indicators);
 
-            // ── HARD STOP: Breakout pause only ────────────────────────────────
+            // ── HARD STOP: breakout pause ──────────────────────────────────
             if (regime === 'breakout_pause') {
-                console.log(`[Signal] 🔴 BREAKOUT PAUSE — ATR $${indicators.atr1m.toFixed(0)}, Volume spike. Standing down.`);
+                console.log(`[Signal] 🔴 BREAKOUT PAUSE — ATR $${indicators.atr1m.toFixed(0)}, volume spike. Standing down.`);
                 signals.push({
                     symbol: asset.symbol,
                     direction: 'neutral',
@@ -97,7 +158,7 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
                 continue;
             }
 
-            // ── PRE-FILTER: BTC-specific minimums ─────────────────────────────
+            // ── PRE-FILTER: minimum ATR ────────────────────────────────────
             if (indicators.atr1m < 5) {
                 console.log(`[Signal] ⏸️ ATR too low ($${indicators.atr1m.toFixed(2)}). Need > $5. Skipping.`);
                 signals.push({
@@ -111,113 +172,90 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
                 continue;
             }
 
-            // ── BUILD REGIME-SPECIFIC PROMPT ──────────────────────────────────
+            // ── REGIME PROMPT BLOCK ───────────────────────────────────────
             let regimeInstructions = '';
-
             if (regime === 'range_scalp') {
                 regimeInstructions = `
-REGIME: RANGE SCALP MODE
-Bitcoin is oscillating in a range. Your job is continuous micro-scalping:
-- If price is NEAR SUPPORT (within $${Math.min(20, indicators.distanceToSupport).toFixed(0)}): Generate LONG — buy the dip
-- If price is NEAR RESISTANCE (within $${Math.min(20, indicators.distanceToResistance).toFixed(0)}): Generate SHORT — fade the spike
-- If price is MID-RANGE: Use momentum direction (1m momentum positive = LONG, negative = SHORT)
-- NEVER return neutral during range scalp mode unless the range itself is collapsing
-`;
+REGIME: RANGE SCALP
+- Near support (within $${Math.min(20, indicators.distanceToSupport).toFixed(0)}): LONG
+- Near resistance (within $${Math.min(20, indicators.distanceToResistance).toFixed(0)}): SHORT
+- Mid-range: follow 1m momentum (positive=long, negative=short)
+- NEVER return neutral in range scalp mode`;
             } else if (regime === 'trending_bull') {
-                regimeInstructions = `
-REGIME: TRENDING BULL
-Strong uptrend confirmed. Only generate LONG signals on micro-pullbacks toward EMA8.
-`;
+                regimeInstructions = `REGIME: TRENDING BULL — only LONG on micro-pullbacks to EMA8`;
             } else if (regime === 'trending_bear') {
-                regimeInstructions = `
-REGIME: TRENDING BEAR  
-Strong downtrend confirmed. Only generate SHORT signals on micro-bounces toward EMA8.
-`;
+                regimeInstructions = `REGIME: TRENDING BEAR — only SHORT on micro-bounces to EMA8`;
             }
 
-            const prompt = `
-You are the high-frequency signal desk of ModuVise, trading Bitcoin perpetual futures on Hyperliquid.
-
-LIVE MARKET DATA (${asset.symbol}):
-Price: $${price.toFixed(2)}
-EMA8: $${indicators.ema8.toFixed(2)} | EMA21: $${indicators.ema21.toFixed(2)}
-1m Momentum: ${indicators.momentum1m.toFixed(4)}% | 5m Momentum: ${indicators.momentum5m.toFixed(4)}%
-ATR (1m): $${indicators.atr1m.toFixed(2)}
-Nearest Support: $${indicators.nearestSupport.toFixed(2)} (distance: $${indicators.distanceToSupport.toFixed(2)})
-Nearest Resistance: $${indicators.nearestResistance.toFixed(2)} (distance: $${indicators.distanceToResistance.toFixed(2)})
-
+            // Keep prompt compact — every token costs quota
+            const prompt = `You are a BTC perp signal engine on Hyperliquid.
+DATA: Price=$${price.toFixed(2)} EMA8=$${indicators.ema8.toFixed(2)} EMA21=$${indicators.ema21.toFixed(2)} Mom1m=${indicators.momentum1m.toFixed(4)}% Mom5m=${indicators.momentum5m.toFixed(4)}% ATR=$${indicators.atr1m.toFixed(2)} Support=$${indicators.nearestSupport.toFixed(2)}(dist=$${indicators.distanceToSupport.toFixed(2)}) Resist=$${indicators.nearestResistance.toFixed(2)}(dist=$${indicators.distanceToResistance.toFixed(2)})
 ${regimeInstructions}
+target_move: $50–$80 based on ATR. Never below 50.
+Reply ONLY valid JSON array, no markdown:
+[{"symbol":"${asset.symbol}","direction":"long","market_price":${price},"target_move":55.00,"reasoning":"brief"}]`;
 
-TARGET DIRECTIVE:
-Calculate a dynamic 'target_move' between $50.00 and $80.00 based on the current 1m ATR ($${indicators.atr1m.toFixed(2)}). 
-- NEVER output less than 50.00.
-- If volatility/ATR is high, push the target up to 80.00.
-- If volatility is standard, default to the baseline 50.00.
-
-Respond ONLY with valid JSON. No markdown. No explanation.
-[{"symbol":"${asset.symbol}","direction":"long","market_price":${price},"target_move":65.00,"reasoning":"brief reason"}]
-Direction must be exactly: "long", "short", or "neutral"
-            `;
-
-            // ── DYNAMIC 3-TIER MODEL FAILOVER ─────────────────────────────────
+            // ── MODEL FAILOVER ────────────────────────────────────────────
             let result = null;
-            let activeModelUsed = '';
+            let activeModel = '';
 
             for (const modelName of MODEL_TIERS) {
                 try {
-                    const modelInstance = genAI.getGenerativeModel({ model: modelName });
-                    result = await modelInstance.generateContent(prompt);
-                    activeModelUsed = modelName;
-                    break; // Request successful, exit the retry loop
-                } catch (apiError: any) {
-                    console.warn(`[Signal] Model ${modelName} unavailable/rate-limited. Shifting to next tier...`);
+                    const m = genAI.getGenerativeModel({ model: modelName });
+                    result = await m.generateContent(prompt);
+                    activeModel = modelName;
+                    break;
+                } catch (apiErr: any) {
+                    const code = apiErr?.status || apiErr?.code || '';
+                    console.warn(`[Signal] ${modelName} unavailable (${code}). Trying next tier...`);
                 }
             }
 
-            // Hard stop if all models are exhausted
+            // ── LOCAL FALLBACK when all API tiers exhausted ───────────────
             if (!result) {
-                console.error(`[Signal Error] All Gemini API tiers exhausted. Yielding neutral loop.`);
-                signals.push({
-                    symbol: asset.symbol,
-                    direction: 'neutral',
-                    market_price: price,
-                    target_move: 50.00,
-                    regime,
-                    reasoning: 'Google API quota bottleneck',
-                });
+                console.warn(`[Signal] ⚠️  All Gemini tiers exhausted — using local math fallback`);
+                signals.push(localFallbackSignal(asset, regime));
                 continue;
             }
 
-            const text = result.response.text().trim().replace(/```json|```/g, '').trim();
+            // ── PARSE RESPONSE ────────────────────────────────────────────
+            const raw = result.response.text().trim();
+            // Strip any markdown fences the model may emit despite instructions
+            const clean = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
 
-            let parsed: Array<{ symbol: string; direction: string; market_price: number; target_move?: number; reasoning: string }>;
+            let parsed: Array<{
+                symbol: string;
+                direction: string;
+                market_price: number;
+                target_move?: number;
+                reasoning: string;
+            }>;
+
             try {
-                parsed = JSON.parse(text);
+                const maybeObj = JSON.parse(clean);
+                // Model might return an object instead of array
+                parsed = Array.isArray(maybeObj) ? maybeObj : [maybeObj];
             } catch {
-                console.error(`[Signal] JSON parse failed via ${activeModelUsed}: ${text.slice(0, 100)}`);
-                // CRITICAL FIX: If parsing fails, do not continue down to iterate over an undefined array.
-                continue; 
-            }
-
-            // Only attempt to iterate if parsed is an actual array
-            if (!Array.isArray(parsed)) {
-                console.error(`[Signal] Model returned valid JSON, but not an Array: ${text.slice(0, 50)}`);
+                console.error(`[Signal] JSON parse failed via ${activeModel}: "${clean.slice(0, 120)}"`);
+                // Fall through to local fallback rather than dropping the cycle
+                signals.push(localFallbackSignal(asset, regime));
                 continue;
             }
 
             for (const sig of parsed) {
                 const dir = sig.direction as SignalDirection;
                 if (!['long', 'short', 'neutral'].includes(dir)) {
-                    console.warn(`[Signal] Invalid direction "${sig.direction}" — skipping`);
+                    console.warn(`[Signal] Invalid direction "${sig.direction}" — falling back locally`);
+                    signals.push(localFallbackSignal(asset, regime));
                     continue;
                 }
 
-                // Guardrails: ensure target is strictly between $50 and $80
-                let dynamicMove = Number(sig.target_move) || 50.00;
-                if (dynamicMove < 50.00) dynamicMove = 50.00;
-                if (dynamicMove > 80.00) dynamicMove = 80.00;
+                // Clamp target $50–$80
+                let dynamicMove = Number(sig.target_move) || 50;
+                if (dynamicMove < 50) dynamicMove = 50;
+                if (dynamicMove > 80) dynamicMove = 80;
 
-                console.log(`[Signal] [via ${activeModelUsed}] ${dir.toUpperCase()} targetting +$${dynamicMove.toFixed(2)} | ${sig.reasoning}`);
+                console.log(`[Signal] [${activeModel}] ${dir.toUpperCase()} +$${dynamicMove.toFixed(2)} | ${sig.reasoning}`);
 
                 signals.push({
                     symbol: sig.symbol,
