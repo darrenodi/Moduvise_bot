@@ -68,6 +68,7 @@ export interface GeneratedSignal {
     market_price: number;
     regime: MarketRegime;
     target_move: number;
+    confidence: number;  // 0.0 = skip, 0.5-1.0 = trade
     reasoning: string;
 }
 
@@ -127,12 +128,13 @@ function localFallbackSignal(
         }
     }
 
-    // Dynamic target: scale ATR between $50–$80
-    const target_move = 50.00; // Hardcoded flat $50 target
+    // Target: $70 move for 40x leverage on small balance
+    const target_move = 70.00;  // $70 = 0.10% move, sustainable with 40x
+    const confidence = direction === 'neutral' ? 0.0 : 0.4;  // Local fallback = low confidence
 
-    console.log(`[Signal] ⚙️  LOCAL fallback → ${direction.toUpperCase()} | $${target_move.toFixed(2)} target | ${reasoning}`);
+    console.log(`[Signal] ⚙️  LOCAL fallback → ${direction.toUpperCase()} | $${target_move.toFixed(2)} target | conf=${confidence.toFixed(2)} | ${reasoning}`);
 
-    return { symbol, direction, market_price: price, regime, target_move, reasoning };
+    return { symbol, direction, market_price: price, regime, target_move, confidence, reasoning };
 }
 
 // ─── SIGNAL ENGINE ────────────────────────────────────────────────────────────
@@ -152,7 +154,8 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
                     symbol: asset.symbol,
                     direction: 'neutral',
                     market_price: price,
-                    target_move: 50,
+                    target_move: 70,
+                    confidence: 0.0,
                     regime,
                     reasoning: 'Macro breakout in progress — pausing to protect capital',
                 });
@@ -166,9 +169,10 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
                     symbol: asset.symbol,
                     direction: 'neutral',
                     market_price: price,
-                    target_move: 50,
+                    target_move: 70,
+                    confidence: 0.0,
                     regime,
-                    reasoning: 'ATR below minimum for $50 target',
+                    reasoning: 'ATR below minimum for $70 target',
                 });
                 continue;
             }
@@ -188,13 +192,24 @@ REGIME: RANGE SCALP
                 regimeInstructions = `REGIME: TRENDING BEAR — only SHORT on micro-bounces to EMA8`;
             }
 
+            // Session context: London peak (79% WR) vs NY (54% WR) vs Asia (low WR)
+            const hour = new Date().getUTCHours();
+            let sessionNote = '';
+            if (hour >= 13 && hour < 16) sessionNote = 'LONDON/NY OVERLAP (79% WR) — strong momentum expected';
+            else if (hour >= 16 && hour < 21) sessionNote = 'NEW YORK (54% WR—LOW) — require strong confluence only';
+            else if (hour >= 9 && hour < 13) sessionNote = 'LONDON (71% WR) — trend-follow';
+            else if (hour === 8) sessionNote = 'LONDON OPEN (DANGER) — stop hunts, avoid';
+            else if (hour >= 21 || hour < 2) sessionNote = 'POST-NY/PRE-ASIA (LOW) — choppy, avoid breakouts';
+            else sessionNote = 'ASIA (LOW WR) — tight ranges, avoid';
+
             // Keep prompt compact — every token costs quota
-            const prompt = `You are a BTC perp signal engine on Hyperliquid.
+            const prompt = `You are a BTC perp scalper on Hyperliquid (40x leverage, $70 TP target, $140-200 SL).
+SESSION: ${sessionNote}
 DATA: Price=$${price.toFixed(2)} EMA8=$${indicators.ema8.toFixed(2)} EMA21=$${indicators.ema21.toFixed(2)} Mom1m=${indicators.momentum1m.toFixed(4)}% Mom5m=${indicators.momentum5m.toFixed(4)}% ATR=$${indicators.atr1m.toFixed(2)} Support=$${indicators.nearestSupport.toFixed(2)}(dist=$${indicators.distanceToSupport.toFixed(2)}) Resist=$${indicators.nearestResistance.toFixed(2)}(dist=$${indicators.distanceToResistance.toFixed(2)})
 ${regimeInstructions}
-target_move: $50 based on ATR. Never below 50.
+TARGET: $70 move (0.10% at ~$72k BTC). CONFIDENCE: output 0.0 to skip, 0.7-1.0 to trade.
 Reply ONLY valid JSON array, no markdown:
-[{"symbol":"${asset.symbol}","direction":"long","market_price":${price},"target_move":50.00,"reasoning":"brief"}]`;
+[{"symbol":"${asset.symbol}","direction":"long","market_price":${price},"target_move":70.00,"confidence":0.75,"reasoning":"brief"}]`;
 
             // ── MODEL FAILOVER ────────────────────────────────────────────
             let result = null;
@@ -229,6 +244,7 @@ Reply ONLY valid JSON array, no markdown:
                 direction: string;
                 market_price: number;
                 target_move?: number;
+                confidence?: number;
                 reasoning: string;
             }>;
 
@@ -251,17 +267,24 @@ Reply ONLY valid JSON array, no markdown:
                     continue;
                 }
 
-                // Clamp target $50–$80
-                // Strictly enforce $50 TP
-                const dynamicMove = 50.00;
+                // Enforce $70 TP from Gemini (or fallback to $70)
+                const targetMove = 70.00;
+                const conf = typeof sig.confidence === 'number' ? Math.max(0, Math.min(1, sig.confidence)) : 0.5;
 
-                console.log(`[Signal] [${activeModel}] ${dir.toUpperCase()} +$${dynamicMove.toFixed(2)} | ${sig.reasoning}`);
+                // Skip if confidence is 0.0
+                if (conf === 0.0) {
+                    console.log(`[Signal] [${activeModel}] SKIPPED ${dir.toUpperCase()} (confidence=0.0) — ${sig.reasoning}`);
+                    continue;
+                }
+
+                console.log(`[Signal] [${activeModel}] ${dir.toUpperCase()} +$${targetMove.toFixed(2)} | conf=${conf.toFixed(2)} | ${sig.reasoning}`);
 
                 signals.push({
                     symbol: sig.symbol,
                     direction: dir,
                     market_price: sig.market_price,
-                    target_move: dynamicMove,
+                    target_move: targetMove,
+                    confidence: conf,
                     regime,
                     reasoning: sig.reasoning,
                 });
