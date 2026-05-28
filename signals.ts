@@ -128,8 +128,7 @@ function localFallbackSignal(
     }
 
     // Dynamic target: scale ATR between $50–$80
-    const rawTarget = 50 + Math.min(30, indicators.atr1m * 0.2);
-    const target_move = Math.min(80, Math.max(50, rawTarget));
+    const target_move = 50.00; // Hardcoded flat $50 target
 
     console.log(`[Signal] ⚙️  LOCAL fallback → ${direction.toUpperCase()} | $${target_move.toFixed(2)} target | ${reasoning}`);
 
@@ -193,9 +192,9 @@ REGIME: RANGE SCALP
             const prompt = `You are a BTC perp signal engine on Hyperliquid.
 DATA: Price=$${price.toFixed(2)} EMA8=$${indicators.ema8.toFixed(2)} EMA21=$${indicators.ema21.toFixed(2)} Mom1m=${indicators.momentum1m.toFixed(4)}% Mom5m=${indicators.momentum5m.toFixed(4)}% ATR=$${indicators.atr1m.toFixed(2)} Support=$${indicators.nearestSupport.toFixed(2)}(dist=$${indicators.distanceToSupport.toFixed(2)}) Resist=$${indicators.nearestResistance.toFixed(2)}(dist=$${indicators.distanceToResistance.toFixed(2)})
 ${regimeInstructions}
-target_move: $50–$80 based on ATR. Never below 50.
+target_move: $50 based on ATR. Never below 50.
 Reply ONLY valid JSON array, no markdown:
-[{"symbol":"${asset.symbol}","direction":"long","market_price":${price},"target_move":55.00,"reasoning":"brief"}]`;
+[{"symbol":"${asset.symbol}","direction":"long","market_price":${price},"target_move":50.00,"reasoning":"brief"}]`;
 
             // ── MODEL FAILOVER ────────────────────────────────────────────
             let result = null;
@@ -253,9 +252,8 @@ Reply ONLY valid JSON array, no markdown:
                 }
 
                 // Clamp target $50–$80
-                let dynamicMove = Number(sig.target_move) || 50;
-                if (dynamicMove < 50) dynamicMove = 50;
-                if (dynamicMove > 80) dynamicMove = 80;
+                // Strictly enforce $50 TP
+                const dynamicMove = 50.00;
 
                 console.log(`[Signal] [${activeModel}] ${dir.toUpperCase()} +$${dynamicMove.toFixed(2)} | ${sig.reasoning}`);
 
