@@ -266,9 +266,9 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         // SL — market trigger (taker on SL is acceptable — it's emergency protection)
         console.log(`[Execute] Placing SL trigger @ $${slPrice.toFixed(2)} (market, reduceOnly)...`);
         try {
-            const slOrder = await exchange.createOrder(STRATEGY.SYMBOL, 'market', isBuy ? 'sell' : 'buy', contractSize, undefined, {
-    triggerPrice: slPrice,
-    reduceOnly: true
+            const slOrder = await exchange.createOrder(STRATEGY.SYMBOL, 'market', isBuy ? 'sell' : 'buy', contractSize, slPrice, { 
+    triggerPrice: slPrice, 
+    reduceOnly: true 
 });
             slOrderId = getCleanOrderId(slOrder);
             console.log(`[Execute] SL order ID: ${slOrderId}`);
