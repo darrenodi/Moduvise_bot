@@ -220,7 +220,7 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         console.log(`[Execute] Placing SL trigger @ $${slPrice.toFixed(2)}...`);
         try {
             const slOrder = await exchange.createOrder(
-                STRATEGY.SYMBOL, 'market', closeSide, size, undefined,
+                STRATEGY.SYMBOL, 'market', closeSide, size, slPrice, // <--- CHANGED TO slPrice
                 { reduceOnly: true, triggerPrice: slPrice, stopLoss: true }
             );
             console.log(`[Execute] ✅ SL on-chain: ${extractId(slOrder)}`);
