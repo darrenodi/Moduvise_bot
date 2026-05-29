@@ -244,8 +244,8 @@ async function runCycle(): Promise<void> {
             const result = await executeHyperliquidTrade(signal);
 
             if (result.outcome === 'orders_placed') {
-                stats.wins++;
-                stats.pnl += result.netProfit ?? 0;
+                // Trade placed — TP/SL live on Hyperliquid. Not a win yet.
+                // Win/loss determined when position closes (next cycle detects via closedPnl).
             } else if (result.outcome === 'error') {
                 stats.losses++;
             } else if (result.outcome === 'cancelled') {
@@ -256,6 +256,26 @@ async function runCycle(): Promise<void> {
 
         const bal = await getAvailableBalance();
         console.log(`[Main] Balance: $${bal.toFixed(4)} USDC`);
+
+        // ── REAL PnL from last 10 closed trades ───────────────────────────
+        try {
+            const recentTrades = await (exchange as any).fetchMyTrades(MARKET_SYMBOL, undefined, 10);
+            if (recentTrades?.length > 0) {
+                let realPnl = 0, wins = 0, losses = 0;
+                for (const t of recentTrades) {
+                    const pnl = parseFloat(t.info?.closedPnl ?? t.info?.realizedPnl ?? '0');
+                    if (!isNaN(pnl) && pnl !== 0) {
+                        realPnl += pnl;
+                        if (pnl > 0) wins++; else losses++;
+                    }
+                }
+                if (wins + losses > 0) {
+                    const wr = ((wins / (wins + losses)) * 100).toFixed(0);
+                    console.log(`[Main] 📊 Real PnL (last ${wins+losses} closed): $${realPnl.toFixed(4)} | W:${wins} L:${losses} WR:${wr}%`);
+                    stats.wins = wins; stats.losses = losses; stats.pnl = realPnl;
+                }
+            }
+        } catch { /* non-critical */ }
 
     } catch (e: any) {
         console.error(`[Main] Cycle error: ${e.message}`);
