@@ -6,25 +6,27 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
+// Gold trades faster than BTC for small moves. Cycle every 30–60 seconds
+// to hit 100+ trade attempts per day (60×24 = 1440 cycles at 1 min each).
 
 const CONFIG = {
-    CYCLE_MIN_MS:   120_000,   // 2 minutes minimum between cycles
-    CYCLE_MAX_MS:   180_000,   // 3 minutes maximum
+    CYCLE_MIN_MS:   30_000,    // 30 seconds minimum between cycles
+    CYCLE_MAX_MS:   60_000,    // 60 seconds maximum
     MAX_TRADES_DAY: 200,
 } as const;
 
-// ─── EXCHANGE ────────────────────────────────────────────────────────────────
+// ─── EXCHANGE ─────────────────────────────────────────────────────────────────
 
 const exchange = new (ccxt as any).hyperliquid({
-    apiKey:        process.env.HYPERLIQUID_WALLET_ADDRESS ?? '',
-    privateKey:    process.env.HYPERLIQUID_API_SECRET     ?? '',
-    walletAddress: process.env.HYPERLIQUID_WALLET_ADDRESS ?? '',
-    timeout:       15_000,
+    apiKey:          process.env.HYPERLIQUID_WALLET_ADDRESS ?? '',
+    privateKey:      process.env.HYPERLIQUID_API_SECRET     ?? '',
+    walletAddress:   process.env.HYPERLIQUID_WALLET_ADDRESS ?? '',
+    timeout:         15_000,
     enableRateLimit: true,
-    options: { defaultType: 'swap' },
+    options:         { defaultType: 'swap' },
 });
 
-// ─── DAILY STATS ─────────────────────────────────────────────────────────────
+// ─── DAILY STATS ──────────────────────────────────────────────────────────────
 
 const stats = { date: '', trades: 0, wins: 0, losses: 0, cancelled: 0, pnl: 0 };
 
@@ -40,7 +42,7 @@ function checkReset() {
     if (stats.date !== today) Object.assign(stats, { date: today, trades: 0, wins: 0, losses: 0, cancelled: 0, pnl: 0 });
 }
 
-// ─── MATH HELPERS ────────────────────────────────────────────────────────────
+// ─── MATH HELPERS ─────────────────────────────────────────────────────────────
 
 function sma(candles: any[], period: number): number {
     const sl = candles.slice(-period);
@@ -87,10 +89,10 @@ function calcADX(candles: any[], period = 14): number {
     return adxSlice.reduce((a, b) => a + b, 0) / adxSlice.length;
 }
 
-// ─── MARKET DATA ─────────────────────────────────────────────────────────────
+// ─── MARKET DATA ──────────────────────────────────────────────────────────────
 
 async function fetchMarketData(): Promise<MarketData[]> {
-    console.log(`[Data] Fetching...`);
+    console.log(`[Data] Fetching Gold market data...`);
     try {
         const [ticker, ob, c5m, c30m, c1h, c4h, c1w] = await Promise.all([
             exchange.fetchTicker(MARKET_SYMBOL),
@@ -105,7 +107,7 @@ async function fetchMarketData(): Promise<MarketData[]> {
         const price = ticker.last ?? 0;
         if (!price) { console.warn(`[Data] No price`); return []; }
 
-        // ATR on 5m
+        // ── ATR on 5m (Gold scale: typically $0.50–$2) ────────────────────
         let totalTR = 0, volSum = 0;
         const vols: number[] = [];
         for (let i = 1; i < c5m.length; i++) {
@@ -115,12 +117,12 @@ async function fetchMarketData(): Promise<MarketData[]> {
             totalTR += Math.max(hi - lo, Math.abs(hi - pCl), Math.abs(lo - pCl));
             const v = Number(cur[5] ?? 0); volSum += v; vols.push(v);
         }
-        const atr5m   = totalTR / Math.max(c5m.length - 1, 1);
-        const avgVol  = volSum / Math.max(vols.length, 1);
-        const lastVol = vols[vols.length - 1] ?? 0;
+        const atr5m      = totalTR / Math.max(c5m.length - 1, 1);
+        const avgVol     = volSum / Math.max(vols.length, 1);
+        const lastVol    = vols[vols.length - 1] ?? 0;
         const volumeRatio = avgVol > 0 ? lastVol / avgVol : 1;
 
-        // EMA from 1h
+        // ── EMA from 1h ────────────────────────────────────────────────────
         const ema8  = c1h.length >= 8  ? sma(c1h, 8)  : price;
         const ema21 = c1h.length >= 21 ? sma(c1h, 21) : price;
         const ema50 = c1h.length >= 50 ? sma(c1h, 50) : price;
@@ -128,54 +130,59 @@ async function fetchMarketData(): Promise<MarketData[]> {
             ema8 > ema21 && ema21 > ema50 ? 'bullish' :
             ema8 < ema21 && ema21 < ema50 ? 'bearish' : 'neutral';
 
-        // RSI on 1h candles (14 period)
+        // ── RSI on 1h ──────────────────────────────────────────────────────
         const rsi = calcRSI(c1h, 14);
 
-        // Momentum
-        const closeNow  = Number(c5m[c5m.length - 1]?.[4]  ?? price);
-        const close5m   = Number(c5m[Math.max(0, c5m.length - 2)]?.[4]  ?? price);
-        const close30m  = Number(c30m[Math.max(0, c30m.length - 2)]?.[4] ?? price);
-        const close1h   = Number(c1h[Math.max(0, c1h.length - 13)]?.[4]  ?? price);
-        const mom5m  = ((closeNow - close5m)  / close5m)  * 100;
-        const mom30m = ((closeNow - close30m) / close30m) * 100;
-        const mom1h  = ((closeNow - close1h)  / close1h)  * 100;
+        // ── Momentum ───────────────────────────────────────────────────────
+        const closeNow = Number(c5m[c5m.length - 1]?.[4]  ?? price);
+        const close5m  = Number(c5m[Math.max(0, c5m.length - 2)]?.[4]  ?? price);
+        const close30m = Number(c30m[Math.max(0, c30m.length - 2)]?.[4] ?? price);
+        const close1h  = Number(c1h[Math.max(0, c1h.length - 13)]?.[4]  ?? price);
+        const mom5m    = ((closeNow - close5m)  / close5m)  * 100;
+        const mom30m   = ((closeNow - close30m) / close30m) * 100;
+        const mom1h    = ((closeNow - close1h)  / close1h)  * 100;
 
-        // 4h bias
+        // ── 4h bias ────────────────────────────────────────────────────────
         const c4hClose = Number(c4h[c4h.length - 1]?.[4]  ?? price);
         const c4hPrev  = Number(c4h[Math.max(0, c4h.length - 2)]?.[4] ?? price);
         const trendBias4h: 'bull' | 'bear' | 'neutral' =
-            c4hClose > c4hPrev * 1.001 ? 'bull' :
-            c4hClose < c4hPrev * 0.999 ? 'bear' : 'neutral';
+            c4hClose > c4hPrev * 1.0005 ? 'bull' :
+            c4hClose < c4hPrev * 0.9995 ? 'bear' : 'neutral';
 
-        // Weekly bias
+        // ── Weekly bias ────────────────────────────────────────────────────
         const wkClose = Number(c1w[c1w.length - 1]?.[4] ?? price);
         const wkPrev  = Number(c1w[Math.max(0, c1w.length - 2)]?.[4] ?? price);
         const weeklyBias: 'bullish' | 'bearish' | 'neutral' =
             wkClose > wkPrev ? 'bullish' : wkClose < wkPrev ? 'bearish' : 'neutral';
 
-        // Structure
+        // ── Price structure ────────────────────────────────────────────────
         const h24 = ticker.high ?? price, l24 = ticker.low ?? price;
         const mid = (h24 + l24) / 2;
         const priceStructure: 'uptrend' | 'downtrend' | 'ranging' =
-            price > mid * 1.001 ? 'uptrend' :
-            price < mid * 0.999 ? 'downtrend' : 'ranging';
+            price > mid * 1.0005 ? 'uptrend' :
+            price < mid * 0.9995 ? 'downtrend' : 'ranging';
 
-        // ADX
+        // ── ADX ────────────────────────────────────────────────────────────
         const adx = calcADX(c5m, 14);
 
-        // Order book walls
+        // ── Order book walls (Gold notional: >$500 = meaningful wall) ──────
         const wall = (levels: any[]): Array<{ price: number; notionalUsd: number }> =>
             levels
                 .map(l => ({ price: Number(l[0] ?? 0), notionalUsd: Number(l[0] ?? 0) * Number(l[1] ?? 0) }))
-                .filter(w => w.notionalUsd > 5_000)
+                .filter(w => w.notionalUsd > 500)
                 .slice(0, 5);
 
         const bidWalls = wall(ob.bids ?? []);
         const askWalls = wall(ob.asks ?? []);
-        const nearestSupport     = bidWalls[0]?.price ?? price - 200;
-        const nearestResistance  = askWalls[0]?.price ?? price + 200;
 
-        // Funding rate
+        const bestBid = Number(ob.bids[0]?.[0] ?? price);
+        const bestAsk = Number(ob.asks[0]?.[0] ?? price);
+        const spreadUsd = bestAsk - bestBid;
+
+        const nearestSupport    = bidWalls[0]?.price ?? price - 2;
+        const nearestResistance = askWalls[0]?.price ?? price + 2;
+
+        // ── Funding rate ───────────────────────────────────────────────────
         let fundingRate: number | null = null;
         try {
             const fr = await exchange.fetchFundingRate(MARKET_SYMBOL);
@@ -202,14 +209,21 @@ async function fetchMarketData(): Promise<MarketData[]> {
             low24h:  l24,
             adx,
             fundingRate,
+            spreadUsd,
         };
 
-        console.log(`[Data] BTC $${price.toFixed(2)} | EMA:${emaTrend} | RSI:${rsi.toFixed(1)} | ADX:${adx.toFixed(1)}`);
+        console.log(`[Data] GOLD $${price.toFixed(2)} | EMA:${emaTrend} | RSI:${rsi.toFixed(1)} | ADX:${adx.toFixed(1)} | Spread:$${spreadUsd.toFixed(2)}`);
         console.log(`[Data] Mom 5m:${mom5m.toFixed(4)}% 30m:${mom30m.toFixed(4)}% 1h:${mom1h.toFixed(4)}%`);
         console.log(`[Data] Vol:${volumeRatio.toFixed(2)}x | ATR:$${atr5m.toFixed(2)} | 4h:${trendBias4h} | Weekly:${weeklyBias}`);
-        console.log(`[Data] Sup:$${nearestSupport.toFixed(2)}(${(price-nearestSupport).toFixed(0)} away) Res:$${nearestResistance.toFixed(2)}(${(nearestResistance-price).toFixed(0)} away)`);
+        console.log(`[Data] Sup:$${nearestSupport.toFixed(2)} Res:$${nearestResistance.toFixed(2)}`);
 
-        return [{ symbol: DISPLAY_SYMBOL, price, change_24h: ticker.percentage ?? 0, indicators, orderBook: { bidWalls, askWalls } }];
+        return [{
+            symbol: DISPLAY_SYMBOL,
+            price,
+            change_24h: ticker.percentage ?? 0,
+            indicators,
+            orderBook: { bidWalls, askWalls }
+        }];
 
     } catch (e: any) {
         console.error(`[Data] Error: ${e.message}`);
@@ -226,12 +240,15 @@ async function runCycle(): Promise<void> {
     console.log(`[Main] ${new Date().toISOString()} | Trades:${stats.trades}/${CONFIG.MAX_TRADES_DAY} | W:${stats.wins} L:${stats.losses} | PnL:$${stats.pnl.toFixed(4)}`);
     console.log(`${'═'.repeat(65)}`);
 
-    if (stats.trades >= CONFIG.MAX_TRADES_DAY) { console.log(`[Main] Daily limit. Resting.`); return; }
+    if (stats.trades >= CONFIG.MAX_TRADES_DAY) {
+        console.log(`[Main] Daily trade limit reached. Resting until midnight.`);
+        return;
+    }
 
     try {
-        // QUICK CHECK: Are we already in a trade? Skip Gemini completely to save quotas!
+        // Skip Gemini call if position already open — save quota
         if (await hasOpenPosition()) {
-            console.log(`[Main] 🛑 Position is currently open. Sleeping to save API quota.`);
+            console.log(`[Main] 🛑 Gold position is open. Sleeping to save API quota.`);
             return;
         }
 
@@ -242,7 +259,7 @@ async function runCycle(): Promise<void> {
 
         for (const signal of signals) {
             if (signal.direction === 'neutral') {
-                console.log(`[Main] ⏸️ Neutral — no trade.`);
+                console.log(`[Main] ⏸️ Neutral signal — skipping.`);
                 continue;
             }
 
@@ -250,12 +267,14 @@ async function runCycle(): Promise<void> {
             const result = await executeHyperliquidTrade(signal);
 
             if (result.outcome === 'orders_placed') {
-                // Trade placed — TP/SL live on Hyperliquid. Not a win yet.
-                // Win/loss determined when position closes (next cycle detects via closedPnl).
+                console.log(`[Main] ✅ Trade placed. TP=$${result.tpPrice?.toFixed(2)} SL=$${result.slPrice?.toFixed(2)} (${result.slType})`);
             } else if (result.outcome === 'error') {
                 stats.losses++;
+                stats.trades--;
             } else if (result.outcome === 'cancelled') {
                 stats.cancelled++;
+                stats.trades--;
+            } else if (result.outcome === 'skipped') {
                 stats.trades--;
             }
         }
@@ -263,7 +282,7 @@ async function runCycle(): Promise<void> {
         const bal = await getAvailableBalance();
         console.log(`[Main] Balance: $${bal.toFixed(4)} USDC`);
 
-        // ── REAL PnL from last 10 closed trades ───────────────────────────
+        // ── Real PnL from last 10 closed trades ───────────────────────────
         try {
             const recentTrades = await (exchange as any).fetchMyTrades(MARKET_SYMBOL, undefined, 10);
             if (recentTrades?.length > 0) {
@@ -277,7 +296,7 @@ async function runCycle(): Promise<void> {
                 }
                 if (wins + losses > 0) {
                     const wr = ((wins / (wins + losses)) * 100).toFixed(0);
-                    console.log(`[Main] 📊 Real PnL (last ${wins+losses} closed): $${realPnl.toFixed(4)} | W:${wins} L:${losses} WR:${wr}%`);
+                    console.log(`[Main] 📊 Real PnL (last ${wins + losses} closed): $${realPnl.toFixed(4)} | W:${wins} L:${losses} WR:${wr}%`);
                     stats.wins = wins; stats.losses = losses; stats.pnl = realPnl;
                 }
             }
@@ -292,7 +311,7 @@ async function runCycle(): Promise<void> {
 
 function scheduleNext(): void {
     const ms = Math.floor(Math.random() * (CONFIG.CYCLE_MAX_MS - CONFIG.CYCLE_MIN_MS) + CONFIG.CYCLE_MIN_MS);
-    console.log(`[Main] Next cycle in ${(ms / 1000 / 60).toFixed(1)} min`);
+    console.log(`[Main] Next cycle in ${(ms / 1000).toFixed(0)}s`);
     setTimeout(async () => { await runCycle(); scheduleNext(); }, ms);
 }
 
@@ -304,13 +323,14 @@ if (!process.env.HYPERLIQUID_WALLET_ADDRESS || !process.env.HYPERLIQUID_API_SECR
 }
 
 console.log(`\n${'█'.repeat(65)}`);
-console.log(`  MODUVISE — HYPERLIQUID BTC PERP BOT`);
-console.log(`  Leverage: 40x | TP: $100 | SL: $100 (1:1)`);
-console.log(`  Entry: Taker Market (Guaranteed Fills)`);
-console.log(`  Exit: Maker Limit TP / Taker Stop-Limit SL`);
-console.log(`  Signals: 24/7 — only pause on ATR>$200 + vol>3x`);
+console.log(`  MODUVISE — HYPERLIQUID GOLD (XAU) PERP BOT`);
+console.log(`  Leverage: 25x | TP: $2.00 | SL: Scaled by margin`);
+console.log(`  SL Tiers: <$20 bal → loose (2%) | $20-$200 → mid (1%) | >$200 → tight (0.5%)`);
+console.log(`  Entry: Post-Only Maker Limit (0.0144% fee) w/ fill chasing`);
+console.log(`  Exit:  Maker Limit TP / Stop-Limit SL`);
+console.log(`  Volatility guard: pause if ATR>$8 AND volume>3x`);
 console.log(`  Gemini: multi-key failover → local math fallback`);
-console.log(`  Cycle: 2-3 min | ~100-150 attempts/day`);
+console.log(`  Cycle: 30–60 sec | 100–200 attempts/day`);
 console.log(`${'█'.repeat(65)}\n`);
 
 runCycle().then(scheduleNext);

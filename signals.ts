@@ -4,24 +4,20 @@ dotenv.config();
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
-export const MARKET_SYMBOL  = 'BTC/USDC:USDC';
-export const DISPLAY_SYMBOL = 'BTC/USDC';
-export const TARGET_MOVE    = 100; // $100 TP and SL
+export const MARKET_SYMBOL  = 'GOLD/USDC:USDC';   // Hyperliquid Gold perp ticker
+export const DISPLAY_SYMBOL = 'XAU/USDC';
+export const TARGET_MOVE    = 2.00;                // $2.00 TP move (Gold tick scale)
 
 // ─── MODEL FAILOVER ───────────────────────────────────────────────────────────
 // Two API keys × multiple models. Burns highest-quota first.
 
 const MODEL_TIERS: Array<{ key: string; model: string }> = [
-    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3.1-flash-lite' },
-    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3.5-flash'      },
-    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.5-flash'      },
     { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.5-flash-lite' },
-    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3-flash'        },
-    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3.1-flash-lite' },
-    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3.5-flash'      },
-    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.5-flash'      },
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.5-flash'      },
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.0-flash'      },
     { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.5-flash-lite' },
-    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3-flash'        },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.5-flash'      },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.0-flash'      },
 ];
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
@@ -40,7 +36,7 @@ export interface TechnicalIndicators {
     priceStructure:       'uptrend' | 'downtrend' | 'ranging';
     trendBias4h:          'bull' | 'bear' | 'neutral';
     weeklyBias:           'bullish' | 'bearish' | 'neutral';
-    atr5m:                number;
+    atr5m:                number;   // In Gold $ terms
     atrPct:               number;
     volumeRatio:          number;
     nearestResistance:    number;
@@ -51,6 +47,7 @@ export interface TechnicalIndicators {
     low24h:               number;
     adx:                  number;
     fundingRate:          number | null;
+    spreadUsd:            number;   // Live BBO spread in $
 }
 
 export interface MarketData {
@@ -73,18 +70,18 @@ export interface GeneratedSignal {
     reasoning:    string;
 }
 
-// ─── ONLY HARD STOP: EXTREME VOLATILITY ───────────────────────────────────────
-// We pause ONLY when ATR spikes above $200 on 5m AND volume > 3x normal.
-// This catches flash crashes and major news events.
-// Everything else — Asia hours, ranging, low momentum — we TRADE.
+// ─── GOLD VOLATILITY GUARD ────────────────────────────────────────────────────
+// Pause ONLY during flash spikes: ATR > $8 on 5m AND volume > 3x normal.
+// Gold ATR on 5m is typically $0.50–$2.00. >$8 = news/macro event.
+// This protects capital during FOMC, CPI, NFP, geopolitical shocks.
 
 function isExtremeVolatility(ind: TechnicalIndicators): boolean {
-    return ind.atr5m > 200 && ind.volumeRatio > 3.0;
+    return ind.atr5m > 8.0 && ind.volumeRatio > 3.0;
 }
 
 // ─── LOCAL DIRECTION ENGINE ───────────────────────────────────────────────────
-// Used when Gemini is unavailable OR as a pre-signal to confirm direction.
-// Pure math — no AI needed. BTC always has a micro-direction.
+// Pure math fallback when Gemini is unavailable.
+// Gold always has a micro-direction for $2 moves.
 
 export function computeLocalDirection(ind: TechnicalIndicators, price: number): {
     direction: SignalDirection;
@@ -94,30 +91,34 @@ export function computeLocalDirection(ind: TechnicalIndicators, price: number): 
     let bull = 0, bear = 0;
     const reasons: string[] = [];
 
-    // 1. EMA trend
-    if (ind.emaTrend === 'bullish') { bull += 2; reasons.push('EMA bullish'); }
-    else if (ind.emaTrend === 'bearish') { bear += 2; reasons.push('EMA bearish'); }
+    // 1. EMA trend (1h)
+    if (ind.emaTrend === 'bullish') { bull += 2; reasons.push('EMA bullish stack'); }
+    else if (ind.emaTrend === 'bearish') { bear += 2; reasons.push('EMA bearish stack'); }
 
     // 2. RSI zones
     if (ind.rsi < 40) { bull += 2; reasons.push(`RSI ${ind.rsi.toFixed(0)} oversold`); }
     else if (ind.rsi > 60) { bear += 2; reasons.push(`RSI ${ind.rsi.toFixed(0)} overbought`); }
 
-    // 3. 30m momentum (most reliable for $70 moves)
-    if (ind.momentum30m > 0.05)  { bull += 2; reasons.push(`30m mom +${ind.momentum30m.toFixed(3)}%`); }
-    if (ind.momentum30m < -0.05) { bear += 2; reasons.push(`30m mom ${ind.momentum30m.toFixed(3)}%`); }
+    // 3. 30m momentum (core signal for $2 Gold moves)
+    if (ind.momentum30m > 0.02)  { bull += 2; reasons.push(`30m mom +${ind.momentum30m.toFixed(3)}%`); }
+    if (ind.momentum30m < -0.02) { bear += 2; reasons.push(`30m mom ${ind.momentum30m.toFixed(3)}%`); }
 
     // 4. 1h momentum
-    if (ind.momentum1h > 0.10)  { bull += 1; reasons.push(`1h mom +${ind.momentum1h.toFixed(3)}%`); }
-    if (ind.momentum1h < -0.10) { bear += 1; reasons.push(`1h mom ${ind.momentum1h.toFixed(3)}%`); }
+    if (ind.momentum1h > 0.05)  { bull += 1; reasons.push(`1h mom +${ind.momentum1h.toFixed(3)}%`); }
+    if (ind.momentum1h < -0.05) { bear += 1; reasons.push(`1h mom ${ind.momentum1h.toFixed(3)}%`); }
 
-    // 5. Price closer to support → long, closer to resistance → short
+    // 5. Support / resistance proximity
     if (ind.distanceToSupport < ind.distanceToResistance * 0.5) {
-        bull += 1; reasons.push(`near support $${ind.nearestSupport.toFixed(0)}`);
+        bull += 1; reasons.push(`near support $${ind.nearestSupport.toFixed(2)}`);
     } else if (ind.distanceToResistance < ind.distanceToSupport * 0.5) {
-        bear += 1; reasons.push(`near resistance $${ind.nearestResistance.toFixed(0)}`);
+        bear += 1; reasons.push(`near resistance $${ind.nearestResistance.toFixed(2)}`);
     }
 
-    // 6. 5m momentum as tiebreaker
+    // 6. 4h bias
+    if (ind.trendBias4h === 'bull') { bull += 1; reasons.push('4h bull'); }
+    else if (ind.trendBias4h === 'bear') { bear += 1; reasons.push('4h bear'); }
+
+    // 7. 5m tiebreaker
     if (bull === bear) {
         if (ind.momentum5m > 0) { bull += 1; reasons.push('5m positive tiebreak'); }
         else { bear += 1; reasons.push('5m negative tiebreak'); }
@@ -184,53 +185,54 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
     for (const asset of assets) {
         const { indicators: ind, price, symbol } = asset;
 
-        // ── ONLY HARD STOP: extreme volatility ────────────────────────────
+        // ── HARD STOP: extreme volatility (news/macro spike) ──────────────
         if (isExtremeVolatility(ind)) {
-            console.log(`[Signal] 🔴 EXTREME VOLATILITY — ATR $${ind.atr5m.toFixed(0)} vol ${ind.volumeRatio.toFixed(1)}x. Pausing.`);
-            signals.push({ symbol, direction: 'neutral', market_price: price, target_move: TARGET_MOVE, confidence: 0, reasoning: 'Extreme volatility pause' });
+            console.log(`[Signal] 🔴 EXTREME VOLATILITY — ATR $${ind.atr5m.toFixed(2)} vol ${ind.volumeRatio.toFixed(1)}x. Pausing.`);
+            signals.push({
+                symbol, direction: 'neutral', market_price: price,
+                target_move: TARGET_MOVE, confidence: 0,
+                reasoning: 'Extreme volatility pause — ATR spike + vol surge'
+            });
             continue;
         }
 
-        // ── LOCAL DIRECTION (always computed) ─────────────────────────────
+        // ── LOCAL DIRECTION (always computed as baseline) ──────────────────
         const local = computeLocalDirection(ind, price);
         console.log(`[Signal] Local: ${local.direction.toUpperCase()} score=${local.score} | ${local.reasoning}`);
 
-        // ── BUILD COMPACT GEMINI PROMPT ────────────────────────────────────
-        const prompt = `You are a BTC perp scalper on Hyperliquid. 40x leverage. TP=$70, SL=$70 (1:1).
-Target: 100-200 trades/day. Trade 24/7. Only pause during flash crashes (ATR>$200 + vol>3x).
+        // ── BUILD COMPACT GEMINI PROMPT (Gold-specific) ────────────────────
+        const prompt = `You are an XAU/USDC (Gold) perp scalper on Hyperliquid. 25x leverage. TP=$2.00, dynamic SL.
+Target: 100+ trades/day. Trade 24/7 except during macro spikes (ATR>$8 + vol>3x).
+Gold moves $2 every few minutes in normal conditions. ALWAYS have a direction.
 
-LIVE BTC/USDC DATA:
+LIVE XAU/USDC DATA:
 Price: $${price.toFixed(2)}
 EMA trend: ${ind.emaTrend} | RSI: ${ind.rsi.toFixed(1)}
 Mom 5m: ${ind.momentum5m.toFixed(4)}% | 30m: ${ind.momentum30m.toFixed(4)}% | 1h: ${ind.momentum1h.toFixed(4)}%
 ATR(5m): $${ind.atr5m.toFixed(2)} | ADX: ${ind.adx.toFixed(1)} | Structure: ${ind.priceStructure}
-Support: $${ind.nearestSupport.toFixed(2)} (${ind.distanceToSupport.toFixed(0)} away)
-Resistance: $${ind.nearestResistance.toFixed(2)} (${ind.distanceToResistance.toFixed(0)} away)
-4h bias: ${ind.trendBias4h} | Weekly: ${ind.weeklyBias}
+Spread: $${ind.spreadUsd.toFixed(2)} | 4h bias: ${ind.trendBias4h} | Weekly: ${ind.weeklyBias}
+Support: $${ind.nearestSupport.toFixed(2)} (${ind.distanceToSupport.toFixed(1)} away)
+Resistance: $${ind.nearestResistance.toFixed(2)} (${ind.distanceToResistance.toFixed(1)} away)
 Local engine says: ${local.direction.toUpperCase()} (score ${local.score}/9)
 
 RULES:
-- BTC always has a micro-direction. NEVER skip because market is "ranging".
-- A $70 move happens every 5-15 minutes in normal BTC conditions.
+- Gold always has micro-direction. NEVER return neutral.
+- A $2 move happens every 5-20 min in normal Gold conditions.
 - Confirm local direction OR override with strong counter-evidence only.
-- RSI>75 = prefer short. RSI<25 = prefer long. Otherwise follow momentum.
-- Reply with JSON array ONLY. No markdown. No text.
+- RSI>70 = prefer short. RSI<30 = prefer long. Otherwise follow momentum.
+- If spread > $1.50, lower confidence slightly (fill harder).
+- Reply with JSON array ONLY. No markdown. No text outside JSON.
 
-[{"symbol":"BTC/USDC:USDC","direction":"long","market_price":${price.toFixed(2)},"target_move":70,"confidence":0.72,"reasoning":"one sentence max 100 chars"}]`;
+[{"symbol":"GOLD/USDC:USDC","direction":"long","market_price":${price.toFixed(2)},"target_move":2.00,"confidence":0.72,"reasoning":"one sentence max 100 chars"}]`;
 
-        // ── CALL GEMINI (or fall back to local) ───────────────────────────
+        // ── CALL GEMINI ────────────────────────────────────────────────────
         const geminiResult = await callGemini(prompt);
 
         if (!geminiResult) {
-            // All Gemini options exhausted — use local math directly
             console.log(`[Signal] ⚙️ Gemini unavailable — using local: ${local.direction.toUpperCase()}`);
             signals.push({
-                symbol,
-                direction: local.direction,
-                market_price: price,
-                target_move: TARGET_MOVE,
-                confidence: 0.50,
-                reasoning: local.reasoning,
+                symbol, direction: local.direction, market_price: price,
+                target_move: TARGET_MOVE, confidence: 0.50, reasoning: local.reasoning,
             });
             continue;
         }
@@ -241,25 +243,19 @@ RULES:
         if (!parsed || parsed.length === 0) {
             console.warn(`[Signal] (${geminiResult.model}) Bad JSON — using local: ${local.direction.toUpperCase()}`);
             signals.push({
-                symbol,
-                direction: local.direction,
-                market_price: price,
-                target_move: TARGET_MOVE,
-                confidence: 0.50,
-                reasoning: local.reasoning,
+                symbol, direction: local.direction, market_price: price,
+                target_move: TARGET_MOVE, confidence: 0.50, reasoning: local.reasoning,
             });
             continue;
         }
 
         for (const item of parsed) {
-            // Normalise direction
             let dir = String(item.direction ?? '').toLowerCase().trim();
             if (dir === 'buy')  dir = 'long';
             if (dir === 'sell') dir = 'short';
             if (!['long', 'short', 'neutral'].includes(dir)) dir = local.direction;
 
-            // If Gemini says neutral, use local direction instead
-            // We never skip trades due to neutrality — local always has a direction
+            // Never skip — always trade
             if (dir === 'neutral') {
                 console.log(`[Signal] (${geminiResult.model}) Said neutral — overriding with local: ${local.direction.toUpperCase()}`);
                 dir = local.direction;
