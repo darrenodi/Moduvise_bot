@@ -155,12 +155,13 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         }
 
         // ── 5. MARKET ENTRY (Taker) ───────────────────────────────────────
+        // ── 5. MARKET ENTRY (Taker) ───────────────────────────────────────
         console.log(`[Execute] Firing MARKET ${side.toUpperCase()} order to guarantee entry...`);
         let entryOrder: any;
         try {
-            // Notice: 'market' order, no price parameter, no 'Alo' timeInForce
+            // Added 'entry' as the 5th parameter so CCXT can calculate slippage
             entryOrder = await exchange.createOrder(
-                STRATEGY.SYMBOL, 'market', side, size
+                STRATEGY.SYMBOL, 'market', side, size, entry
             );
             console.log(`[Execute] ✅ Market entry filled: ${extractId(entryOrder)}`);
         } catch (e: any) {
