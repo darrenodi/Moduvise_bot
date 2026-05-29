@@ -6,7 +6,7 @@ dotenv.config();
 
 export const MARKET_SYMBOL  = 'BTC/USDC:USDC';
 export const DISPLAY_SYMBOL = 'BTC/USDC';
-export const TARGET_MOVE    = 70; // $70 TP and SL
+export const TARGET_MOVE    = 100; // $100 TP and SL
 
 // ─── MODEL FAILOVER ───────────────────────────────────────────────────────────
 // Two API keys × multiple models. Burns highest-quota first.

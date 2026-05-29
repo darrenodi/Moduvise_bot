@@ -154,62 +154,48 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
             }
         }
 
-        // ── 5. POSTONLY LIMIT ENTRY ───────────────────────────────────────
-        // PostOnly = ALO = guaranteed maker fee 0.0144%
-        // If the order would immediately match (taker), exchange rejects it.
-        // We cancel and recycle — this protects maker status.
-        console.log(`[Execute] PostOnly limit entry @ $${entry.toFixed(2)}...`);
+        // ── 5. MARKET ENTRY (Taker) ───────────────────────────────────────
+        console.log(`[Execute] Firing MARKET ${side.toUpperCase()} order to guarantee entry...`);
         let entryOrder: any;
         try {
+            // Notice: 'market' order, no price parameter, no 'Alo' timeInForce
             entryOrder = await exchange.createOrder(
-                STRATEGY.SYMBOL, 'limit', side, size, entry,
-                { timeInForce: 'Alo' } // HL native PostOnly parameter
+                STRATEGY.SYMBOL, 'market', side, size
             );
+            console.log(`[Execute] ✅ Market entry filled: ${extractId(entryOrder)}`);
         } catch (e: any) {
-            // ACTUALLY PRINT THE REAL ERROR
-            console.log(`[Execute] Order rejected: ${e.message}`);
-            return { success: false, outcome: 'cancelled', message: 'Order rejected' };
+            console.log(`[Execute] Market entry failed: ${e.message}`);
+            return { success: false, outcome: 'error', message: 'Market entry failed' };
         }
 
-        const entryId = extractId(entryOrder);
-        console.log(`[Execute] Entry order: ${entryId}`);
-
-        // ── 6. FILL POLL (max 5s) ─────────────────────────────────────────
-        // ── 6. FILL POLL (max 30s) ─────────────────────────────────────────
-        console.log(`[Execute] Waiting for maker fill (up to ${STRATEGY.FILL_MAX_TRIES}s)...`);
+        // ── 6. FETCH ACTUAL ENTRY PRICE ───────────────────────────────────
+        console.log(`[Execute] Fetching actual fill price...`);
+        // Give Hyperliquid 1.5 seconds to sync the trade to your position database
+        await new Promise(r => setTimeout(r, 1500)); 
         
-        let filled = false;
-        for (let i = 1; i <= STRATEGY.FILL_MAX_TRIES; i++) {
-            await new Promise<void>(r => setTimeout(r, STRATEGY.FILL_INTERVAL_MS));
-            
-            if (await hasOpenPosition()) { 
-                filled = true; 
-                console.log(`[Execute] ✅ Filled in ${i}s!`); 
-                break; 
-            }
-            
-            // Only log every 10 seconds to prevent console spam
-            if (i % 10 === 0) {
-                console.log(`[Execute] Still waiting... ${i}/${STRATEGY.FILL_MAX_TRIES}s`);
-            }
+        const positions = await exchange.fetchPositions([STRATEGY.SYMBOL]);
+        const activePos = positions.find((p: any) => Math.abs(Number(p.contracts ?? p.info?.szi ?? 0)) > 0);
+        
+        if (!activePos) {
+            console.error(`[Execute] ❌ Position not found after market order!`);
+            return { success: false, outcome: 'error', message: 'Position not found after market order' };
         }
 
-        // ── 7. CANCEL IF UNFILLED ─────────────────────────────────────────
-        if (!filled) {
-            console.log(`[Execute] ⏱️ Not filled in 5s. Cancelling and recycling.`);
-            try { await exchange.cancelOrder(entryId, STRATEGY.SYMBOL); }
-            catch { try { await exchange.cancelAllOrders(STRATEGY.SYMBOL); } catch { /* ignore */ } }
-            return { success: false, outcome: 'cancelled', message: 'Not filled within 5s' };
-        }
+        const actualEntryPrice = Number(activePos.entryPrice);
+        console.log(`[Execute] Actual Fill Price: $${actualEntryPrice.toFixed(2)}`);
 
-        // ── 8. ON-CHAIN TP — reduceOnly limit ────────────────────────────
-        // No while-loop. TP lives on Hyperliquid's order book permanently.
-        // Next cycle detects open position and skips re-entry automatically.
-        console.log(`[Execute] Placing TP limit @ $${tpPrice.toFixed(2)}...`);
+        // Recalculate exact TP/SL based on the real price we just paid
+        const actualTpPrice = parseFloat((isBuy ? actualEntryPrice + STRATEGY.TP_MOVE : actualEntryPrice - STRATEGY.TP_MOVE).toFixed(2));
+        const actualSlPrice = parseFloat((isBuy ? actualEntryPrice - STRATEGY.SL_MOVE : actualEntryPrice + STRATEGY.SL_MOVE).toFixed(2));
+
+        // ── 7. (DELETED: No more 30-second waiting loop) ──────────────────
+
+        // ── 8. ON-CHAIN TP — reduceOnly limit (MAKER EXIT) ───────────────
+        console.log(`[Execute] Placing TP limit @ $${actualTpPrice.toFixed(2)}...`);
         try {
             const tpOrder = await exchange.createOrder(
-                STRATEGY.SYMBOL, 'limit', closeSide, size, tpPrice,
-                { timeInForce: 'Alo', reduceOnly: true }  // PostOnly = maker fee 0.0144%
+                STRATEGY.SYMBOL, 'limit', closeSide, size, actualTpPrice,
+                { timeInForce: 'Alo', reduceOnly: true }  // Alo guarantees Maker fee 0.0144% on exit
             );
             console.log(`[Execute] ✅ TP on-chain: ${extractId(tpOrder)}`);
         } catch (e: any) {
@@ -217,11 +203,12 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         }
 
         // ── 9. ON-CHAIN SL — reduceOnly market trigger ────────────────────
-        console.log(`[Execute] Placing SL trigger @ $${slPrice.toFixed(2)}...`);
+        console.log(`[Execute] Placing SL trigger @ $${actualSlPrice.toFixed(2)}...`);
         try {
+            // Note the 5th parameter is actualSlPrice (fixes your previous error!)
             const slOrder = await exchange.createOrder(
-                STRATEGY.SYMBOL, 'market', closeSide, size, undefined,
-                { triggerPrice: slPrice, reduceOnly: true }
+                STRATEGY.SYMBOL, 'market', closeSide, size, actualSlPrice,
+                { triggerPrice: actualSlPrice, reduceOnly: true, stopLoss: true }
             );
             console.log(`[Execute] ✅ SL on-chain: ${extractId(slOrder)}`);
         } catch (e: any) {
