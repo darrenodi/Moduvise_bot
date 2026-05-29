@@ -76,8 +76,12 @@ function extractId(order: any): string {
 }
 
 function calcSize(balance: number, price: number): number {
-    const pos = balance * STRATEGY.LEVERAGE;
-    return Math.max(0.001, parseFloat((pos / price).toFixed(4)));
+    const usableBalance = balance * 0.95; // Leave 5% buffer for margin and fees
+    const pos = usableBalance * STRATEGY.LEVERAGE;
+    const rawSize = pos / price;
+    // Floor to 4 decimals instead of rounding up
+    const flooredSize = Math.floor(rawSize * 10000) / 10000;
+    return Math.max(0.001, flooredSize);
 }
 
 // ─── MAIN EXECUTION ───────────────────────────────────────────────────────────
@@ -118,11 +122,7 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         //   LONG:  bid slightly BELOW mid — we sit in the bid queue waiting for a fill
         //   SHORT: ask slightly ABOVE mid — we sit in the ask queue waiting for a fill
         // This guarantees maker status. Trade fills when price touches our level.
-        // Change the offset from a static 3.00 to a dynamic one based on current volatility
-// If volatility (ATR) is low, use a smaller offset.
-        const dynamicOffset = Math.max(0.50, Math.min(1.50, signal.market_price * 0.00001)); 
-
-        const MAKER_OFFSET = dynamicOffset;
+        const MAKER_OFFSET = 2.00; // $1 inside from mid — adjustable
         const rawPrice = signal.market_price;
         const entry = parseFloat(
             (isBuy
@@ -159,12 +159,12 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         try {
             entryOrder = await exchange.createOrder(
                 STRATEGY.SYMBOL, 'limit', side, size, entry,
-                { timeInForce: 'PostOnly' }
+                { timeInForce: 'Alo' } // HL native PostOnly parameter
             );
         } catch (e: any) {
-            // PostOnly rejected = price moved, order would have been taker
-            console.log(`[Execute] PostOnly rejected (price moved) — recycling.`);
-            return { success: false, outcome: 'cancelled', message: 'PostOnly rejected — not maker' };
+            // ACTUALLY PRINT THE REAL ERROR
+            console.log(`[Execute] Order rejected: ${e.message}`);
+            return { success: false, outcome: 'cancelled', message: 'Order rejected' };
         }
 
         const entryId = extractId(entryOrder);
