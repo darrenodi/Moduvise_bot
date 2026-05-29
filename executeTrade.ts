@@ -112,7 +112,20 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         }
 
         // ── 3. PARAMS ─────────────────────────────────────────────────────
-        const entry       = signal.market_price;
+        // ── MAKER OFFSET ──────────────────────────────────────────────
+        // PostOnly requires the order to REST in the book, not cross the spread.
+        // Hyperliquid BTC spread is $0.50-$1. We offset by $1.00 inside the book:
+        //   LONG:  bid slightly BELOW mid — we sit in the bid queue waiting for a fill
+        //   SHORT: ask slightly ABOVE mid — we sit in the ask queue waiting for a fill
+        // This guarantees maker status. Trade fills when price touches our level.
+        const MAKER_OFFSET = 1.00; // $1 inside from mid — adjustable
+        const rawPrice = signal.market_price;
+        const entry = parseFloat(
+            (isBuy
+                ? rawPrice - MAKER_OFFSET   // Long: place below current price
+                : rawPrice + MAKER_OFFSET   // Short: place above current price
+            ).toFixed(2)
+        );
         const tpPrice     = parseFloat((isBuy ? entry + STRATEGY.TP_MOVE : entry - STRATEGY.TP_MOVE).toFixed(2));
         const slPrice     = parseFloat((isBuy ? entry - STRATEGY.SL_MOVE : entry + STRATEGY.SL_MOVE).toFixed(2));
         const size        = calcSize(balance, entry);
