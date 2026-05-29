@@ -4,7 +4,7 @@ dotenv.config();
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
-export const MARKET_SYMBOL  = 'GOLD/USDC:USDC';   // Hyperliquid Gold perp ticker
+export const MARKET_SYMBOL  = 'XYZ:GOLD/USDC:USDC';   // Hyperliquid Gold perp ticker
 export const DISPLAY_SYMBOL = 'XAU/USDC';
 export const TARGET_MOVE    = 2.00;                // $2.00 TP move (Gold tick scale)
 
@@ -12,12 +12,16 @@ export const TARGET_MOVE    = 2.00;                // $2.00 TP move (Gold tick s
 // Two API keys × multiple models. Burns highest-quota first.
 
 const MODEL_TIERS: Array<{ key: string; model: string }> = [
-    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.5-flash-lite' },
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3.1-flash-lite' },
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3.5-flash'      },
     { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.5-flash'      },
-    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.0-flash'      },
-    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.5-flash-lite' },
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.5-flash-lite' },
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3-flash'        },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3.1-flash-lite' },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3.5-flash'      },
     { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.5-flash'      },
-    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.0-flash'      },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.5-flash-lite' },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3-flash'        },
 ];
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
