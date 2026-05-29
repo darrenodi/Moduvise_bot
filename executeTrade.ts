@@ -14,7 +14,7 @@ const STRATEGY = {
     MAKER_FEE:        0.000144,        // Hyperliquid actual maker 0.0144%
     MIN_BALANCE:      2,               // Min $2 USDC
     FILL_INTERVAL_MS: 1_000,          // Poll fill every 1s
-    FILL_MAX_TRIES:   30,               // Cancel after 5s if unfilled
+    FILL_MAX_TRIES:   90,               // Cancel after 5s if unfilled
 } as const;
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
@@ -175,11 +175,23 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         console.log(`[Execute] Entry order: ${entryId}`);
 
         // ── 6. FILL POLL (max 5s) ─────────────────────────────────────────
+        // ── 6. FILL POLL (max 30s) ─────────────────────────────────────────
+        console.log(`[Execute] Waiting for maker fill (up to ${STRATEGY.FILL_MAX_TRIES}s)...`);
+        
         let filled = false;
         for (let i = 1; i <= STRATEGY.FILL_MAX_TRIES; i++) {
             await new Promise<void>(r => setTimeout(r, STRATEGY.FILL_INTERVAL_MS));
-            if (await hasOpenPosition()) { filled = true; console.log(`[Execute] ✅ Filled (${i}s)`); break; }
-            console.log(`[Execute] Waiting fill ${i}/${STRATEGY.FILL_MAX_TRIES}...`);
+            
+            if (await hasOpenPosition()) { 
+                filled = true; 
+                console.log(`[Execute] ✅ Filled in ${i}s!`); 
+                break; 
+            }
+            
+            // Only log every 10 seconds to prevent console spam
+            if (i % 10 === 0) {
+                console.log(`[Execute] Still waiting... ${i}/${STRATEGY.FILL_MAX_TRIES}s`);
+            }
         }
 
         // ── 7. CANCEL IF UNFILLED ─────────────────────────────────────────
