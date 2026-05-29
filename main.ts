@@ -220,16 +220,6 @@ async function fetchMarketData(): Promise<MarketData[]> {
 // ─── CYCLE ────────────────────────────────────────────────────────────────────
 
 async function runCycle(): Promise<void> {
-    if (stats.trades >= CONFIG.MAX_TRADES_DAY) { console.log(`[Main] Daily limit. Resting.`); return; }
-
-    try {
-        // QUICK CHECK: Are we already in a trade? Skip Gemini completely to save quotas!
-        if (await hasOpenPosition()) {
-            console.log(`[Main] 🛑 Position is currently open. Sleeping to save API quota.`);
-            return;
-        }
-
-        const assets = await fetchMarketData();
     checkReset();
 
     console.log(`\n${'═'.repeat(65)}`);
@@ -239,6 +229,12 @@ async function runCycle(): Promise<void> {
     if (stats.trades >= CONFIG.MAX_TRADES_DAY) { console.log(`[Main] Daily limit. Resting.`); return; }
 
     try {
+        // QUICK CHECK: Are we already in a trade? Skip Gemini completely to save quotas!
+        if (await hasOpenPosition()) {
+            console.log(`[Main] 🛑 Position is currently open. Sleeping to save API quota.`);
+            return;
+        }
+
         const assets = await fetchMarketData();
         if (!assets.length) { console.log(`[Main] No data.`); return; }
 
@@ -309,12 +305,12 @@ if (!process.env.HYPERLIQUID_WALLET_ADDRESS || !process.env.HYPERLIQUID_API_SECR
 
 console.log(`\n${'█'.repeat(65)}`);
 console.log(`  MODUVISE — HYPERLIQUID BTC PERP BOT`);
-console.log(`  Leverage: 40x | TP: $70 | SL: $70 (1:1)`);
-console.log(`  Entry: PostOnly maker only — guaranteed 0.0144%`);
+console.log(`  Leverage: 40x | TP: $100 | SL: $100 (1:1)`);
+console.log(`  Entry: Taker Market (Guaranteed Fills)`);
+console.log(`  Exit: Maker Limit TP / Taker Stop-Limit SL`);
 console.log(`  Signals: 24/7 — only pause on ATR>$200 + vol>3x`);
 console.log(`  Gemini: multi-key failover → local math fallback`);
 console.log(`  Cycle: 2-3 min | ~100-150 attempts/day`);
-console.log(`  No while-loops — TP/SL live on Hyperliquid order book`);
 console.log(`${'█'.repeat(65)}\n`);
 
 runCycle().then(scheduleNext);
