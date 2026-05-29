@@ -11,12 +11,16 @@ export const TARGET_MOVE    = 6.00;   // $6.00 TP — covers taker fees + net pr
 // ─── MODEL FAILOVER ───────────────────────────────────────────────────────────
 
 const MODEL_TIERS: Array<{ key: string; model: string }> = [
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3.1-flash-lite' },
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3.5-flash'      },
     { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.5-flash'      },
     { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.5-flash-lite' },
-    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.0-flash'      },
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3-flash'        },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3.1-flash-lite' },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3.5-flash'      },
     { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.5-flash'      },
     { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.5-flash-lite' },
-    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.0-flash'      },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3-flash'        },
 ];
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
