@@ -56,8 +56,7 @@ export async function getAvailableBalance(): Promise<number> {
     }
 }
 
-async function hasOpenPosition(): Promise<boolean> {
-    try {
+export async function hasOpenPosition(): Promise<boolean> {    try {
         const positions = await exchange.fetchPositions([STRATEGY.SYMBOL]);
         return positions.some((p: any) =>
             Number(p.info?.holdVol ?? p.info?.positionAmt ?? p.contracts ?? 0) > 0
