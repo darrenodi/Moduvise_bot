@@ -118,7 +118,11 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         //   LONG:  bid slightly BELOW mid — we sit in the bid queue waiting for a fill
         //   SHORT: ask slightly ABOVE mid — we sit in the ask queue waiting for a fill
         // This guarantees maker status. Trade fills when price touches our level.
-        const MAKER_OFFSET = 3.00; // $1 inside from mid — adjustable
+        // Change the offset from a static 3.00 to a dynamic one based on current volatility
+// If volatility (ATR) is low, use a smaller offset.
+        const dynamicOffset = Math.max(0.50, Math.min(1.50, signal.market_price * 0.00001)); 
+
+        const MAKER_OFFSET = dynamicOffset;
         const rawPrice = signal.market_price;
         const entry = parseFloat(
             (isBuy
