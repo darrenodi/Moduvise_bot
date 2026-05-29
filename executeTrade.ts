@@ -122,14 +122,17 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         //   LONG:  bid slightly BELOW mid — we sit in the bid queue waiting for a fill
         //   SHORT: ask slightly ABOVE mid — we sit in the ask queue waiting for a fill
         // This guarantees maker status. Trade fills when price touches our level.
-        const MAKER_OFFSET = 2.00; // $1 inside from mid — adjustable
-        const rawPrice = signal.market_price;
-        const entry = parseFloat(
-            (isBuy
-                ? rawPrice - MAKER_OFFSET   // Long: place below current price
-                : rawPrice + MAKER_OFFSET   // Short: place above current price
-            ).toFixed(2)
-        );
+        // ── 3. PARAMS & LIVE PRICE REFRESH ────────────────────────────────
+        // Gemini takes a few seconds to think. We MUST refresh the live order book 
+        // right before placing the order to prevent crossing the spread.
+        const liveOb = await exchange.fetchOrderBook(STRATEGY.SYMBOL, 5);
+        const bestBid = Number(liveOb.bids[0]?.[0] ?? signal.market_price);
+        const bestAsk = Number(liveOb.asks[0]?.[0] ?? signal.market_price);
+
+        // To guarantee Maker status:
+        // Longs sit precisely on the Best Bid. Shorts sit precisely on the Best Ask.
+        const entry = parseFloat((isBuy ? bestBid : bestAsk).toFixed(2));
+        
         const tpPrice     = parseFloat((isBuy ? entry + STRATEGY.TP_MOVE : entry - STRATEGY.TP_MOVE).toFixed(2));
         const slPrice     = parseFloat((isBuy ? entry - STRATEGY.SL_MOVE : entry + STRATEGY.SL_MOVE).toFixed(2));
         const size        = calcSize(balance, entry);
@@ -138,6 +141,7 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         const fees        = posVal * STRATEGY.MAKER_FEE * 2;
         const netProfit   = grossProfit - fees;
 
+        console.log(`[Execute] Live BBO: Bid $${bestBid.toFixed(2)} | Ask $${bestAsk.toFixed(2)}`);
         console.log(`[Execute] Entry=$${entry.toFixed(2)} TP=$${tpPrice.toFixed(2)} SL=$${slPrice.toFixed(2)}`);
         console.log(`[Execute] Size=${size} BTC | Pos=$${posVal.toFixed(2)} | Net/win=$${netProfit.toFixed(4)} USDC`);
 
