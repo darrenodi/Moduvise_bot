@@ -1,7 +1,7 @@
 import ccxt from 'ccxt';
 import { generateSignals, MARKET_SYMBOL, DISPLAY_SYMBOL } from './signals.js';
 import type { MarketData, TechnicalIndicators } from './signals.js';
-import { executeHyperliquidTrade, getAvailableBalance } from './executeTrade.js';
+import { executeHyperliquidTrade, getAvailableBalance, hasOpenPosition } from './executeTrade.js';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
@@ -220,6 +220,16 @@ async function fetchMarketData(): Promise<MarketData[]> {
 // ─── CYCLE ────────────────────────────────────────────────────────────────────
 
 async function runCycle(): Promise<void> {
+    if (stats.trades >= CONFIG.MAX_TRADES_DAY) { console.log(`[Main] Daily limit. Resting.`); return; }
+
+    try {
+        // QUICK CHECK: Are we already in a trade? Skip Gemini completely to save quotas!
+        if (await hasOpenPosition()) {
+            console.log(`[Main] 🛑 Position is currently open. Sleeping to save API quota.`);
+            return;
+        }
+
+        const assets = await fetchMarketData();
     checkReset();
 
     console.log(`\n${'═'.repeat(65)}`);

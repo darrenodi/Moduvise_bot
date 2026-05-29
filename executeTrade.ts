@@ -155,11 +155,10 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         }
 
         // ── 5. MARKET ENTRY (Taker) ───────────────────────────────────────
-        // ── 5. MARKET ENTRY (Taker) ───────────────────────────────────────
         console.log(`[Execute] Firing MARKET ${side.toUpperCase()} order to guarantee entry...`);
         let entryOrder: any;
         try {
-            // Added 'entry' as the 5th parameter so CCXT can calculate slippage
+            // ADDED: We pass 'entry' as the 5th parameter so CCXT can calculate slippage!
             entryOrder = await exchange.createOrder(
                 STRATEGY.SYMBOL, 'market', side, size, entry
             );
@@ -171,7 +170,6 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
 
         // ── 6. FETCH ACTUAL ENTRY PRICE ───────────────────────────────────
         console.log(`[Execute] Fetching actual fill price...`);
-        // Give Hyperliquid 1.5 seconds to sync the trade to your position database
         await new Promise(r => setTimeout(r, 1500)); 
         
         const positions = await exchange.fetchPositions([STRATEGY.SYMBOL]);
@@ -185,47 +183,48 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         const actualEntryPrice = Number(activePos.entryPrice);
         console.log(`[Execute] Actual Fill Price: $${actualEntryPrice.toFixed(2)}`);
 
-        // Recalculate exact TP/SL based on the real price we just paid
         const actualTpPrice = parseFloat((isBuy ? actualEntryPrice + STRATEGY.TP_MOVE : actualEntryPrice - STRATEGY.TP_MOVE).toFixed(2));
         const actualSlPrice = parseFloat((isBuy ? actualEntryPrice - STRATEGY.SL_MOVE : actualEntryPrice + STRATEGY.SL_MOVE).toFixed(2));
-
-        // ── 7. (DELETED: No more 30-second waiting loop) ──────────────────
 
         // ── 8. ON-CHAIN TP — reduceOnly limit (MAKER EXIT) ───────────────
         console.log(`[Execute] Placing TP limit @ $${actualTpPrice.toFixed(2)}...`);
         try {
             const tpOrder = await exchange.createOrder(
                 STRATEGY.SYMBOL, 'limit', closeSide, size, actualTpPrice,
-                { timeInForce: 'Alo', reduceOnly: true }  // Alo guarantees Maker fee 0.0144% on exit
+                { timeInForce: 'Alo', reduceOnly: true } 
             );
             console.log(`[Execute] ✅ TP on-chain: ${extractId(tpOrder)}`);
         } catch (e: any) {
             console.error(`[Execute] TP failed: ${e.message}`);
         }
 
-        // ── 9. ON-CHAIN SL — reduceOnly market trigger ────────────────────
+        // ── 9. ON-CHAIN SL — STOP LIMIT (Bypasses CCXT Bug) ───────────────
         console.log(`[Execute] Placing SL trigger @ $${actualSlPrice.toFixed(2)}...`);
         try {
-            // Note the 5th parameter is actualSlPrice (fixes your previous error!)
+            // We use a Limit order set $50 past the trigger. 
+            // This guarantees instant market-style execution but prevents CCXT's .split() bug.
+            const slLimitPrice = isBuy ? actualSlPrice - 50 : actualSlPrice + 50;
             const slOrder = await exchange.createOrder(
-                STRATEGY.SYMBOL, 'market', closeSide, size, actualSlPrice,
-                { triggerPrice: actualSlPrice, reduceOnly: true, stopLoss: true }
+                STRATEGY.SYMBOL, 'limit', closeSide, size, slLimitPrice,
+                { triggerPrice: actualSlPrice, reduceOnly: true }
             );
             console.log(`[Execute] ✅ SL on-chain: ${extractId(slOrder)}`);
         } catch (e: any) {
             console.error(`[Execute] SL failed (non-fatal): ${e.message}`);
         }
 
-        // ── 10. RETURN — no monitoring loop ───────────────────────────────
-        // TP and SL are live on Hyperliquid. Bot cycles back in 60-90s.
-        // hasOpenPosition() blocks re-entry until one fires.
+        // ── 10. RETURN ────────────────────────────────────────────────────
         console.log(`[Execute] ✅ Trade live. TP/SL on-chain. Returning to scheduler.`);
         console.log(`${'─'.repeat(65)}\n`);
 
-        return { success: true, outcome: 'orders_placed', entryPrice: entry, tpPrice, slPrice, netProfit, fees };
+        return { 
+            success: true, outcome: 'orders_placed', 
+            entryPrice: actualEntryPrice, tpPrice: actualTpPrice, slPrice: actualSlPrice, 
+            netProfit, fees 
+        };
 
     } catch (e: any) {
-        console.error(`[Execute] ❌ Critical: ${e.message}`);
+        console.error(`[Execute] Fatal execution error: ${e.message}`);
         return { success: false, outcome: 'error', message: e.message };
     }
 }
