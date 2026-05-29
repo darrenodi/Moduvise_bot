@@ -4,9 +4,10 @@ dotenv.config();
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
-export const MARKET_SYMBOL  = 'XYZ:GOLD/USDC:USDC';   // Hyperliquid Gold perp ticker
+export const MARKET_SYMBOL  = 'XYZ-GOLD/USDC:USDC';   // Changed ':' to '-' inside the asset name
 export const DISPLAY_SYMBOL = 'XAU/USDC';
-export const TARGET_MOVE    = 2.00;                // $2.00 TP move (Gold tick scale)
+export const TARGET_MOVE    = 2.00;
+              // $2.00 TP move (Gold tick scale)
 
 // ─── MODEL FAILOVER ───────────────────────────────────────────────────────────
 // Two API keys × multiple models. Burns highest-quota first.
