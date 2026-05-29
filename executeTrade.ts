@@ -14,7 +14,7 @@ const STRATEGY = {
     MAKER_FEE:        0.000144,        // Hyperliquid actual maker 0.0144%
     MIN_BALANCE:      2,               // Min $2 USDC
     FILL_INTERVAL_MS: 1_000,          // Poll fill every 1s
-    FILL_MAX_TRIES:   5,               // Cancel after 5s if unfilled
+    FILL_MAX_TRIES:   30,               // Cancel after 5s if unfilled
 } as const;
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
