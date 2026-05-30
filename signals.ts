@@ -6,7 +6,7 @@ dotenv.config();
 
 export const MARKET_SYMBOL  = 'XYZ-GOLD/USDC:USDC';
 export const DISPLAY_SYMBOL = 'XAU/USDC';
-export const TARGET_MOVE    = 6.00;   // $6.00 TP — covers taker fees + net profit
+export const TARGET_MOVE    = 5.00;
 
 // ─── MODEL FAILOVER ───────────────────────────────────────────────────────────
 
@@ -73,24 +73,25 @@ export interface GeneratedSignal {
     reasoning:    string;
 }
 
-// ─── SESSION QUALITY ─────────────────────────────────────────────────────────
-// $6 TP needs real momentum. Only trade in sessions where Gold moves reliably.
+// ─── SESSION ──────────────────────────────────────────────────────────────────
+// CHANGE 1: Removed SKIP session entirely. Asia/off-hours now LOW.
+// Gold oscillates 24/7. A $5 move happens even in thin markets.
+// We only truly pause during extreme volatility — not based on clock.
 
-function getSession(): { name: string; quality: 'PEAK' | 'HIGH' | 'LOW' | 'SKIP' } {
+function getSession(): { name: string; quality: 'PEAK' | 'HIGH' | 'LOW' } {
     const h = new Date().getUTCHours();
     if (h >= 13 && h < 16) return { name: 'London/NY Overlap', quality: 'PEAK' };
     if (h >= 9  && h < 13) return { name: 'London',            quality: 'HIGH' };
     if (h >= 16 && h < 19) return { name: 'New York Early',    quality: 'HIGH' };
-    if (h === 8)            return { name: 'London Open',       quality: 'LOW'  }; // stop-hunt hour
     if (h >= 19 && h < 21) return { name: 'New York Late',     quality: 'LOW'  };
-    return { name: 'Asia/Off-hours', quality: 'SKIP' }; // thin liquidity — $6 rarely completes
+    return { name: 'Asia/Off-hours', quality: 'LOW' }; // trade but with lower bar
 }
 
-// ─── BIAS SCORING (ported from ModuVise) ─────────────────────────────────────
+// ─── BIAS SCORING ─────────────────────────────────────────────────────────────
 
 function computeBias(ind: TechnicalIndicators, price: number): {
     direction:  'LONG' | 'SHORT' | 'NEUTRAL';
-    score:      number;   // 0–5
+    score:      number;
     isChoppy:   boolean;
     blockLong:  boolean;
     blockShort: boolean;
@@ -109,35 +110,40 @@ function computeBias(ind: TechnicalIndicators, price: number): {
     else if (ind.rsi > 60) { bear++; reasons.push(`RSI ${ind.rsi.toFixed(0)} overbought`); }
     else reasons.push(`RSI ${ind.rsi.toFixed(0)} neutral`);
 
-    // 3. Momentum — both 30m AND 1h must agree for a point (critical for $6 move)
-    const mom30Pos = ind.momentum30m > 0.05;
-    const mom30Neg = ind.momentum30m < -0.05;
-    const mom1hPos = ind.momentum1h  > 0.10;
-    const mom1hNeg = ind.momentum1h  < -0.10;
+    // 3. Momentum — 30m alone is sufficient (removed requirement for 1h agreement)
+    // CHANGE 2: 1h agreement was killing too many signals. 30m momentum is enough
+    // for a $5 target. 1h adds a bonus point only.
+    const mom30Pos = ind.momentum30m > 0.03;   // lowered from 0.05
+    const mom30Neg = ind.momentum30m < -0.03;
+    const mom1hPos = ind.momentum1h  > 0.08;   // lowered from 0.10
+    const mom1hNeg = ind.momentum1h  < -0.08;
 
-    if (mom30Pos && mom1hPos) { bull++; reasons.push(`Mom aligned bull: 30m+${ind.momentum30m.toFixed(3)}% 1h+${ind.momentum1h.toFixed(3)}%`); }
-    else if (mom30Neg && mom1hNeg) { bear++; reasons.push(`Mom aligned bear: 30m${ind.momentum30m.toFixed(3)}% 1h${ind.momentum1h.toFixed(3)}%`); }
-    else reasons.push(`Mom mixed: 30m${ind.momentum30m.toFixed(3)}% 1h${ind.momentum1h.toFixed(3)}%`);
+    if (mom30Pos) { bull++; reasons.push(`30m mom +${ind.momentum30m.toFixed(3)}%`); }
+    if (mom30Neg) { bear++; reasons.push(`30m mom ${ind.momentum30m.toFixed(3)}%`); }
+    if (mom1hPos) { bull++; reasons.push(`1h mom +${ind.momentum1h.toFixed(3)}%`); }
+    if (mom1hNeg) { bear++; reasons.push(`1h mom ${ind.momentum1h.toFixed(3)}%`); }
 
     // 4. 4h bias
     if (ind.trendBias4h === 'bull') { bull++; reasons.push('4h bull'); }
     else if (ind.trendBias4h === 'bear') { bear++; reasons.push('4h bear'); }
 
-    // 5. ADX trend strength — $6 needs a trending market
-    if (ind.adx > 25) { 
+    // 5. ADX
+    if (ind.adx > 20) {  // CHANGE 3: lowered from 25
         if (bull > bear) { bull++; reasons.push(`ADX ${ind.adx.toFixed(0)} trending`); }
         else if (bear > bull) { bear++; reasons.push(`ADX ${ind.adx.toFixed(0)} trending`); }
     } else {
-        reasons.push(`ADX ${ind.adx.toFixed(0)} weak trend`);
+        reasons.push(`ADX ${ind.adx.toFixed(0)} weak`);
     }
 
-    // Choppy: momentum timeframes conflict OR ranging AND weak ADX
-    const momentumConflict = (mom30Pos && mom1hNeg) || (mom30Neg && mom1hPos);
-    const isChoppy = momentumConflict || (ind.priceStructure === 'ranging' && ind.adx < 20);
+    // CHANGE 4: Choppy definition narrowed significantly
+    // Only truly choppy when BOTH 30m AND 1h actively conflict (opposite signs)
+    // Ranging alone is NOT choppy anymore — we trade ranges for $5 moves
+    const activeConflict = (mom30Pos && mom1hNeg) || (mom30Neg && mom1hPos);
+    const isChoppy = activeConflict; // removed: ranging+weak ADX was blocking too many trades
 
-    // Hard RSI blocks
-    const blockLong  = ind.rsi >= 75;
-    const blockShort = ind.rsi <= 25;
+    // RSI hard blocks — only extreme levels
+    const blockLong  = ind.rsi >= 80; // CHANGE 5: raised from 75
+    const blockShort = ind.rsi <= 20; // CHANGE 6: lowered from 25
 
     const score = Math.max(bull, bear);
     const direction = bull > bear ? 'LONG' : bear > bull ? 'SHORT' : 'NEUTRAL';
@@ -151,7 +157,7 @@ function isExtremeVolatility(ind: TechnicalIndicators): boolean {
     return ind.atr5m > 8.0 && ind.volumeRatio > 3.0;
 }
 
-// ─── LOCAL FALLBACK ENGINE ────────────────────────────────────────────────────
+// ─── LOCAL FALLBACK ───────────────────────────────────────────────────────────
 
 function computeLocalDirection(ind: TechnicalIndicators, price: number): {
     direction: SignalDirection;
@@ -159,12 +165,22 @@ function computeLocalDirection(ind: TechnicalIndicators, price: number): {
     score: number;
 } {
     const bias = computeBias(ind, price);
-    const dir: SignalDirection = bias.direction === 'LONG' ? 'long'
-                               : bias.direction === 'SHORT' ? 'short'
-                               : 'neutral';
+
+    // CHANGE 7: If bias is NEUTRAL, use 5m momentum as tiebreaker
+    // instead of returning neutral. Gold always has a micro-direction.
+    let dir: SignalDirection;
+    if (bias.direction === 'LONG') {
+        dir = 'long';
+    } else if (bias.direction === 'SHORT') {
+        dir = 'short';
+    } else {
+        // tiebreak on 5m momentum
+        dir = ind.momentum5m >= 0 ? 'long' : 'short';
+    }
+
     return {
         direction: dir,
-        reasoning: `LOCAL ${bias.direction}: ${bias.reasons.slice(0, 3).join(', ')}`,
+        reasoning: `LOCAL ${dir.toUpperCase()}: ${bias.reasons.slice(0, 3).join(', ')}`,
         score: bias.score,
     };
 }
@@ -223,59 +239,47 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
 
     console.log(`[Signal] Session: ${session.name} [${session.quality}]`);
 
-    // ── SKIP off-hours entirely — $6 on Gold needs real volume ───────────
-    if (session.quality === 'SKIP') {
-        console.log(`[Signal] 🌙 Off-hours session — skipping all signals.`);
-        return [];
-    }
+    // No more SKIP — removed entirely
 
     for (const asset of assets) {
         const { indicators: ind, price, symbol } = asset;
 
-        // ── HARD STOP: extreme volatility ─────────────────────────────────
+        // ── ONLY HARD STOP: extreme volatility ────────────────────────────
         if (isExtremeVolatility(ind)) {
-            console.log(`[Signal] 🔴 EXTREME VOLATILITY ATR=$${ind.atr5m.toFixed(2)} vol=${ind.volumeRatio.toFixed(1)}x — skipping.`);
+            console.log(`[Signal] 🔴 EXTREME VOLATILITY ATR=$${ind.atr5m.toFixed(2)} vol=${ind.volumeRatio.toFixed(1)}x — pausing.`);
             continue;
         }
 
-        // ── BIAS SCORE ────────────────────────────────────────────────────
-        const bias = computeBias(ind, price);
+        const bias  = computeBias(ind, price);
         const local = computeLocalDirection(ind, price);
 
-        console.log(`[Signal] Bias: ${bias.direction} score=${bias.score}/5 choppy=${bias.isChoppy} | ${bias.reasons.slice(0,3).join(', ')}`);
+        console.log(`[Signal] Bias: ${bias.direction} ${bias.score}/5 choppy=${bias.isChoppy} | ${bias.reasons.slice(0,3).join(', ')}`);
 
-        // ── HARD SKIP: choppy market ──────────────────────────────────────
+        // ── CHANGE 8: Only skip if actively choppy (momentum conflict) ────
         if (bias.isChoppy) {
-            console.log(`[Signal] 🚫 CHOPPY — momentum conflict or ranging+weak ADX. Skipping.`);
+            console.log(`[Signal] 🚫 CHOPPY — 30m/1h momentum actively conflict. Skipping.`);
             continue;
         }
 
-        // ── HARD SKIP: weak bias in LOW session ───────────────────────────
-        if (bias.score < 3 && session.quality === 'LOW') {
-            console.log(`[Signal] ⚠ Weak bias (${bias.score}/5) in LOW session — skipping.`);
-            continue;
-        }
+        // ── CHANGE 9: Removed weak-bias skip entirely ─────────────────────
+        // Previous code skipped bias < 2 always, and < 3 in LOW sessions.
+        // A $5 move does NOT need a strong bias — it just needs a direction.
+        // Local engine always provides one. Let Gemini confirm or use local.
 
-        // ── HARD SKIP: weak bias always — $6 needs conviction ────────────
-        if (bias.score < 2) {
-            console.log(`[Signal] ⚠ Bias too weak (${bias.score}/5) for $6 TP — skipping.`);
-            continue;
-        }
-
-        // ── RSI hard blocks ───────────────────────────────────────────────
-        if (bias.blockLong && local.direction === 'long') {
-            console.log(`[Signal] ⛔ RSI ${ind.rsi.toFixed(0)} EXTREME OVERBOUGHT — blocking long.`);
+        // RSI hard blocks (now only at extremes 80/20)
+        if (bias.blockLong  && local.direction === 'long')  {
+            console.log(`[Signal] ⛔ RSI ${ind.rsi.toFixed(0)} extreme overbought — blocking long.`);
             continue;
         }
         if (bias.blockShort && local.direction === 'short') {
-            console.log(`[Signal] ⛔ RSI ${ind.rsi.toFixed(0)} EXTREME OVERSOLD — blocking short.`);
+            console.log(`[Signal] ⛔ RSI ${ind.rsi.toFixed(0)} extreme oversold — blocking short.`);
             continue;
         }
 
         // ── BUILD GEMINI PROMPT ───────────────────────────────────────────
-        const prompt = `You are an XAU/USDC (Gold) perp scalper on Hyperliquid. 25x leverage, taker entry.
-TP=$6.00 fixed. SL=scaled. Session: ${session.name} [${session.quality}].
-Target: 50 trades/day in HIGH/PEAK sessions only.
+        const prompt = `You are an XAU/USDC (Gold) perp scalper on Hyperliquid. 25x leverage.
+TP=$5.00 fixed. No stop loss for now. Session: ${session.name} [${session.quality}].
+Target: 50-100 trades/day including Asia/off-hours. Gold oscillates 24/7.
 
 LIVE XAU/USDC DATA:
 Price: $${price.toFixed(2)}
@@ -283,43 +287,44 @@ EMA: ${ind.emaTrend} | RSI: ${ind.rsi.toFixed(1)} | ADX: ${ind.adx.toFixed(1)}
 Mom 5m: ${ind.momentum5m.toFixed(4)}% | 30m: ${ind.momentum30m.toFixed(4)}% | 1h: ${ind.momentum1h.toFixed(4)}%
 ATR(5m): $${ind.atr5m.toFixed(2)} | Structure: ${ind.priceStructure} | 4h: ${ind.trendBias4h} | Weekly: ${ind.weeklyBias}
 Vol ratio: ${ind.volumeRatio.toFixed(2)}x | Spread: $${ind.spreadUsd.toFixed(2)}
-Support: $${ind.nearestSupport.toFixed(2)} | Resistance: $${ind.nearestResistance.toFixed(2)}
-Bias engine: ${bias.direction} score=${bias.score}/5 | ${bias.reasons.join(', ')}
+Support: $${ind.nearestSupport.toFixed(2)} (${ind.distanceToSupport.toFixed(1)} away)
+Resistance: $${ind.nearestResistance.toFixed(2)} (${ind.distanceToResistance.toFixed(1)} away)
+Local bias engine: ${bias.direction} score=${bias.score}/5 | ${bias.reasons.join(', ')}
 
-RULES FOR $6 TP:
-- $6 requires a trending move, not a scalp. ADX>25 + aligned momentum = go.
-- If 30m and 1h momentum conflict → NEUTRAL. No exceptions.
-- If RSI>75 → only SHORT. If RSI<25 → only LONG.
-- Weekly bias + 4h bias agreement = high confidence. Disagreement = reduce confidence.
-- Volume <0.5x average = low conviction, reduce confidence or skip.
-- PEAK/HIGH session: trust momentum. LOW session: only extreme RSI setups.
-- Return NEUTRAL if no clear $6 move setup exists. Better to skip than lose.
+RULES:
+- Gold moves $5 constantly. Even in slow markets this happens every 5-15 minutes.
+- RANGING market = GOOD for us. Buy near support, sell near resistance.
+- If price is within $3 of support → LONG. Within $3 of resistance → SHORT.
+- Mid-range → follow 30m momentum direction.
+- Only return NEUTRAL if 30m AND 1h momentum actively point opposite directions.
+- Do NOT skip because session is slow. We trade 24/7.
+- Confirm local bias direction unless you have strong counter evidence.
 
-Reply JSON array ONLY. No markdown.
-[{"symbol":"XAU/USDC","direction":"long","market_price":${price.toFixed(2)},"target_move":6.00,"confidence":0.75,"reasoning":"one sentence max 120 chars"}]`;
+Reply JSON array ONLY. No markdown. No text outside array.
+[{"symbol":"XAU/USDC","direction":"long","market_price":${price.toFixed(2)},"target_move":5.00,"confidence":0.70,"reasoning":"one sentence max 120 chars"}]`;
 
         // ── CALL GEMINI ───────────────────────────────────────────────────
         const geminiResult = await callGemini(prompt);
 
         if (!geminiResult) {
-            // Local fallback — only if score is strong enough
-            if (local.score >= 3 && local.direction !== 'neutral') {
-                console.log(`[Signal] ⚙️ Gemini unavailable — using local fallback: ${local.direction.toUpperCase()}`);
-                signals.push({
-                    symbol, direction: local.direction, market_price: price,
-                    target_move: TARGET_MOVE, confidence: 0.55, reasoning: local.reasoning,
-                });
-            } else {
-                console.log(`[Signal] ⚙️ Gemini unavailable + weak local score — skipping.`);
-            }
+            // CHANGE 10: Local fallback always fires, no score gate
+            console.log(`[Signal] ⚙️ Gemini unavailable — local fallback: ${local.direction.toUpperCase()}`);
+            signals.push({
+                symbol, direction: local.direction, market_price: price,
+                target_move: TARGET_MOVE, confidence: 0.55, reasoning: local.reasoning,
+            });
             continue;
         }
 
-        // ── PARSE RESPONSE ────────────────────────────────────────────────
+        // ── PARSE ─────────────────────────────────────────────────────────
         const parsed = extractJSON(geminiResult.raw);
 
         if (!parsed || parsed.length === 0) {
-            console.warn(`[Signal] Bad JSON from ${geminiResult.model} — skipping.`);
+            console.warn(`[Signal] Bad JSON from ${geminiResult.model} — local fallback.`);
+            signals.push({
+                symbol, direction: local.direction, market_price: price,
+                target_move: TARGET_MOVE, confidence: 0.55, reasoning: local.reasoning,
+            });
             continue;
         }
 
@@ -328,21 +333,27 @@ Reply JSON array ONLY. No markdown.
             if (dir === 'buy')  dir = 'long';
             if (dir === 'sell') dir = 'short';
 
-            // Respect neutral — unlike before, we do NOT override neutral
-            if (!['long', 'short'].includes(dir)) {
-                console.log(`[Signal] (${geminiResult.model}) Neutral/invalid — skipping trade.`);
-                continue;
+            // CHANGE 11: Gemini neutral → use local direction instead of skipping
+            if (dir === 'neutral' || !['long', 'short'].includes(dir)) {
+                console.log(`[Signal] (${geminiResult.model}) Neutral — using local: ${local.direction.toUpperCase()}`);
+                dir = local.direction;
             }
 
-            // Respect RSI hard blocks even on Gemini output
-            if (dir === 'long'  && bias.blockLong)  { console.log(`[Signal] RSI block overrides Gemini long.`);  continue; }
-            if (dir === 'short' && bias.blockShort) { console.log(`[Signal] RSI block overrides Gemini short.`); continue; }
+            // RSI hard blocks
+            if (dir === 'long'  && bias.blockLong)  { console.log(`[Signal] RSI block long.`);  continue; }
+            if (dir === 'short' && bias.blockShort) { console.log(`[Signal] RSI block short.`); continue; }
 
             const confidence = Math.min(1, Math.max(0, Number(item.confidence ?? 0.60)));
 
-            // Skip low-confidence signals — $6 TP needs conviction
-            if (confidence < 0.55) {
-                console.log(`[Signal] (${geminiResult.model}) Confidence ${confidence.toFixed(2)} too low for $6 TP — skipping.`);
+            // CHANGE 12: Lowered confidence gate from 0.55 to 0.45
+            // A $5 move in a ranging market doesn't need high conviction
+            if (confidence < 0.45) {
+                console.log(`[Signal] (${geminiResult.model}) conf=${confidence.toFixed(2)} < 0.45 — using local instead.`);
+                signals.push({
+                    symbol, direction: local.direction as SignalDirection,
+                    market_price: price, target_move: TARGET_MOVE,
+                    confidence: 0.55, reasoning: local.reasoning,
+                });
                 continue;
             }
 
