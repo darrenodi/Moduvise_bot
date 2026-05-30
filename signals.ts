@@ -6,7 +6,7 @@ dotenv.config();
 
 export const MARKET_SYMBOL  = 'XYZ-GOLD/USDC:USDC';
 export const DISPLAY_SYMBOL = 'XAU/USDC';
-export const TARGET_MOVE    = 5.00;
+export const TARGET_MOVE    = 2.00;
 
 // ─── MODEL FAILOVER ───────────────────────────────────────────────────────────
 
@@ -278,7 +278,7 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
 
         // ── BUILD GEMINI PROMPT ───────────────────────────────────────────
         const prompt = `You are an XAU/USDC (Gold) perp scalper on Hyperliquid. 25x leverage.
-TP=$5.00 fixed. No stop loss for now. Session: ${session.name} [${session.quality}].
+TP=$2.00 fixed. No stop loss for now. Session: ${session.name} [${session.quality}].
 Target: 50-100 trades/day including Asia/off-hours. Gold oscillates 24/7.
 
 LIVE XAU/USDC DATA:
@@ -292,7 +292,7 @@ Resistance: $${ind.nearestResistance.toFixed(2)} (${ind.distanceToResistance.toF
 Local bias engine: ${bias.direction} score=${bias.score}/5 | ${bias.reasons.join(', ')}
 
 RULES:
-- Gold moves $5 constantly. Even in slow markets this happens every 5-15 minutes.
+- Gold moves $2 constantly. Even in slow markets this happens every 5-15 minutes.
 - RANGING market = GOOD for us. Buy near support, sell near resistance.
 - If price is within $3 of support → LONG. Within $3 of resistance → SHORT.
 - Mid-range → follow 30m momentum direction.
@@ -301,7 +301,7 @@ RULES:
 - Confirm local bias direction unless you have strong counter evidence.
 
 Reply JSON array ONLY. No markdown. No text outside array.
-[{"symbol":"XAU/USDC","direction":"long","market_price":${price.toFixed(2)},"target_move":5.00,"confidence":0.70,"reasoning":"one sentence max 120 chars"}]`;
+[{"symbol":"XAU/USDC","direction":"long","market_price":${price.toFixed(2)},"target_move":2.00,"confidence":0.70,"reasoning":"one sentence max 120 chars"}]`;
 
         // ── CALL GEMINI ───────────────────────────────────────────────────
         const geminiResult = await callGemini(prompt);

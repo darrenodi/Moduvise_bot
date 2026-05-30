@@ -21,7 +21,7 @@ dotenv.config();
 const STRATEGY = {
     SYMBOL:           MARKET_SYMBOL,    // 'GOLD/USDC:USDC'
     LEVERAGE:         25,
-    TP_MOVE:          5.00,             // $5.00 — clears fees with comfortable margin
+    TP_MOVE:          2.00,             // $5.00 — clears fees with comfortable margin
     MAKER_FEE:        0.000144,         // 0.0144% PostOnly
     MIN_BALANCE:      1.50,
     GOLD_TICK:        0.10,             // $0.10 tick size
