@@ -44,7 +44,17 @@ const exchange = new (ccxt as any).hyperliquid({
 const stats = {
     date: '', trades: 0, filled: 0, cancelled: 0,
     emergencyExits: 0, realPnl: 0,
+    sessionBanked: 0,   // 50% of profits banked this session
 };
+
+// ─── BANKING STATE ────────────────────────────────────────────────────────────
+// virtualTradingBalance: the balance used for position sizing.
+// Starts at the live USDC balance, grows by 50% of each net profit.
+// The other 50% accumulates in sessionBanked (in memory — future withdrawals).
+// Actual USDC on Hyperliquid grows by 100% of profits, but sizing uses 50%.
+
+let virtualTradingBalance = 0;   // initialised on first cycle
+let sessionBanked         = 0;   // cumulative 50% of profits banked this session
 
 function checkReset() {
     const today = new Date().toISOString().slice(0, 10);
@@ -55,9 +65,16 @@ function checkReset() {
 }
 
 function printDailySummary() {
+    const liveBalance    = virtualTradingBalance;
+    const totalValue     = liveBalance + sessionBanked;
     console.log(`\n${'█'.repeat(65)}`);
     console.log(`  DAILY — ${stats.date} | Attempts:${stats.trades} Fills:${stats.filled} Cancelled:${stats.cancelled}`);
     console.log(`  Emergency exits: ${stats.emergencyExits} | Real PnL: $${stats.realPnl.toFixed(4)}`);
+    console.log(`  ─────────────────────────────────────────────────────────`);
+    console.log(`  💼 Trading balance (virtual): $${liveBalance.toFixed(4)}`);
+    console.log(`  🏦 Banked today:              $${stats.sessionBanked.toFixed(4)}`);
+    console.log(`  🏦 Session banked (all-time): $${sessionBanked.toFixed(4)}`);
+    console.log(`  📊 Total value (trade + bank): $${totalValue.toFixed(4)}`);
     console.log(`${'█'.repeat(65)}\n`);
 }
 
@@ -317,6 +334,12 @@ async function runCycle(): Promise<void> {
         const balance = await getAvailableBalance();
         console.log(`[Main] Balance: $${balance.toFixed(4)} USDC`);
 
+        // Initialise virtual trading balance on first cycle
+        if (virtualTradingBalance <= 0) {
+            virtualTradingBalance = balance;
+            console.log(`[Bank] 💰 Virtual trading balance initialised: $${virtualTradingBalance.toFixed(4)}`);
+        }
+
         if (balance >= CONFIG.RECYCLE_BALANCE) {
             console.log(`[Main] 🎯 RECYCLE THRESHOLD HIT — $${balance.toFixed(2)} ≥ $${CONFIG.RECYCLE_BALANCE}`);
             console.log(`[Main] 💰 Withdraw $${(balance - CONFIG.RECYCLE_KEEP).toFixed(2)}, keep $${CONFIG.RECYCLE_KEEP} working`);
@@ -337,9 +360,24 @@ async function runCycle(): Promise<void> {
             }
 
             stats.trades++;
-            const result = await executeHyperliquidTrade(signal);
+            const result = await executeHyperliquidTrade(signal, virtualTradingBalance);
 
-            if (result.outcome === 'orders_placed') {
+            if (result.outcome === 'tp_confirmed' && result.netProfit !== undefined) {
+                // ── BANKING: 50% of net profit banked, 50% compounds ──────────
+                const netProfit      = result.netProfit;
+                const bankedAmount   = netProfit * 0.50;
+                const compoundAmount = netProfit * 0.50;
+
+                sessionBanked         += bankedAmount;
+                virtualTradingBalance += compoundAmount;  // next trade sizes off this
+                stats.sessionBanked   += bankedAmount;
+                stats.filled++;
+
+                console.log(`[Bank] ✅ Trade closed | Gross: $${(result.grossProfit ?? netProfit).toFixed(4)} | Net: $${netProfit.toFixed(4)} | Banked: $${bankedAmount.toFixed(4)} | Session banked: $${sessionBanked.toFixed(4)}`);
+                console.log(`[Bank] 📈 Virtual trading balance: $${virtualTradingBalance.toFixed(4)} | Total value: $${(virtualTradingBalance + sessionBanked).toFixed(4)}`);
+
+            } else if (result.outcome === 'orders_placed') {
+                // TP not confirmed yet (timeout) — still counts as a fill
                 stats.filled++;
             } else if (result.outcome === 'cancelled') {
                 stats.cancelled++;

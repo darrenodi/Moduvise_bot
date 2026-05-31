@@ -33,16 +33,18 @@ const STRATEGY = {
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 
-export type TradeOutcome = 'orders_placed' | 'cancelled' | 'skipped' | 'error';
+export type TradeOutcome = 'orders_placed' | 'tp_confirmed' | 'cancelled' | 'skipped' | 'error';
 
 export interface TradeResult {
-    success:     boolean;
-    outcome:     TradeOutcome;
-    entryPrice?: number;
-    tpPrice?:    number;
-    netProfit?:  number;
-    fees?:       number;
-    message?:    string;
+    success:      boolean;
+    outcome:      TradeOutcome;
+    entryPrice?:  number;
+    tpPrice?:     number;
+    grossProfit?: number;
+    netProfit?:   number;
+    fees?:        number;
+    tpConfirmed?: boolean;
+    message?:     string;
 }
 
 // ─── EXCHANGE ────────────────────────────────────────────────────────────────
@@ -132,8 +134,8 @@ function tickRound(price: number): number {
 }
 
 function calcSize(balance: number, price: number): number {
-    // 95% of balance to leave margin buffer
-    const usable  = balance * 0.95;
+    // 98% of virtual trading balance (50% profit banking model)
+    const usable  = balance * 0.98;
     const posVal  = usable * STRATEGY.LEVERAGE;
     const raw     = posVal / price;
     // Floor to 2 decimal places (minimum Gold lot = 0.01 oz)
@@ -206,7 +208,7 @@ async function placeMakerEntry(
 
 // ─── MAIN EXECUTION ───────────────────────────────────────────────────────────
 
-export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<TradeResult> {
+export async function executeHyperliquidTrade(signal: GeneratedSignal, virtualBalance?: number): Promise<TradeResult> {
     if (signal.direction === 'neutral') {
         return { success: false, outcome: 'skipped', message: 'Neutral signal' };
     }
@@ -230,7 +232,8 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
 
         // ── 2. BALANCE ─────────────────────────────────────────────────────
         const balance = await getAvailableBalance();
-        console.log(`[Execute] Balance: $${balance.toFixed(4)} USDC`);
+        const effectiveBalance = virtualBalance ?? balance;  // virtual balance for sizing
+        console.log(`[Execute] Balance: $${balance.toFixed(4)} USDC | Effective (virtual): $${effectiveBalance.toFixed(4)}`);
         if (balance < STRATEGY.MIN_BALANCE) {
             return { success: false, outcome: 'skipped', message: `Low balance: $${balance.toFixed(4)}` };
         }
@@ -245,7 +248,7 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
         }
 
         // ── 4. SIZE ────────────────────────────────────────────────────────
-        const size   = calcSize(balance, signal.market_price);
+        const size   = calcSize(effectiveBalance, signal.market_price);  // sizes off virtual balance
         console.log(`[Execute] Size: ${size} oz (~$${(size * signal.market_price).toFixed(2)} position)`);
 
         // ── 5. MAKER ENTRY ─────────────────────────────────────────────────
@@ -276,10 +279,40 @@ export async function executeHyperliquidTrade(signal: GeneratedSignal): Promise<
             console.error(`[Execute] TP failed: ${e.message}`);
         }
 
-        console.log(`[Execute] ✅ Trade live. TP=$${tpPrice.toFixed(2)} | maker/maker`);
+        // ── 7. POLL FOR TP CLOSURE (up to 10 minutes) ─────────────────────
+        console.log(`[Execute] 📡 Monitoring TP closure (max 10 min, poll every 5s)...`);
+        const TP_POLL_INTERVAL_MS = 5_000;
+        const TP_POLL_MAX_TRIES   = 120;   // 120 × 5s = 10 minutes
+        let tpConfirmed = false;
+
+        for (let p = 1; p <= TP_POLL_MAX_TRIES; p++) {
+            await new Promise(r => setTimeout(r, TP_POLL_INTERVAL_MS));
+            if (!(await hasOpenPosition())) {
+                tpConfirmed = true;
+                console.log(`[Execute] 🎯 Position closed at poll ${p} (~${(p * 5).toFixed(0)}s) | Gross: $${grossProfit.toFixed(4)} | Net: $${netProfit.toFixed(4)}`);
+                break;
+            }
+            if (p % 12 === 0) {
+                console.log(`[Execute] Still open... ${(p * 5 / 60).toFixed(1)} min elapsed`);
+            }
+        }
+
+        if (!tpConfirmed) {
+            console.log(`[Execute] ⏰ 10-min poll timeout — TP order still live on Hyperliquid.`);
+        }
+
         console.log(`${'─'.repeat(65)}\n`);
 
-        return { success: true, outcome: 'orders_placed', entryPrice: fillPrice, tpPrice, netProfit, fees };
+        return {
+            success:      true,
+            outcome:      tpConfirmed ? 'tp_confirmed' : 'orders_placed',
+            entryPrice:   fillPrice,
+            tpPrice,
+            grossProfit,
+            netProfit,
+            fees,
+            tpConfirmed,
+        };
 
     } catch (e: any) {
         console.error(`[Execute] Fatal: ${e.message}`);
