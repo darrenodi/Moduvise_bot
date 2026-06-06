@@ -77,12 +77,24 @@ export function getActiveTrade(): ActiveTrade | null { return _activeTrade; }
 export function clearActiveTrade(): void { _activeTrade = null; }
 
 // ─── EXCHANGE ─────────────────────────────────────────────────────────────────
+//
+// demo.binance.com uses its own endpoint — NOT testnet.binancefuture.com
+// Testnet keys (from demo.binance.com) → BINANCE_BOT_API / BINANCE_BOT_SECRET
+// Live keys (from binance.com)         → BINANCE_API_KEY / BINANCE_API_SECRET
 
 const IS_TESTNET = process.env.ENVIRONMENT === 'testnet';
 
+const API_KEY    = IS_TESTNET
+    ? (process.env.BINANCE_BOT_API    ?? process.env.BINANCE_API_KEY    ?? '')
+    : (process.env.BINANCE_API_KEY    ?? '');
+
+const API_SECRET = IS_TESTNET
+    ? (process.env.BINANCE_BOT_SECRET ?? process.env.BINANCE_API_SECRET ?? '')
+    : (process.env.BINANCE_API_SECRET ?? '');
+
 const exchange = new (ccxt as any).binanceusdm({
-    apiKey:          process.env.BINANCE_API_KEY    ?? '',
-    secret:          process.env.BINANCE_API_SECRET ?? '',
+    apiKey:          API_KEY,
+    secret:          API_SECRET,
     timeout:         15_000,
     enableRateLimit: true,
     options: { defaultType: 'future' },
@@ -96,15 +108,47 @@ const exchange = new (ccxt as any).binanceusdm({
     } : {}),
 });
 
-console.log(`[Exchange] Binance USDM Futures | Mode: ${IS_TESTNET ? '🧪 TESTNET' : '🔴 MAINNET'}`);
+console.log(`[Exchange] Binance USDM Futures | Mode: ${IS_TESTNET ? '🧪 TESTNET (demo.binance.com keys)' : '🔴 MAINNET'}`);
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 export async function getAvailableBalance(): Promise<number> {
     try {
         const bal  = await exchange.fetchBalance({ type: 'future' });
-        const usdt = bal['USDT'];
-        return Number(usdt?.free ?? usdt?.total ?? 0);
+
+        // Try multiple paths — Binance testnet and mainnet differ slightly
+        const usdt =
+            bal['USDT'] ??
+            bal['usdt'] ??
+            bal?.info?.assets?.find((a: any) => a.asset === 'USDT') ??
+            null;
+
+        const free = Number(
+            usdt?.free ??
+            usdt?.availableBalance ??
+            usdt?.walletBalance ??
+            bal?.free?.USDT ??
+            0
+        );
+
+        // If ccxt top-level fails, dig into raw info from Binance
+        if (free === 0 && bal?.info?.assets) {
+            const raw = bal.info.assets.find((a: any) => a.asset === 'USDT');
+            if (raw) {
+                const rawFree = Number(raw.availableBalance ?? raw.walletBalance ?? 0);
+                console.log(`[Execute] Balance (raw fallback): $${rawFree.toFixed(4)}`);
+                return rawFree;
+            }
+        }
+
+        if (free === 0) {
+            // Debug: dump what ccxt actually returned
+            const keys = Object.keys(bal).filter(k => !['info', 'timestamp', 'datetime', 'free', 'used', 'total'].includes(k));
+            console.warn(`[Execute] Balance=0 debug — ccxt keys: ${keys.join(', ')}`);
+            if (bal.free) console.warn(`[Execute] bal.free: ${JSON.stringify(bal.free).slice(0, 200)}`);
+        }
+        console.log(`[Execute] Balance resolved: $${free.toFixed(4)}`);
+        return free;
     } catch (e: any) {
         console.error(`[Execute] Balance error: ${e.message}`);
         return 0;

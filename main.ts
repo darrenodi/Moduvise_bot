@@ -32,9 +32,17 @@ const CONFIG = {
 
 // ─── EXCHANGE (market data only) ──────────────────────────────────────────────
 
+const API_KEY    = IS_TESTNET
+    ? (process.env.BINANCE_BOT_API    ?? process.env.BINANCE_API_KEY    ?? '')
+    : (process.env.BINANCE_API_KEY    ?? '');
+
+const API_SECRET = IS_TESTNET
+    ? (process.env.BINANCE_BOT_SECRET ?? process.env.BINANCE_API_SECRET ?? '')
+    : (process.env.BINANCE_API_SECRET ?? '');
+
 const exchange = new (ccxt as any).binanceusdm({
-    apiKey:          process.env.BINANCE_API_KEY    ?? '',
-    secret:          process.env.BINANCE_API_SECRET ?? '',
+    apiKey:          API_KEY,
+    secret:          API_SECRET,
     timeout:         15_000,
     enableRateLimit: true,
     options: { defaultType: 'future' },
@@ -555,8 +563,16 @@ process.on('SIGINT',  () => { printDailySummary(); process.exit(0); });
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
 
-if (!process.env.BINANCE_API_KEY || !process.env.BINANCE_API_SECRET) {
-    console.error(`❌ Missing: BINANCE_API_KEY, BINANCE_API_SECRET, GEMINI_API_KEY`);
+const IS_DEMO = process.env.ENVIRONMENT === 'testnet';
+const hasKeys = IS_DEMO
+    ? (process.env.BINANCE_BOT_API && process.env.BINANCE_BOT_SECRET)
+    : (process.env.BINANCE_API_KEY && process.env.BINANCE_API_SECRET);
+
+if (!hasKeys) {
+    console.error(IS_DEMO
+        ? '❌ Missing: BINANCE_BOT_API, BINANCE_BOT_SECRET (demo.binance.com keys)'
+        : '❌ Missing: BINANCE_API_KEY, BINANCE_API_SECRET (live binance.com keys)'
+    );
     process.exit(1);
 }
 
