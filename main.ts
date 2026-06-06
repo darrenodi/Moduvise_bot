@@ -15,8 +15,12 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 // ─── ENVIRONMENT ──────────────────────────────────────────────────────────────
+// 'demo'    → demo.binance.com keys (BINANCE_BOT_API / BINANCE_BOT_SECRET)
+// 'testnet' → testnet.binancefuture.com keys
+// 'live'    → binance.com live keys
 
-const IS_TESTNET = process.env.ENVIRONMENT === 'testnet';
+const ENVIRONMENT = process.env.ENVIRONMENT ?? 'demo';
+const IS_TESTNET  = ENVIRONMENT !== 'live';
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 
@@ -32,13 +36,13 @@ const CONFIG = {
 
 // ─── EXCHANGE (market data only) ──────────────────────────────────────────────
 
-const API_KEY    = IS_TESTNET
-    ? (process.env.BINANCE_BOT_API    ?? process.env.BINANCE_API_KEY    ?? '')
-    : (process.env.BINANCE_API_KEY    ?? '');
+const API_KEY    = ENVIRONMENT === 'live'
+    ? (process.env.BINANCE_API_KEY    ?? '')
+    : (process.env.BINANCE_BOT_API    ?? '');
 
-const API_SECRET = IS_TESTNET
-    ? (process.env.BINANCE_BOT_SECRET ?? process.env.BINANCE_API_SECRET ?? '')
-    : (process.env.BINANCE_API_SECRET ?? '');
+const API_SECRET = ENVIRONMENT === 'live'
+    ? (process.env.BINANCE_API_SECRET ?? '')
+    : (process.env.BINANCE_BOT_SECRET ?? '');
 
 const exchange = new (ccxt as any).binanceusdm({
     apiKey:          API_KEY,
@@ -51,6 +55,10 @@ const exchange = new (ccxt as any).binanceusdm({
             api: {
                 public:  'https://testnet.binancefuture.com',
                 private: 'https://testnet.binancefuture.com',
+                fapiPublic:        'https://testnet.binancefuture.com/fapi/v1/',
+                fapiPrivate:       'https://testnet.binancefuture.com/fapi/v1/',
+                fapiPublicV2:      'https://testnet.binancefuture.com/fapi/v2/',
+                fapiPrivateV2:     'https://testnet.binancefuture.com/fapi/v2/',
             },
         },
     } : {}),
@@ -563,15 +571,14 @@ process.on('SIGINT',  () => { printDailySummary(); process.exit(0); });
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
 
-const IS_DEMO = process.env.ENVIRONMENT === 'testnet';
-const hasKeys = IS_DEMO
-    ? (process.env.BINANCE_BOT_API && process.env.BINANCE_BOT_SECRET)
-    : (process.env.BINANCE_API_KEY && process.env.BINANCE_API_SECRET);
+const hasKeys = ENVIRONMENT === 'live'
+    ? (process.env.BINANCE_API_KEY && process.env.BINANCE_API_SECRET)
+    : (process.env.BINANCE_BOT_API && process.env.BINANCE_BOT_SECRET);
 
 if (!hasKeys) {
-    console.error(IS_DEMO
-        ? '❌ Missing: BINANCE_BOT_API, BINANCE_BOT_SECRET (demo.binance.com keys)'
-        : '❌ Missing: BINANCE_API_KEY, BINANCE_API_SECRET (live binance.com keys)'
+    console.error(ENVIRONMENT === 'live'
+        ? '❌ Missing: BINANCE_API_KEY, BINANCE_API_SECRET (live binance.com keys)'
+        : '❌ Missing: BINANCE_BOT_API, BINANCE_BOT_SECRET (from demo.binance.com/api-management)'
     );
     process.exit(1);
 }

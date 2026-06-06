@@ -82,15 +82,41 @@ export function clearActiveTrade(): void { _activeTrade = null; }
 // Testnet keys (from demo.binance.com) → BINANCE_BOT_API / BINANCE_BOT_SECRET
 // Live keys (from binance.com)         → BINANCE_API_KEY / BINANCE_API_SECRET
 
-const IS_TESTNET = process.env.ENVIRONMENT === 'testnet';
+// ENVIRONMENT options:
+//   'demo'    → demo.binance.com (your current setup — keys from demo.binance.com/api-management)
+//   'testnet' → testnet.binancefuture.com (separate portal, separate keys)
+//   'live'    → binance.com (real money)
 
-const API_KEY    = IS_TESTNET
-    ? (process.env.BINANCE_BOT_API    ?? process.env.BINANCE_API_KEY    ?? '')
-    : (process.env.BINANCE_API_KEY    ?? '');
+const ENVIRONMENT = process.env.ENVIRONMENT ?? 'demo';
+const IS_TESTNET  = ENVIRONMENT !== 'live';
+const IS_DEMO     = ENVIRONMENT === 'demo';
 
-const API_SECRET = IS_TESTNET
-    ? (process.env.BINANCE_BOT_SECRET ?? process.env.BINANCE_API_SECRET ?? '')
-    : (process.env.BINANCE_API_SECRET ?? '');
+const API_KEY    = IS_DEMO
+    ? (process.env.BINANCE_BOT_API    ?? '')
+    : ENVIRONMENT === 'testnet'
+        ? (process.env.BINANCE_BOT_API ?? process.env.BINANCE_API_KEY ?? '')
+        : (process.env.BINANCE_API_KEY ?? '');
+
+const API_SECRET = IS_DEMO
+    ? (process.env.BINANCE_BOT_SECRET ?? '')
+    : ENVIRONMENT === 'testnet'
+        ? (process.env.BINANCE_BOT_SECRET ?? process.env.BINANCE_API_SECRET ?? '')
+        : (process.env.BINANCE_API_SECRET ?? '');
+
+// demo.binance.com REST base: https://testnet.binancefuture.com (same underlying infra)
+// Keys from demo.binance.com ARE accepted at testnet.binancefuture.com fapi endpoints
+const DEMO_URLS = {
+    urls: {
+        api: {
+            public:        'https://testnet.binancefuture.com',
+            private:       'https://testnet.binancefuture.com',
+            fapiPublic:    'https://testnet.binancefuture.com/fapi/v1/',
+            fapiPrivate:   'https://testnet.binancefuture.com/fapi/v1/',
+            fapiPublicV2:  'https://testnet.binancefuture.com/fapi/v2/',
+            fapiPrivateV2: 'https://testnet.binancefuture.com/fapi/v2/',
+        },
+    },
+};
 
 const exchange = new (ccxt as any).binanceusdm({
     apiKey:          API_KEY,
@@ -98,14 +124,7 @@ const exchange = new (ccxt as any).binanceusdm({
     timeout:         15_000,
     enableRateLimit: true,
     options: { defaultType: 'future' },
-    ...(IS_TESTNET ? {
-        urls: {
-            api: {
-                public:  'https://testnet.binancefuture.com',
-                private: 'https://testnet.binancefuture.com',
-            },
-        },
-    } : {}),
+    ...(IS_TESTNET ? DEMO_URLS : {}),
 });
 
 console.log(`[Exchange] Binance USDM Futures | Mode: ${IS_TESTNET ? '🧪 TESTNET (demo.binance.com keys)' : '🔴 MAINNET'}`);
