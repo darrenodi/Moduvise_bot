@@ -2,188 +2,250 @@ import ccxt from 'ccxt';
 import { generateSignals, getSession, MARKET_SYMBOL, DISPLAY_SYMBOL } from './signals.js';
 import type { MarketData, TechnicalIndicators } from './signals.js';
 import {
-    executeHyperliquidTrade,
+    executeBinanceTrade,
     getAvailableBalance,
     hasOpenPosition,
     getOpenPositionDetails,
-    emergencyClose,
+    getActiveTrade,
+    clearActiveTrade,
+    triggerStopLoss,
+    calcSize,
 } from './executeTrade.js';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
+// ─── ENVIRONMENT ──────────────────────────────────────────────────────────────
+
+const IS_TESTNET = process.env.ENVIRONMENT === 'testnet';
+
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
-// The world's best scalper runs 24/7, banks 50% of every profit,
-// and never manually intervenes unless the market is truly broken.
 
 const CONFIG = {
-    MAX_TRADES_DAY:  300,    // hard ceiling — ~1 attempt every 5 min over 24h
-
-    // Emergency exit — $40 adverse move (>$20 warning, $40 action)
-    EMERGENCY_ADVERSE_USD:  40.00,
-    WARNING_ADVERSE_USD:    20.00,
-
-    // Profit recycling — when real on-chain balance hits this, log alert
-    RECYCLE_BALANCE: 800,
-    RECYCLE_KEEP:    400,
-
-    // Banking — 50% of net profit grows the virtual sizing balance,
-    // 50% is "banked" (tracked in memory, represents withdrawable profit).
+    MAX_TRADES_DAY: 300,
+    SL_MOVE: 3.00,
+    MAX_TRADING_BALANCE: 20_000,
     BANK_FRACTION: 0.50,
+    RECYCLE_BALANCE: 800,
+    RECYCLE_KEEP: 400,
+    MOMENTUM_CANDLES: 3,
 } as const;
 
-// ─── EXCHANGE ────────────────────────────────────────────────────────────────
+// ─── EXCHANGE (market data only) ──────────────────────────────────────────────
 
-const exchange = new (ccxt as any).hyperliquid({
-    apiKey:          process.env.HYPERLIQUID_WALLET_ADDRESS ?? '',
-    privateKey:      process.env.HYPERLIQUID_API_SECRET     ?? '',
-    walletAddress:   process.env.HYPERLIQUID_WALLET_ADDRESS ?? '',
+const exchange = new (ccxt as any).binanceusdm({
+    apiKey:          process.env.BINANCE_API_KEY    ?? '',
+    secret:          process.env.BINANCE_API_SECRET ?? '',
     timeout:         15_000,
     enableRateLimit: true,
-    options:         { defaultType: 'swap' },
+    options: { defaultType: 'future' },
+    ...(IS_TESTNET ? {
+        urls: {
+            api: {
+                public:  'https://testnet.binancefuture.com',
+                private: 'https://testnet.binancefuture.com',
+            },
+        },
+    } : {}),
 });
 
-// ─── DAILY STATS ─────────────────────────────────────────────────────────────
+// ─── DAILY STATS ──────────────────────────────────────────────────────────────
 
 interface DayStats {
-    date:           string;
-    attempts:       number;
-    fills:          number;
-    cancelled:      number;
-    emergencyExits: number;
-    realPnl:        number;
-    sessionBanked:  number;
-    grossProfit:    number;
-    netProfit:      number;
-    avgFillMs:      number;
-    avgTpMs:        number;
-    fillTimes:      number[];
-    tpTimes:        number[];
+    date:            string;
+    attempts:        number;
+    fills:           number;
+    tpHits:          number;
+    slHits:          number;
+    momentumBlocked: number;
+    grossProfit:     number;
+    netProfit:       number;
+    slLoss:          number;
+    sessionBanked:   number;
+    fillTimes:       number[];
+    avgFillMs:       number;
 }
 
-let stats: DayStats = {
-    date: '', attempts: 0, fills: 0, cancelled: 0, emergencyExits: 0,
-    realPnl: 0, sessionBanked: 0, grossProfit: 0, netProfit: 0,
-    avgFillMs: 0, avgTpMs: 0, fillTimes: [], tpTimes: [],
-};
+let stats: DayStats = freshStats();
+
+function freshStats(): DayStats {
+    return {
+        date: new Date().toISOString().slice(0, 10),
+        attempts: 0, fills: 0, tpHits: 0, slHits: 0,
+        momentumBlocked: 0, grossProfit: 0, netProfit: 0,
+        slLoss: 0, sessionBanked: 0, fillTimes: [], avgFillMs: 0,
+    };
+}
 
 // ─── BANKING STATE ────────────────────────────────────────────────────────────
-// virtualTradingBalance: used for sizing — grows by 50% of net profit.
-// sessionBanked: cumulative 50% profit banked this session.
-// Real on-chain USDC grows by 100% — bot just sizes off 50%.
 
 let virtualTradingBalance = 0;
 let sessionBanked         = 0;
-let totalTrades           = 0;
-let totalFills            = 0;
 const startTime           = Date.now();
 const initialBalance      = { value: 0, set: false };
 
+interface PendingTrade {
+    entryPrice:  number;
+    tpPrice:     number;
+    slPrice:     number;
+    side:        'long' | 'short';
+    size:        number;
+    grossProfit: number;
+    netProfit:   number;
+    fees:        number;
+    openedAt:    number;
+    tpMove?:     number;
+    fillTimeMs?: number;
+}
+let pendingTrade: PendingTrade | null = null;
+
 function checkReset(): void {
     const today = new Date().toISOString().slice(0, 10);
-    if (stats.date && stats.date !== today) printDailySummary();
-    if (stats.date !== today) {
-        stats = {
-            date: today, attempts: 0, fills: 0, cancelled: 0, emergencyExits: 0,
-            realPnl: 0, sessionBanked: 0, grossProfit: 0, netProfit: 0,
-            avgFillMs: 0, avgTpMs: 0, fillTimes: [], tpTimes: [],
-        };
+    if (stats.date && stats.date !== today) {
+        printDailySummary();
+        stats = freshStats();
+        stats.date = today;
     }
 }
 
 function printDailySummary(): void {
-    const totalValue  = virtualTradingBalance + sessionBanked;
-    const uptime      = ((Date.now() - startTime) / 3600000).toFixed(1);
-    const fillRate    = stats.attempts > 0 ? ((stats.fills / stats.attempts) * 100).toFixed(0) : '0';
-    stats.avgFillMs   = stats.fillTimes.length > 0 ? stats.fillTimes.reduce((a,b)=>a+b,0) / stats.fillTimes.length : 0;
-    stats.avgTpMs     = stats.tpTimes.length  > 0 ? stats.tpTimes.reduce((a,b)=>a+b,0)  / stats.tpTimes.length  : 0;
+    const total  = virtualTradingBalance + sessionBanked;
+    const uptime = ((Date.now() - startTime) / 3600000).toFixed(1);
+    const tpRate = stats.fills > 0 ? ((stats.tpHits / stats.fills) * 100).toFixed(0) : '0';
+    stats.avgFillMs = stats.fillTimes.length > 0
+        ? stats.fillTimes.reduce((a, b) => a + b, 0) / stats.fillTimes.length : 0;
 
-    console.log(`\n${'█'.repeat(65)}`);
-    console.log(`  DAILY SUMMARY — ${stats.date}  (uptime: ${uptime}h)`);
-    console.log(`  ─────────────────────────────────────────────────────────`);
-    console.log(`  Attempts: ${stats.attempts} | Fills: ${stats.fills} | Cancelled: ${stats.cancelled} | Fill rate: ${fillRate}%`);
-    console.log(`  Emergency exits: ${stats.emergencyExits}`);
-    console.log(`  Avg fill wait: ${(stats.avgFillMs/1000).toFixed(1)}s | Avg TP time: ${(stats.avgTpMs/1000).toFixed(0)}s`);
-    console.log(`  Gross P&L: $${stats.grossProfit.toFixed(4)} | Net P&L: $${stats.netProfit.toFixed(4)}`);
-    console.log(`  Banked today: $${stats.sessionBanked.toFixed(4)}`);
-    console.log(`  ─────────────────────────────────────────────────────────`);
-    console.log(`  💼 Virtual trading balance: $${virtualTradingBalance.toFixed(4)}`);
-    console.log(`  🏦 Session banked (all):    $${sessionBanked.toFixed(4)}`);
-    console.log(`  📊 Total value:             $${totalValue.toFixed(4)}`);
-    if (initialBalance.set && initialBalance.value > 0) {
-        const returnPct = ((totalValue - initialBalance.value) / initialBalance.value * 100).toFixed(2);
-        console.log(`  📈 Return since start:      ${returnPct}%`);
+    const summary = [
+        `📊 DAILY SUMMARY — ${stats.date} (${uptime}h uptime)`,
+        `Attempts: ${stats.attempts} | Fills: ${stats.fills} | TP: ${stats.tpHits} (${tpRate}%) | SL: ${stats.slHits} | MomBlock: ${stats.momentumBlocked}`,
+        `Gross P&L: $${stats.grossProfit.toFixed(4)} | Net: $${stats.netProfit.toFixed(4)} | SL losses: $${stats.slLoss.toFixed(4)}`,
+        `Banked today: $${stats.sessionBanked.toFixed(4)}`,
+        `💼 vBal: $${virtualTradingBalance.toFixed(2)} | 🏦 Banked: $${sessionBanked.toFixed(2)} | 📊 Total: $${total.toFixed(2)}`,
+        initialBalance.set ? `📈 Return: ${((total - initialBalance.value) / initialBalance.value * 100).toFixed(2)}%` : '',
+    ].filter(Boolean).join('\n');
+
+    console.log(`\n${'█'.repeat(65)}\n${summary}\n${'█'.repeat(65)}\n`);
+}
+
+// ─── MOMENTUM FRESHNESS ───────────────────────────────────────────────────────
+
+async function isMomentumFresh(direction: 'long' | 'short'): Promise<boolean> {
+    try {
+        const candles = await exchange.fetchOHLCV(MARKET_SYMBOL, '1m', undefined, CONFIG.MOMENTUM_CANDLES + 2);
+        if (!candles || candles.length < CONFIG.MOMENTUM_CANDLES + 1) return true;
+
+        const recent = candles.slice(-(CONFIG.MOMENTUM_CANDLES + 1));
+        let conflicts = 0;
+
+        for (let i = 1; i < recent.length; i++) {
+            const open  = Number(recent[i]?.[1] ?? 0);
+            const close = Number(recent[i]?.[4] ?? 0);
+            if (direction === 'long'  && close < open) conflicts++;
+            if (direction === 'short' && close > open) conflicts++;
+        }
+
+        if (conflicts >= CONFIG.MOMENTUM_CANDLES) {
+            console.log(`[Momentum] 🚫 All ${CONFIG.MOMENTUM_CANDLES} candles against ${direction.toUpperCase()} — skip.`);
+            return false;
+        }
+        console.log(`[Momentum] ✅ ${direction.toUpperCase()} fresh (${conflicts}/${CONFIG.MOMENTUM_CANDLES} conflicts).`);
+        return true;
+    } catch (e: any) {
+        console.warn(`[Momentum] Check failed: ${e.message} — allowing entry.`);
+        return true;
     }
-    console.log(`${'█'.repeat(65)}\n`);
 }
 
 // ─── POSITION HEALTH CHECK ────────────────────────────────────────────────────
-// Runs at the start of every cycle.
-// Warn at $20 adverse, emergency close at $40.
-// No regular SL — Gold oscillates. This is only black-swan protection.
 
-async function checkPositionHealth(): Promise<boolean> {
+async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     const pos = await getOpenPositionDetails();
-    if (!pos.exists || !pos.entryPrice || !pos.side) return false;
 
-    try {
-        const ticker       = await exchange.fetchTicker(MARKET_SYMBOL);
-        const currentPrice = ticker.last ?? pos.entryPrice;
-
-        const adverseMove = pos.side === 'long'
-            ? pos.entryPrice - currentPrice
-            : currentPrice  - pos.entryPrice;
-
-        if (adverseMove > 0) {
-            const emoji = adverseMove >= CONFIG.WARNING_ADVERSE_USD ? '🔴' :
-                          adverseMove >= 10 ? '🟡' : '🟢';
-            console.log(`[Health] ${emoji} ${pos.side.toUpperCase()} @ $${pos.entryPrice.toFixed(2)} | now $${currentPrice.toFixed(2)} | adverse $${adverseMove.toFixed(2)}`);
-        } else {
-            const favour = Math.abs(adverseMove);
-            console.log(`[Health] ✅ ${pos.side.toUpperCase()} @ $${pos.entryPrice.toFixed(2)} | now $${currentPrice.toFixed(2)} | +$${favour.toFixed(2)} in favour`);
-        }
-
-        if (adverseMove >= CONFIG.EMERGENCY_ADVERSE_USD) {
-            console.log(`[Health] 🚨 EMERGENCY EXIT — $${adverseMove.toFixed(2)} adverse exceeds $${CONFIG.EMERGENCY_ADVERSE_USD} threshold!`);
-            await emergencyClose(pos.side, pos.size);
-            stats.emergencyExits++;
-            return true;
-        }
-    } catch (e: any) {
-        console.error(`[Health] Check error: ${e.message}`);
+    if (!pos.exists) {
+        if (pendingTrade) return 'tp';
+        return 'none';
     }
 
-    return false;
+    const trade = pendingTrade ?? getActiveTrade();
+    if (!trade) {
+        console.log(`[Health] Orphan position detected — no trade record.`);
+        return 'open';
+    }
+
+    const adverseMove = pos.side === 'long'
+        ? trade.entryPrice - pos.currentPrice
+        : pos.currentPrice - trade.entryPrice;
+
+    const slThreshold = (trade as any).tpMove ?? CONFIG.SL_MOVE;
+    const inFavour    = -adverseMove;
+
+    const emoji = adverseMove > slThreshold * 0.7 ? '🔴' :
+                  adverseMove > 0                 ? '🟡' : '🟢';
+
+    console.log(`[Health] ${emoji} ${pos.side?.toUpperCase()} @ $${trade.entryPrice.toFixed(2)} | now $${pos.currentPrice.toFixed(2)} | ${adverseMove > 0 ? `adverse -$${adverseMove.toFixed(2)}` : `+$${inFavour.toFixed(2)}`} | SL@$${trade.slPrice.toFixed(2)} (±$${slThreshold.toFixed(2)})`);
+
+    if (adverseMove >= slThreshold) {
+        console.log(`[Health] 🛑 SL TRIGGERED — $${adverseMove.toFixed(2)} ≥ $${slThreshold.toFixed(2)} | 1:1 R:R`);
+
+        await triggerStopLoss(pos.side!, pos.size, `$${adverseMove.toFixed(2)} adverse ≥ $${slThreshold.toFixed(2)}`);
+
+        const slLoss  = pos.size * adverseMove;
+        const fees    = pendingTrade?.fees ?? (pos.size * pos.currentPrice * 0.00063);
+        const netLoss = -(slLoss + fees);
+
+        stats.slHits++;
+        stats.slLoss    += slLoss;
+        stats.netProfit += netLoss;
+        virtualTradingBalance = Math.max(1.50, virtualTradingBalance + netLoss);
+
+        pendingTrade = null;
+        clearActiveTrade();
+        return 'sl';
+    }
+
+    return 'open';
+}
+
+// ─── BANKING ──────────────────────────────────────────────────────────────────
+
+function bankProfit(netProfit: number): void {
+    const atCap = virtualTradingBalance >= CONFIG.MAX_TRADING_BALANCE;
+
+    if (atCap) {
+        sessionBanked       += netProfit;
+        stats.sessionBanked += netProfit;
+        console.log(`[Bank] 🏦 CAP REACHED — 100% banked: +$${netProfit.toFixed(4)} | Total banked: $${sessionBanked.toFixed(4)}`);
+    } else {
+        const banked   = netProfit * CONFIG.BANK_FRACTION;
+        const compound = netProfit * (1 - CONFIG.BANK_FRACTION);
+
+        sessionBanked         += banked;
+        virtualTradingBalance  = Math.min(virtualTradingBalance + compound, CONFIG.MAX_TRADING_BALANCE);
+        stats.sessionBanked   += banked;
+
+        console.log(`[Bank] ✅ Net=$${netProfit.toFixed(4)} | +$${compound.toFixed(4)} compound | +$${banked.toFixed(4)} banked`);
+        console.log(`[Bank] 💼 vBal=$${virtualTradingBalance.toFixed(2)} | 🏦 Banked=$${sessionBanked.toFixed(2)} | Total=$${(virtualTradingBalance + sessionBanked).toFixed(2)}`);
+    }
 }
 
 // ─── REAL PnL TRACKER ─────────────────────────────────────────────────────────
 
 async function updateRealPnl(): Promise<void> {
     try {
-        const recentTrades = await (exchange as any).fetchMyTrades(MARKET_SYMBOL, undefined, 20);
-        if (!recentTrades?.length) return;
-
-        let realPnl = 0, wins = 0, losses = 0;
-        for (const t of recentTrades) {
-            const pnl = parseFloat(t.info?.closedPnl ?? t.info?.realizedPnl ?? '0');
-            if (!isNaN(pnl) && pnl !== 0) {
-                realPnl += pnl;
-                if (pnl > 0) wins++; else losses++;
-            }
+        const trades = await exchange.fetchMyTrades(MARKET_SYMBOL, undefined, undefined, { limit: 20 });
+        if (!trades?.length) return;
+        let pnl = 0, w = 0, l = 0;
+        for (const t of trades) {
+            const p = parseFloat(t.info?.realizedPnl ?? t.info?.closedPnl ?? '0');
+            if (!isNaN(p) && p !== 0) { pnl += p; if (p > 0) w++; else l++; }
         }
-
-        if (wins + losses > 0) {
-            const wr = ((wins / (wins + losses)) * 100).toFixed(0);
-            console.log(`[Main] 📊 Recent ${wins+losses} closed: $${realPnl.toFixed(4)} | W:${wins} L:${losses} WR:${wr}%`);
-            stats.realPnl = realPnl;
-        }
+        if (w + l > 0) console.log(`[Main] 📊 Exchange recent ${w + l} closed: $${pnl.toFixed(4)} W:${w} L:${l} WR:${((w / (w + l)) * 100).toFixed(0)}%`);
     } catch { /* non-critical */ }
 }
 
-// ─── MATH HELPERS ────────────────────────────────────────────────────────────
+// ─── MATH HELPERS ─────────────────────────────────────────────────────────────
 
 function ema(candles: any[], period: number): number {
-    // True EMA (exponential) rather than SMA — better for trend detection
-    if (candles.length < period) return Number(candles[candles.length-1]?.[4] ?? 0);
+    if (candles.length < period) return Number(candles[candles.length - 1]?.[4] ?? 0);
     const k = 2 / (period + 1);
     let val = candles.slice(0, period).reduce((s: number, c: any) => s + Number(c?.[4] ?? 0), 0) / period;
     for (let i = period; i < candles.length; i++) {
@@ -194,13 +256,13 @@ function ema(candles: any[], period: number): number {
 
 function calcRSI(candles: any[], period = 14): number {
     if (candles.length < period + 1) return 50;
-    let gains = 0, losses = 0;
+    let g = 0, l = 0;
     for (let i = candles.length - period; i < candles.length; i++) {
-        const diff = Number(candles[i]?.[4] ?? 0) - Number(candles[i - 1]?.[4] ?? 0);
-        if (diff > 0) gains += diff; else losses -= diff;
+        const d = Number(candles[i]?.[4] ?? 0) - Number(candles[i - 1]?.[4] ?? 0);
+        if (d > 0) g += d; else l -= d;
     }
-    if (losses === 0) return 100;
-    return 100 - 100 / (1 + (gains / period) / (losses / period));
+    if (l === 0) return 100;
+    return 100 - 100 / (1 + (g / period) / (l / period));
 }
 
 function calcADX(candles: any[], period = 14): number {
@@ -228,39 +290,31 @@ function calcADX(candles: any[], period = 14): number {
     return dxs.slice(-period).reduce((a, b) => a + b, 0) / period;
 }
 
-// ─── VWAP (approximate intraday) ──────────────────────────────────────────────
 function calcVwap(candles: any[]): number {
-    let tpvSum = 0, volSum = 0;
+    let tpv = 0, vol = 0;
     for (const c of candles) {
-        const hi = +c?.[2]||0, lo = +c?.[3]||0, cl = +c?.[4]||0, vol = +c?.[5]||0;
-        const tp = (hi + lo + cl) / 3;
-        tpvSum += tp * vol;
-        volSum += vol;
+        const tp = (+c?.[2]||0 + +c?.[3]||0 + +c?.[4]||0) / 3;
+        tpv += tp * (+c?.[5]||0); vol += +c?.[5]||0;
     }
-    return volSum > 0 ? tpvSum / volSum : 0;
+    return vol > 0 ? tpv / vol : 0;
 }
 
-// ─── SWING HIGH/LOW ───────────────────────────────────────────────────────────
-function calcSwings(candles: any[], lookback = 20): { high: number; low: number } {
-    const slice = candles.slice(-lookback);
-    let high = 0, low = Infinity;
-    for (const c of slice) {
-        const h = +c?.[2]||0, l = +c?.[3]||Infinity;
-        if (h > high) high = h;
-        if (l < low)  low  = l;
-    }
-    return { high, low: low === Infinity ? 0 : low };
+function calcSwings(candles: any[], n = 20): { high: number; low: number } {
+    const s = candles.slice(-n);
+    let h = 0, l = Infinity;
+    for (const c of s) { if (+c?.[2] > h) h = +c[2]; if (+c?.[3] < l) l = +c[3]; }
+    return { high: h, low: l === Infinity ? 0 : l };
 }
 
 // ─── MARKET DATA ──────────────────────────────────────────────────────────────
 
 async function fetchMarketData(): Promise<MarketData[]> {
-    console.log(`[Data] Fetching GOLD market data...`);
+    console.log(`[Data] Fetching XAUUSDT market data from Binance...`);
     try {
         const [ticker, ob, c5m, c30m, c1h, c4h, c1w] = await Promise.all([
             exchange.fetchTicker(MARKET_SYMBOL),
             exchange.fetchOrderBook(MARKET_SYMBOL, 20),
-            exchange.fetchOHLCV(MARKET_SYMBOL, '5m',  undefined, 50),  // more candles for VWAP
+            exchange.fetchOHLCV(MARKET_SYMBOL, '5m',  undefined, 50),
             exchange.fetchOHLCV(MARKET_SYMBOL, '30m', undefined, 12),
             exchange.fetchOHLCV(MARKET_SYMBOL, '1h',  undefined, 60),
             exchange.fetchOHLCV(MARKET_SYMBOL, '4h',  undefined, 10),
@@ -270,7 +324,6 @@ async function fetchMarketData(): Promise<MarketData[]> {
         const price = ticker.last ?? 0;
         if (!price) { console.warn(`[Data] No price`); return []; }
 
-        // ── ATR on 5m ─────────────────────────────────────────────────────
         let totalTR = 0, volSum = 0;
         const vols: number[] = [];
         for (let i = 1; i < c5m.length; i++) {
@@ -282,42 +335,32 @@ async function fetchMarketData(): Promise<MarketData[]> {
         }
         const atr5m       = totalTR / Math.max(c5m.length - 1, 1);
         const avgVol      = volSum / Math.max(vols.length, 1);
-        const lastVol     = vols[vols.length - 1] ?? 0;
-        const volumeRatio = avgVol > 0 ? lastVol / avgVol : 1;
+        const volumeRatio = avgVol > 0 ? (vols[vols.length - 1] ?? 0) / avgVol : 1;
 
-        // ── EMA (true exponential) from 1h ────────────────────────────────
         const ema8  = ema(c1h, 8);
         const ema21 = ema(c1h, 21);
         const ema50 = ema(c1h, 50);
         const emaTrend: 'bullish' | 'bearish' | 'neutral' =
             ema8 > ema21 && ema21 > ema50 ? 'bullish' :
             ema8 < ema21 && ema21 < ema50 ? 'bearish' : 'neutral';
-
         const rsi = calcRSI(c1h, 14);
 
-        // ── Momentum ─────────────────────────────────────────────────────
-        const now   = +c5m[c5m.length - 1]?.[4]  || price;
-        const p5m   = +c5m[Math.max(0, c5m.length - 2)]?.[4]  || price;
-        const p30m  = +c30m[Math.max(0, c30m.length - 2)]?.[4] || price;
-        const p1h   = +c1h[Math.max(0, c1h.length - 13)]?.[4] || price;
-        const mom5m  = (now - p5m)  / (p5m  || 1) * 100;
-        const mom30m = (now - p30m) / (p30m || 1) * 100;
-        const mom1h  = (now - p1h)  / (p1h  || 1) * 100;
+        const now  = +c5m[c5m.length - 1]?.[4]  || price;
+        const p5m  = +c5m[Math.max(0, c5m.length - 2)]?.[4]  || price;
+        const p30m = +c30m[Math.max(0, c30m.length - 2)]?.[4] || price;
+        const p1h  = +c1h[Math.max(0, c1h.length - 13)]?.[4] || price;
 
-        // ── 4h bias ───────────────────────────────────────────────────────
         const c4hClose = +c4h[c4h.length - 1]?.[4] || price;
         const c4hPrev  = +c4h[Math.max(0, c4h.length - 2)]?.[4] || price;
         const trendBias4h: 'bull' | 'bear' | 'neutral' =
             c4hClose > c4hPrev * 1.001 ? 'bull' :
             c4hClose < c4hPrev * 0.999 ? 'bear' : 'neutral';
 
-        // ── Weekly bias ───────────────────────────────────────────────────
         const wClose = +c1w[c1w.length - 1]?.[4] || price;
         const wPrev  = +c1w[Math.max(0, c1w.length - 2)]?.[4] || price;
         const weeklyBias: 'bullish' | 'bearish' | 'neutral' =
             wClose > wPrev ? 'bullish' : wClose < wPrev ? 'bearish' : 'neutral';
 
-        // ── Price structure ───────────────────────────────────────────────
         const h24 = ticker.high ?? price, l24 = ticker.low ?? price;
         const mid = (h24 + l24) / 2;
         const priceStructure: 'uptrend' | 'downtrend' | 'ranging' =
@@ -326,45 +369,40 @@ async function fetchMarketData(): Promise<MarketData[]> {
 
         const adx = calcADX(c5m, 14);
 
-        // ── Order book walls ──────────────────────────────────────────────
         const wallFilter = (levels: any[]) =>
-            levels
-                .map(l => ({ price: +l[0]||0, notionalUsd: (+l[0]||0) * (+l[1]||0) }))
-                .filter(w => w.notionalUsd > 500)
-                .slice(0, 5);
+            levels.map(l => ({ price: +l[0]||0, notionalUsd: (+l[0]||0) * (+l[1]||0) }))
+                  .filter(w => w.notionalUsd > 500).slice(0, 5);
 
-        const bidWalls = wallFilter(ob.bids ?? []);
-        const askWalls = wallFilter(ob.asks ?? []);
+        const bidWalls          = wallFilter(ob.bids ?? []);
+        const askWalls          = wallFilter(ob.asks ?? []);
         const nearestSupport    = bidWalls[0]?.price ?? price - 10;
         const nearestResistance = askWalls[0]?.price ?? price + 10;
 
-        const bestBid    = +ob.bids?.[0]?.[0] || price;
-        const bestAsk    = +ob.asks?.[0]?.[0] || price;
-        const spreadUsd  = Math.max(0, bestAsk - bestBid);
+        const bestBid   = +ob.bids?.[0]?.[0] || price;
+        const bestAsk   = +ob.asks?.[0]?.[0] || price;
+        const spreadUsd = Math.max(0, bestAsk - bestBid);
 
-        // ── OB imbalance (top 5 levels) ───────────────────────────────────
-        const bidVol = ob.bids?.slice(0,5).reduce((s: number, l: any[]) => s + (+l[1]||0), 0) ?? 0;
-        const askVol = ob.asks?.slice(0,5).reduce((s: number, l: any[]) => s + (+l[1]||0), 0) ?? 0;
-        const totalObVol = bidVol + askVol;
+        const bidVol      = ob.bids?.slice(0, 5).reduce((s: number, l: any[]) => s + (+l[1]||0), 0) ?? 0;
+        const askVol      = ob.asks?.slice(0, 5).reduce((s: number, l: any[]) => s + (+l[1]||0), 0) ?? 0;
+        const totalObVol  = bidVol + askVol;
         const obImbalance = totalObVol > 0 ? (bidVol - askVol) / totalObVol : 0;
 
-        // ── VWAP ─────────────────────────────────────────────────────────
-        const vwap       = calcVwap(c5m);
+        const vwap        = calcVwap(c5m);
         const priceVsVwap = vwap > 0 ? ((price - vwap) / vwap) * 100 : 0;
+        const swings      = calcSwings(c5m, 20);
 
-        // ── Swing high/low from 5m (last 20 candles) ──────────────────────
-        const swings = calcSwings(c5m, 20);
-
-        // ── Funding rate ──────────────────────────────────────────────────
+        // Binance funding rate
         let fundingRate: number | null = null;
         try {
             const fr = await exchange.fetchFundingRate(MARKET_SYMBOL);
             fundingRate = fr?.fundingRate ?? null;
-        } catch { /* optional */ }
+        } catch {}
 
         const indicators: TechnicalIndicators = {
             emaTrend, ema8, ema21, ema50, rsi,
-            momentum5m: mom5m, momentum30m: mom30m, momentum1h: mom1h,
+            momentum5m:  (now - p5m) / (p5m || 1) * 100,
+            momentum30m: (now - p30m) / (p30m || 1) * 100,
+            momentum1h:  (now - p1h) / (p1h || 1) * 100,
             priceStructure, trendBias4h, weeklyBias,
             atr5m, atrPct: (atr5m / price) * 100, volumeRatio,
             nearestResistance, nearestSupport,
@@ -372,24 +410,14 @@ async function fetchMarketData(): Promise<MarketData[]> {
             distanceToSupport:    price - nearestSupport,
             high24h: h24, low24h: l24, adx, fundingRate,
             spreadUsd, obImbalance, priceVsVwap,
-            recentSwingHigh: swings.high,
-            recentSwingLow:  swings.low,
+            recentSwingHigh: swings.high, recentSwingLow: swings.low,
         };
 
         const range24h = h24 - l24;
         const rangePos = range24h > 0 ? ((price - l24) / range24h * 100).toFixed(0) : '50';
-        console.log(`[Data] $${price.toFixed(2)} EMA:${emaTrend} RSI:${rsi.toFixed(1)} ADX:${adx.toFixed(1)} OBI:${(obImbalance*100).toFixed(0)}%`);
-        console.log(`[Data] Range pos: ${rangePos}% | Spread: $${spreadUsd.toFixed(3)} | VWAP: $${vwap.toFixed(2)} (${priceVsVwap.toFixed(3)}%)`);
-        console.log(`[Data] Mom 5m:${mom5m.toFixed(4)}% 30m:${mom30m.toFixed(4)}% 1h:${mom1h.toFixed(4)}% | 24h range: $${range24h.toFixed(2)}`);
+        console.log(`[Data] $${price.toFixed(2)} EMA:${emaTrend} RSI:${rsi.toFixed(1)} ADX:${adx.toFixed(1)} Spread:$${spreadUsd.toFixed(3)} Range:${rangePos}%`);
 
-        return [{
-            symbol:     DISPLAY_SYMBOL,
-            price,
-            change_24h: ticker.percentage ?? 0,
-            indicators,
-            orderBook:  { bidWalls, askWalls },
-        }];
-
+        return [{ symbol: DISPLAY_SYMBOL, price, change_24h: ticker.percentage ?? 0, indicators, orderBook: { bidWalls, askWalls } }];
     } catch (e: any) {
         console.error(`[Data] Error: ${e.message}`);
         return [];
@@ -400,109 +428,106 @@ async function fetchMarketData(): Promise<MarketData[]> {
 
 async function runCycle(): Promise<void> {
     checkReset();
-    totalTrades++;
 
     const session = getSession();
     console.log(`\n${'═'.repeat(65)}`);
-    console.log(`[Main] ${new Date().toISOString()} | ${session.name} [${session.quality}]`);
-    console.log(`[Main] Day: attempts=${stats.attempts} fills=${stats.fills} cancelled=${stats.cancelled} exits=${stats.emergencyExits}`);
-    console.log(`[Main] Balance (virtual): $${virtualTradingBalance.toFixed(4)} | Banked: $${sessionBanked.toFixed(4)} | Total: $${(virtualTradingBalance+sessionBanked).toFixed(4)}`);
+    console.log(`[Main] ${new Date().toISOString()} | ${session.name} [${session.quality}] | ${IS_TESTNET ? '🧪 TESTNET' : '🔴 LIVE'}`);
+    console.log(`[Main] attempts=${stats.attempts} fills=${stats.fills} tp=${stats.tpHits} sl=${stats.slHits} momBlocked=${stats.momentumBlocked}`);
+    console.log(`[Main] vBal=$${virtualTradingBalance.toFixed(2)} | Banked=$${sessionBanked.toFixed(2)} | Total=$${(virtualTradingBalance + sessionBanked).toFixed(2)} | Cap=$${CONFIG.MAX_TRADING_BALANCE.toLocaleString()}`);
     console.log(`${'═'.repeat(65)}`);
 
     if (stats.attempts >= CONFIG.MAX_TRADES_DAY) {
-        console.log(`[Main] Daily limit ${CONFIG.MAX_TRADES_DAY} reached. Resting until midnight.`);
+        console.log(`[Main] Daily limit reached.`);
         return;
     }
 
     try {
-        // ── STEP 1: Position health check ─────────────────────────────────
-        const emergencyFired = await checkPositionHealth();
-        if (emergencyFired) {
+        const health = await checkPositionHealth();
+
+        if (health === 'tp') {
+            if (pendingTrade) {
+                const net = pendingTrade.netProfit;
+                stats.fills++;
+                stats.tpHits++;
+                stats.grossProfit += pendingTrade.grossProfit;
+                stats.netProfit   += net;
+                if (pendingTrade.fillTimeMs) stats.fillTimes.push(pendingTrade.fillTimeMs);
+
+                bankProfit(net);
+                clearActiveTrade();
+                pendingTrade = null;
+            }
             await updateRealPnl();
             return;
         }
 
-        // ── STEP 2: If position is open, let TP work — don't pile in ──────
-        if (await hasOpenPosition()) {
-            console.log(`[Main] 📊 Position open — letting TP run.`);
+        if (health === 'sl') {
+            pendingTrade = null;
+            await updateRealPnl();
             return;
         }
 
-        // ── STEP 3: Balance check ──────────────────────────────────────────
-        const balance = await getAvailableBalance();
-        console.log(`[Main] On-chain balance: $${balance.toFixed(4)} USDC`);
+        if (health === 'open') {
+            console.log(`[Main] 📊 Trade in progress — SL@$${pendingTrade?.slPrice?.toFixed(2) ?? '?'} TP@$${pendingTrade?.tpPrice?.toFixed(2) ?? '?'}`);
+            return;
+        }
 
-        // Initialise virtual balance on first cycle
+        // ── No position — attempt new trade ──────────────────────────────
+
+        const balance = await getAvailableBalance();
+        console.log(`[Main] On-chain balance: $${balance.toFixed(4)}`);
+
         if (virtualTradingBalance <= 0) {
             virtualTradingBalance = balance;
             initialBalance.value  = balance;
             initialBalance.set    = true;
-            console.log(`[Bank] 💰 Virtual balance init: $${virtualTradingBalance.toFixed(4)}`);
+            console.log(`[Bank] 💰 Init virtual balance: $${virtualTradingBalance.toFixed(4)}`);
         }
 
-        if (balance < 1.50) {
-            console.log(`[Main] ⚠️ Balance $${balance.toFixed(4)} too low. Stopping.`);
-            return;
-        }
+        if (balance < 1.50) { console.log(`[Main] ⚠️ Balance too low.`); return; }
 
-        // Recycle alert
         if (balance >= CONFIG.RECYCLE_BALANCE) {
-            console.log(`[Main] 🎯 RECYCLE ALERT — $${balance.toFixed(2)} ≥ $${CONFIG.RECYCLE_BALANCE}`);
-            console.log(`[Main] 💰 Consider withdrawing $${(balance - CONFIG.RECYCLE_KEEP).toFixed(2)}, keeping $${CONFIG.RECYCLE_KEEP}.`);
-            // Does NOT stop trading — just logs the opportunity
+            console.log(`[Main] 🎯 RECYCLE ALERT — $${balance.toFixed(2)} ≥ $${CONFIG.RECYCLE_BALANCE}\nConsider withdrawing $${(balance - CONFIG.RECYCLE_KEEP).toFixed(2)}, keeping $${CONFIG.RECYCLE_KEEP}.`);
         }
 
-        // ── STEP 4: Fetch market data + generate signal ────────────────────
         const assets = await fetchMarketData();
         if (!assets.length) { console.log(`[Main] No data.`); return; }
 
         const signals = await generateSignals(assets);
 
         for (const signal of signals) {
-            if (signal.direction === 'neutral') {
-                console.log(`[Main] ⏸️ Neutral — skip.`);
-                continue;
-            }
+            if (signal.direction === 'neutral') { console.log(`[Main] ⏸️ Neutral.`); continue; }
+
+            const fresh = await isMomentumFresh(signal.direction as 'long' | 'short');
+            if (!fresh) { stats.momentumBlocked++; continue; }
 
             stats.attempts++;
-            totalFills++;
 
-            const result = await executeHyperliquidTrade(signal, virtualTradingBalance);
+            const result = await executeBinanceTrade(signal, virtualTradingBalance);
 
-            if (result.outcome === 'tp_confirmed' && result.netProfit !== undefined) {
-                // ── BANKING: 50% banked, 50% compounds ────────────────────
-                const net       = result.netProfit;
-                const banked    = net * CONFIG.BANK_FRACTION;
-                const compound  = net * (1 - CONFIG.BANK_FRACTION);
-
-                sessionBanked         += banked;
-                virtualTradingBalance += compound;
-                stats.fills++;
-                stats.sessionBanked   += banked;
-                stats.grossProfit     += result.grossProfit ?? 0;
-                stats.netProfit       += net;
-
-                if (result.fillTimeMs) stats.fillTimes.push(result.fillTimeMs);
-                if (result.tpTimeMs)   stats.tpTimes.push(result.tpTimeMs);
-
-                console.log(`[Bank] ✅ Net=$${net.toFixed(4)} Banked=$${banked.toFixed(4)} | vBal=$${virtualTradingBalance.toFixed(4)} AllBanked=$${sessionBanked.toFixed(4)}`);
-                console.log(`[Bank] 📊 Total value: $${(virtualTradingBalance + sessionBanked).toFixed(4)}`);
-
-            } else if (result.outcome === 'orders_placed') {
-                // TP not confirmed yet (poll timeout) — orders still live
-                stats.fills++;
-                if (result.fillTimeMs) stats.fillTimes.push(result.fillTimeMs);
-
-            } else if (result.outcome === 'cancelled') {
-                stats.cancelled++;
-                stats.attempts--;   // cancelled = not a real attempt
+            if (result.outcome === 'orders_placed' && result.entryPrice) {
+                pendingTrade = {
+                    entryPrice:  result.entryPrice,
+                    tpPrice:     result.tpPrice!,
+                    slPrice:     result.slPrice!,
+                    side:        signal.direction as 'long' | 'short',
+                    size:        calcSize(virtualTradingBalance, result.entryPrice, result.sizePct ?? 0.80, result.leverage ?? 20),
+                    grossProfit: result.grossProfit!,
+                    netProfit:   result.netProfit!,
+                    fees:        result.fees!,
+                    openedAt:    Date.now(),
+                    tpMove:      result.tpMove,
+                    fillTimeMs:  result.fillTimeMs,
+                } as any;
+            } else if (result.outcome === 'skipped') {
+                stats.attempts--;
             } else if (result.outcome === 'error') {
                 console.error(`[Main] Trade error: ${result.message}`);
+                stats.attempts--;
             }
-        }
 
-        // ── STEP 5: Update real PnL from exchange ────────────────────────
-        await updateRealPnl();
+            break;
+        }
 
     } catch (e: any) {
         console.error(`[Main] Cycle error: ${e.message}`);
@@ -510,9 +535,6 @@ async function runCycle(): Promise<void> {
 }
 
 // ─── SCHEDULER ────────────────────────────────────────────────────────────────
-// Uses session-aware timing exported from signals.ts.
-// PEAK hours: 45-75s cycles. LOW hours: 80-130s cycles.
-// Randomised to avoid pattern detection.
 
 function scheduleNext(): void {
     const session = getSession();
@@ -521,52 +543,38 @@ function scheduleNext(): void {
     );
     console.log(`[Main] Next cycle in ${(ms / 1000).toFixed(0)}s [${session.name}]`);
     setTimeout(async () => {
-        try {
-            await runCycle();
-        } catch (e: any) {
-            console.error(`[Main] Uncaught cycle error: ${e.message}`);
-        }
+        try { await runCycle(); } catch (e: any) { console.error(`[Main] Uncaught: ${e.message}`); }
         scheduleNext();
     }, ms);
 }
 
 // ─── GRACEFUL SHUTDOWN ────────────────────────────────────────────────────────
 
-process.on('SIGTERM', () => {
-    console.log(`\n[Main] SIGTERM — printing final summary...`);
-    printDailySummary();
-    process.exit(0);
-});
-
-process.on('SIGINT', () => {
-    console.log(`\n[Main] SIGINT — printing final summary...`);
-    printDailySummary();
-    process.exit(0);
-});
+process.on('SIGTERM', () => { printDailySummary(); process.exit(0); });
+process.on('SIGINT',  () => { printDailySummary(); process.exit(0); });
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
 
-if (!process.env.HYPERLIQUID_WALLET_ADDRESS || !process.env.HYPERLIQUID_API_SECRET) {
-    console.error(`❌ Missing environment variables:
-  HYPERLIQUID_WALLET_ADDRESS=0x...
-  HYPERLIQUID_API_SECRET=0x...
-  GEMINI_API_KEY=...
-  GEMINI_API_KEY2=... (optional fallback)`);
+if (!process.env.BINANCE_API_KEY || !process.env.BINANCE_API_SECRET) {
+    console.error(`❌ Missing: BINANCE_API_KEY, BINANCE_API_SECRET, GEMINI_API_KEY`);
     process.exit(1);
 }
 
-console.log(`\n${'█'.repeat(65)}`);
-console.log(`  MODUVISE GOLD PERP BOT — HYPERLIQUID`);
-console.log(`  ─────────────────────────────────────────────────────────`);
-console.log(`  Asset:     GOLD/USDC:USDC perp`);
-console.log(`  Leverage:  25x isolated`);
-console.log(`  TP:        $2.00 PostOnly (maker exit)`);
-console.log(`  SL:        NONE — range trading strategy`);
-console.log(`  Emergency: $40 adverse move → market close`);
-console.log(`  Entry:     PostOnly limit @ best bid/ask (0.0144%)`);
-console.log(`  Banking:   50% of net profit banked per trade`);
-console.log(`  Timing:    45–75s (PEAK) / 80–130s (LOW)`);
-console.log(`  Start:     ${new Date().toISOString()}`);
-console.log(`${'█'.repeat(65)}\n`);
+const startupMsg = [
+    `MODUVISE GOLD PERP BOT — BINANCE FUTURES`,
+    `Mode:      ${IS_TESTNET ? '🧪 TESTNET (demo.binance.com)' : '🔴 MAINNET (live)'}`,
+    `Asset:     XAUUSDT perp`,
+    `Leverage:  DYNAMIC — 10x (ATR>$8) | 20x (ATR $4-8) | 25x (ATR<$4)`,
+    `Entry:     Taker market (0.0450%)`,
+    `TP:        DYNAMIC — ATR×multiplier | Maker GTC limit (0.0180%) | min $1.50`,
+    `SL:        = TP distance (1:1 R:R) → Taker market (0.0450%)`,
+    `Size:      DYNAMIC — session quality × ATR regime (20%–95% of balance)`,
+    `Fee gate:  Gross must be > fees × 3 or trade is skipped`,
+    `Cap:       $${CONFIG.MAX_TRADING_BALANCE.toLocaleString()} trading balance`,
+    `Banking:   50% banked per TP | 100% banked at cap`,
+    `Start:     ${new Date().toISOString()}`,
+].join('\n  ');
+
+console.log(`\n${'█'.repeat(65)}\n  ${startupMsg}\n${'█'.repeat(65)}\n`);
 
 runCycle().then(scheduleNext);

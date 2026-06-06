@@ -4,13 +4,12 @@ dotenv.config();
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
-export const MARKET_SYMBOL  = 'XYZ-GOLD/USDC:USDC';
-export const DISPLAY_SYMBOL = 'XAU/USDC';
-export const TARGET_MOVE    = 2.00;
+export const MARKET_SYMBOL  = 'XAUUSDT';      // Binance USDM Futures symbol
+export const DISPLAY_SYMBOL = 'XAU/USDT';
+export const TARGET_MOVE    = 3.00;           // default fallback only
 
 // ─── MODEL FAILOVER ───────────────────────────────────────────────────────────
-// Tier order: cheapest fast models first, escalate on quota hit.
-// gemini-2.0-flash is current stable free tier as of June 2026.
+// MODELS UNCHANGED — exactly as provided. Do not modify.
 
 const MODEL_TIERS: Array<{ key: string; model: string }> = [
     { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3.1-flash-lite' },
@@ -53,9 +52,8 @@ export interface TechnicalIndicators {
     adx:                  number;
     fundingRate:          number | null;
     spreadUsd:            number;
-    // ── NEW: micro-structure signals ───────────────────────────────────────
-    obImbalance:          number;   // (bidVol - askVol) / totalVol — positive = buy pressure
-    priceVsVwap:          number;   // positive = price above VWAP (bullish micro)
+    obImbalance:          number;
+    priceVsVwap:          number;
     recentSwingHigh:      number;
     recentSwingLow:       number;
 }
@@ -72,30 +70,83 @@ export interface MarketData {
 }
 
 export interface GeneratedSignal {
-    symbol:       string;
-    direction:    SignalDirection;
-    market_price: number;
-    target_move:  number;
-    confidence:   number;
-    reasoning:    string;
+    symbol:             string;
+    direction:          SignalDirection;
+    market_price:       number;
+    target_move:        number;
+    confidence:         number;
+    reasoning:          string;
+    suggested_tp:       number;
+    suggested_leverage: number;
+    session_size_pct:   number;
 }
 
 // ─── SESSION ──────────────────────────────────────────────────────────────────
-// No dead hours — Gold trades 23/5 (closed Sat ~21 UTC to Sun ~21 UTC).
-// Session quality drives cycle speed in main.ts, not signal gating.
 
 export function getSession(): {
-    name: string;
-    quality: 'PEAK' | 'HIGH' | 'LOW';
+    name:       string;
+    quality:    'PEAK' | 'HIGH' | 'LOW';
     cycleMsMin: number;
     cycleMsMax: number;
+    sizePct:    number;
 } {
     const h = new Date().getUTCHours();
-    if (h >= 13 && h < 16) return { name: 'London/NY Overlap', quality: 'PEAK', cycleMsMin: 45_000, cycleMsMax: 75_000  };
-    if (h >= 9  && h < 13) return { name: 'London',            quality: 'HIGH', cycleMsMin: 55_000, cycleMsMax: 90_000  };
-    if (h >= 16 && h < 19) return { name: 'New York',          quality: 'HIGH', cycleMsMin: 55_000, cycleMsMax: 90_000  };
-    if (h >= 19 && h < 21) return { name: 'NY Close',          quality: 'LOW',  cycleMsMin: 70_000, cycleMsMax: 120_000 };
-    return                         { name: 'Asia/Off-hours',   quality: 'LOW',  cycleMsMin: 80_000, cycleMsMax: 130_000 };
+    if (h >= 13 && h < 16) return { name: 'London/NY Overlap', quality: 'PEAK', cycleMsMin: 45_000, cycleMsMax: 75_000,  sizePct: 0.95 };
+    if (h >= 9  && h < 13) return { name: 'London',            quality: 'HIGH', cycleMsMin: 55_000, cycleMsMax: 90_000,  sizePct: 0.80 };
+    if (h >= 16 && h < 19) return { name: 'New York',          quality: 'HIGH', cycleMsMin: 55_000, cycleMsMax: 90_000,  sizePct: 0.80 };
+    if (h >= 19 && h < 21) return { name: 'NY Close',          quality: 'LOW',  cycleMsMin: 70_000, cycleMsMax: 120_000, sizePct: 0.50 };
+    return                         { name: 'Asia/Off-hours',   quality: 'LOW',  cycleMsMin: 80_000, cycleMsMax: 130_000, sizePct: 0.30 };
+}
+
+// ─── ATR REGIME ───────────────────────────────────────────────────────────────
+
+export interface AtrRegime {
+    label:          'HIGH' | 'MED' | 'LOW';
+    leverage:       number;
+    tp:             number;
+    sl:             number;
+    baseSizePct:    number;
+    minFeeMultiple: number;
+}
+
+export function calcAtrRegime(atr5m: number, confidence: number): AtrRegime {
+    let regime: AtrRegime;
+
+    if (atr5m > 8) {
+        const tp = Math.min(atr5m * 1.2, 12);
+        regime   = { label: 'HIGH', leverage: 10, tp, sl: tp, baseSizePct: 0.60, minFeeMultiple: 3 };
+    } else if (atr5m >= 4) {
+        const tp = Math.min(atr5m * 1.5, 8);
+        regime   = { label: 'MED',  leverage: 20, tp, sl: tp, baseSizePct: 0.80, minFeeMultiple: 3 };
+    } else {
+        const tp = Math.min(atr5m * 2.0, 4);
+        regime   = { label: 'LOW',  leverage: 25, tp, sl: tp, baseSizePct: 0.95, minFeeMultiple: 3 };
+    }
+
+    regime.tp = Math.max(regime.tp, 1.50);
+    regime.sl = regime.tp;
+
+    if (confidence < 0.55 && regime.leverage > 10) {
+        regime.leverage = Math.max(10, regime.leverage - 5);
+    }
+
+    return regime;
+}
+
+// ─── LIQUIDATION BUFFER ───────────────────────────────────────────────────────
+
+export function safeLeverage(leverage: number, entryPrice: number, atr5m: number): number {
+    const minLiqDistance = atr5m * 2;
+    let lev = leverage;
+    while (lev > 1) {
+        const liqDistance = entryPrice / lev;
+        if (liqDistance >= minLiqDistance) break;
+        lev = Math.max(1, lev - 5);
+    }
+    if (lev !== leverage) {
+        console.log(`[Signal] ⚠️ Leverage reduced ${leverage}x→${lev}x — liq buffer ATR×2=$${(atr5m * 2).toFixed(2)}`);
+    }
+    return lev;
 }
 
 // ─── BIAS SCORING ─────────────────────────────────────────────────────────────
@@ -111,106 +162,85 @@ function computeBias(ind: TechnicalIndicators, price: number): {
     let bull = 0, bear = 0;
     const reasons: string[] = [];
 
-    // 1. EMA stack (1h)
-    if (ind.emaTrend === 'bullish') { bull++;  reasons.push('EMA8>21>50 bull'); }
+    if (ind.emaTrend === 'bullish')      { bull++; reasons.push('EMA8>21>50 bull'); }
     else if (ind.emaTrend === 'bearish') { bear++; reasons.push('EMA8<21<50 bear'); }
     else reasons.push('EMA neutral');
 
-    // 2. RSI zone — only extremes matter for a $2 scalp
     if (ind.rsi < 42)       { bull++; reasons.push(`RSI ${ind.rsi.toFixed(0)} low`); }
     else if (ind.rsi > 58)  { bear++; reasons.push(`RSI ${ind.rsi.toFixed(0)} high`); }
     else reasons.push(`RSI ${ind.rsi.toFixed(0)} mid`);
 
-    // 3. 30m momentum — primary short-term signal
     if (ind.momentum30m > 0.025)        { bull++; reasons.push(`30m +${ind.momentum30m.toFixed(3)}%`); }
     else if (ind.momentum30m < -0.025)  { bear++; reasons.push(`30m ${ind.momentum30m.toFixed(3)}%`); }
 
-    // 4. 1h momentum — bonus confirmation
     if (ind.momentum1h > 0.07)          { bull++; reasons.push(`1h +${ind.momentum1h.toFixed(3)}%`); }
     else if (ind.momentum1h < -0.07)    { bear++; reasons.push(`1h ${ind.momentum1h.toFixed(3)}%`); }
 
-    // 5. 4h trend
-    if (ind.trendBias4h === 'bull')     { bull++; reasons.push('4h bull'); }
-    else if (ind.trendBias4h === 'bear'){ bear++; reasons.push('4h bear'); }
+    if (ind.trendBias4h === 'bull')      { bull++; reasons.push('4h bull'); }
+    else if (ind.trendBias4h === 'bear') { bear++; reasons.push('4h bear'); }
 
-    // 6. ADX trend confirmation
     if (ind.adx > 18) {
-        if (bull > bear)        { bull++; reasons.push(`ADX ${ind.adx.toFixed(0)} bull`); }
-        else if (bear > bull)   { bear++; reasons.push(`ADX ${ind.adx.toFixed(0)} bear`); }
+        if (bull > bear)       { bull++; reasons.push(`ADX ${ind.adx.toFixed(0)} bull`); }
+        else if (bear > bull)  { bear++; reasons.push(`ADX ${ind.adx.toFixed(0)} bear`); }
     }
 
-    // 7. Order book imbalance (new micro signal)
-    if (ind.obImbalance > 0.15)         { bull++; reasons.push(`OB +${(ind.obImbalance*100).toFixed(0)}% buy pressure`); }
-    else if (ind.obImbalance < -0.15)   { bear++; reasons.push(`OB ${(ind.obImbalance*100).toFixed(0)}% sell pressure`); }
+    if (ind.obImbalance > 0.15)       { bull++; reasons.push(`OB +${(ind.obImbalance * 100).toFixed(0)}% buy`); }
+    else if (ind.obImbalance < -0.15) { bear++; reasons.push(`OB ${(ind.obImbalance * 100).toFixed(0)}% sell`); }
 
-    // 8. Price vs support/resistance (key for range scalping)
-    if (ind.distanceToSupport < 3.0)    { bull++; reasons.push(`Near support $${ind.nearestSupport.toFixed(1)}`); }
-    if (ind.distanceToResistance < 3.0) { bear++; reasons.push(`Near resistance $${ind.nearestResistance.toFixed(1)}`); }
+    if (ind.distanceToSupport < 3.0)    { bull++; reasons.push(`Near sup $${ind.nearestSupport.toFixed(1)}`); }
+    if (ind.distanceToResistance < 3.0) { bear++; reasons.push(`Near res $${ind.nearestResistance.toFixed(1)}`); }
 
-    // Choppy = 30m and 1h actively pointing opposite directions
-    const activeConflict =
+    // ── Funding rate: negative = shorts paying longs = bull pressure ──────
+    if (ind.fundingRate !== null) {
+        if (ind.fundingRate < -0.0002) { bull++; reasons.push(`Funding ${(ind.fundingRate * 100).toFixed(4)}% short-bias`); }
+        if (ind.fundingRate >  0.0002) { bear++; reasons.push(`Funding ${(ind.fundingRate * 100).toFixed(4)}% long-bias`); }
+    }
+
+    const isChoppy =
         (ind.momentum30m > 0.025 && ind.momentum1h < -0.07) ||
         (ind.momentum30m < -0.025 && ind.momentum1h > 0.07);
-    const isChoppy = activeConflict;
 
-    // Hard RSI blocks — only extreme levels
     const blockLong  = ind.rsi >= 82;
     const blockShort = ind.rsi <= 18;
-
-    const score     = Math.max(bull, bear);
-    const direction = bull > bear ? 'LONG' : bear > bull ? 'SHORT' : 'NEUTRAL';
+    const score      = Math.max(bull, bear);
+    const direction  = bull > bear ? 'LONG' : bear > bull ? 'SHORT' : 'NEUTRAL';
 
     return { direction, score, isChoppy, blockLong, blockShort, reasons };
 }
 
-// ─── EXTREME VOLATILITY GUARD ─────────────────────────────────────────────────
-// Only pause when ATR is massive AND volume spiking — true news event.
-// Normal volatility is fine; a $2 move still happens in it.
+// ─── GUARDS ───────────────────────────────────────────────────────────────────
 
 function isExtremeVolatility(ind: TechnicalIndicators): boolean {
     return ind.atr5m > 10.0 && ind.volumeRatio > 3.5;
 }
 
-// ─── SPREAD GUARD ─────────────────────────────────────────────────────────────
-// A wide spread kills maker fill probability and eats into the $2 TP.
-// Skip if spread >= $0.60 (30% of our $2 target).
-
 function isSpreadTooWide(ind: TechnicalIndicators): boolean {
-    return ind.spreadUsd >= 0.60;
+    // Binance XAUUSDT spread is typically $0.01–$0.10 — flag if > $0.50
+    return ind.spreadUsd >= 0.50;
 }
 
 // ─── LOCAL FALLBACK ───────────────────────────────────────────────────────────
-// Always produces a direction — 5m momentum tiebreaker.
-// "Gold always has a micro-direction." — World's best scalper
 
 function computeLocalDirection(ind: TechnicalIndicators, price: number): {
     direction: SignalDirection;
     reasoning: string;
-    score: number;
+    score:     number;
 } {
     const bias = computeBias(ind, price);
-
     let dir: SignalDirection;
-    if (bias.direction === 'LONG') {
-        dir = 'long';
-    } else if (bias.direction === 'SHORT') {
-        dir = 'short';
-    } else {
-        // Tiebreak: 5m momentum > OB imbalance > price vs range midpoint
-        if (Math.abs(ind.obImbalance) > 0.1) {
-            dir = ind.obImbalance > 0 ? 'long' : 'short';
-        } else if (Math.abs(ind.momentum5m) > 0.005) {
-            dir = ind.momentum5m >= 0 ? 'long' : 'short';
-        } else {
-            // Range tiebreak: below midpoint = long, above = short
-            const mid = (ind.high24h + ind.low24h) / 2;
-            dir = price < mid ? 'long' : 'short';
-        }
+
+    if (bias.direction === 'LONG')       dir = 'long';
+    else if (bias.direction === 'SHORT') dir = 'short';
+    else if (Math.abs(ind.obImbalance) > 0.1) dir = ind.obImbalance > 0 ? 'long' : 'short';
+    else if (Math.abs(ind.momentum5m) > 0.005) dir = ind.momentum5m >= 0 ? 'long' : 'short';
+    else {
+        const mid = (ind.high24h + ind.low24h) / 2;
+        dir = price < mid ? 'long' : 'short';
     }
 
     return {
         direction: dir,
-        reasoning: `LOCAL ${dir.toUpperCase()}: ${bias.reasons.slice(0, 4).join(', ')} | ADX=${ind.adx.toFixed(0)} OBI=${(ind.obImbalance*100).toFixed(0)}%`,
+        reasoning: `LOCAL ${dir.toUpperCase()}: ${bias.reasons.slice(0, 4).join(', ')} | ADX=${ind.adx.toFixed(0)} OBI=${(ind.obImbalance * 100).toFixed(0)}%`,
         score: bias.score,
     };
 }
@@ -233,7 +263,7 @@ function extractJSON(text: string): any[] | null {
         if (parsed && typeof parsed === 'object') return [parsed];
     } catch {
         try {
-            const fixed = candidate.replace(/,\s*([}\]])/g, '$1');
+            const fixed  = candidate.replace(/,\s*([}\]])/g, '$1');
             const parsed = JSON.parse(fixed);
             if (Array.isArray(parsed)) return parsed;
             if (typeof parsed === 'object') return [parsed];
@@ -266,81 +296,123 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
     const signals: GeneratedSignal[] = [];
     const session = getSession();
 
-    console.log(`[Signal] Session: ${session.name} [${session.quality}]`);
+    console.log(`[Signal] Session: ${session.name} [${session.quality}] sizePct=${session.sizePct}`);
 
     for (const asset of assets) {
         const { indicators: ind, price, symbol } = asset;
 
-        // ── Hard stops ────────────────────────────────────────────────────
         if (isExtremeVolatility(ind)) {
             console.log(`[Signal] 🔴 EXTREME VOLATILITY ATR=$${ind.atr5m.toFixed(2)} vol=${ind.volumeRatio.toFixed(1)}x — pausing.`);
             continue;
         }
         if (isSpreadTooWide(ind)) {
-            console.log(`[Signal] ⚠️ SPREAD $${ind.spreadUsd.toFixed(2)} ≥ $0.60 — maker fill unlikely, skip.`);
+            console.log(`[Signal] ⚠️ SPREAD $${ind.spreadUsd.toFixed(2)} ≥ $0.50 — skip.`);
             continue;
         }
 
-        const bias  = computeBias(ind, price);
-        const local = computeLocalDirection(ind, price);
+        const bias   = computeBias(ind, price);
+        const local  = computeLocalDirection(ind, price);
 
-        console.log(`[Signal] Bias: ${bias.direction} ${bias.score}/8 choppy=${bias.isChoppy} | ${bias.reasons.slice(0,4).join(', ')}`);
+        const provisionalRegime = calcAtrRegime(ind.atr5m, 0.65);
+        const safetyLev         = safeLeverage(provisionalRegime.leverage, price, ind.atr5m);
+
+        console.log(`[Signal] ATR=$${ind.atr5m.toFixed(2)} Regime:${provisionalRegime.label} lev=${safetyLev}x TP=$${provisionalRegime.tp.toFixed(2)}`);
+        console.log(`[Signal] Bias: ${bias.direction} ${bias.score}/9 choppy=${bias.isChoppy} | ${bias.reasons.slice(0, 5).join(', ')}`);
 
         if (bias.isChoppy) {
-            console.log(`[Signal] 🚫 CHOPPY — 30m/1h conflict. Local tiebreak: ${local.direction.toUpperCase()}`);
-            // Don't skip — use local direction but lower confidence
+            console.log(`[Signal] 🚫 CHOPPY — local tiebreak: ${local.direction.toUpperCase()}`);
+            const regime = calcAtrRegime(ind.atr5m, 0.50);
             signals.push({
                 symbol, direction: local.direction, market_price: price,
-                target_move: TARGET_MOVE, confidence: 0.50,
-                reasoning: `CHOPPY LOCAL ${local.direction.toUpperCase()}: ${ind.momentum30m.toFixed(3)}% 30m vs ${ind.momentum1h.toFixed(3)}% 1h — micro bias wins`,
+                target_move: regime.tp, confidence: 0.50,
+                reasoning:   `CHOPPY LOCAL ${local.direction.toUpperCase()}: ${ind.momentum30m.toFixed(3)}% 30m vs ${ind.momentum1h.toFixed(3)}% 1h`,
+                suggested_tp:       regime.tp,
+                suggested_leverage: safeLeverage(regime.leverage, price, ind.atr5m),
+                session_size_pct:   session.sizePct * regime.baseSizePct,
             });
             continue;
         }
 
-        if (bias.blockLong  && local.direction === 'long')  { console.log(`[Signal] ⛔ RSI ${ind.rsi.toFixed(0)} extreme OB — block long.`);  continue; }
-        if (bias.blockShort && local.direction === 'short') { console.log(`[Signal] ⛔ RSI ${ind.rsi.toFixed(0)} extreme OS — block short.`); continue; }
+        if (bias.blockLong  && local.direction === 'long')  { console.log(`[Signal] ⛔ RSI ${ind.rsi.toFixed(0)} block long.`);  continue; }
+        if (bias.blockShort && local.direction === 'short') { console.log(`[Signal] ⛔ RSI ${ind.rsi.toFixed(0)} block short.`); continue; }
 
-        // ── Gemini prompt — world-class scalper brief ─────────────────────
         const rangePos = ind.high24h > ind.low24h
             ? ((price - ind.low24h) / (ind.high24h - ind.low24h) * 100).toFixed(0)
             : '50';
 
-        const prompt = `You are the best gold scalper in the world. 25x leverage on Hyperliquid GOLD/USDC perp.
-TP = $2.00 fixed move. Maker PostOnly entry at bid (long) or ask (short).
-Target: 100+ fills/day. Session: ${session.name} [${session.quality}].
+        const fundingNote = ind.fundingRate !== null
+            ? `Funding: ${(ind.fundingRate * 100).toFixed(4)}% (${ind.fundingRate < 0 ? 'shorts pay longs → bull' : ind.fundingRate > 0 ? 'longs pay shorts → bear' : 'neutral'})`
+            : 'Funding: N/A';
 
-LIVE DATA — ${new Date().toISOString()}:
-Price: $${price.toFixed(2)} | Range position: ${rangePos}% of 24h range [$${ind.low24h.toFixed(2)}–$${ind.high24h.toFixed(2)}]
-EMA: ${ind.emaTrend} (8=$${ind.ema8.toFixed(2)} 21=$${ind.ema21.toFixed(2)} 50=$${ind.ema50.toFixed(2)})
-RSI: ${ind.rsi.toFixed(1)} | ADX: ${ind.adx.toFixed(1)} | Structure: ${ind.priceStructure}
-Momentum: 5m ${ind.momentum5m.toFixed(4)}% | 30m ${ind.momentum30m.toFixed(4)}% | 1h ${ind.momentum1h.toFixed(4)}%
-ATR(5m): $${ind.atr5m.toFixed(2)} | Vol ratio: ${ind.volumeRatio.toFixed(2)}x | Spread: $${ind.spreadUsd.toFixed(3)}
-4h bias: ${ind.trendBias4h} | Weekly: ${ind.weeklyBias}
-OB imbalance: ${(ind.obImbalance*100).toFixed(1)}% (positive=buy pressure) | Price vs VWAP: ${ind.priceVsVwap.toFixed(3)}%
+        // ── Gemini prompt — rich context, strict JSON output ──────────────
+        const prompt = `You are the best gold futures scalper in the world. You are trading XAUUSDT perpetual on Binance USDM Futures.
+Session: ${session.name} [${session.quality}]. Date: ${new Date().toISOString()}
+
+LIVE MARKET DATA:
+Price: $${price.toFixed(2)} | 24h range: $${ind.low24h.toFixed(2)}–$${ind.high24h.toFixed(2)} (position in range: ${rangePos}%)
+EMA stack: ${ind.emaTrend} (EMA8=$${ind.ema8.toFixed(2)} EMA21=$${ind.ema21.toFixed(2)} EMA50=$${ind.ema50.toFixed(2)})
+RSI(14): ${ind.rsi.toFixed(1)} | ADX(14): ${ind.adx.toFixed(1)} | Structure: ${ind.priceStructure}
+Momentum: 5m=${ind.momentum5m.toFixed(4)}% | 30m=${ind.momentum30m.toFixed(4)}% | 1h=${ind.momentum1h.toFixed(4)}%
+ATR(5m): $${ind.atr5m.toFixed(3)} | ATR%: ${ind.atrPct.toFixed(4)}% | Volume ratio: ${ind.volumeRatio.toFixed(2)}x
+Spread: $${ind.spreadUsd.toFixed(3)} | 4h bias: ${ind.trendBias4h} | Weekly bias: ${ind.weeklyBias}
+Order book imbalance: ${(ind.obImbalance * 100).toFixed(1)}% (>0=buy pressure, <0=sell pressure)
+Price vs VWAP: ${ind.priceVsVwap.toFixed(3)}%
 Support: $${ind.nearestSupport.toFixed(2)} (${ind.distanceToSupport.toFixed(2)} away) | Resistance: $${ind.nearestResistance.toFixed(2)} (${ind.distanceToResistance.toFixed(2)} away)
 Swing high: $${ind.recentSwingHigh.toFixed(2)} | Swing low: $${ind.recentSwingLow.toFixed(2)}
-Local bias engine: ${bias.direction} score=${bias.score}/8 | ${bias.reasons.join(', ')}
+${fundingNote}
+Pre-computed bias: ${bias.direction} score=${bias.score}/9 | Signals: ${bias.reasons.join(', ')}
 
-WORLD-CLASS SCALPING RULES FOR $2 TARGET:
-1. Range trading: near support (< $3) = LONG. Near resistance (< $3) = SHORT.
-2. Mid-range: follow 30m momentum direction. 1h confirms.
-3. OB imbalance > 15% in a direction = strong confirmation.
-4. ADX < 15 = ranging = perfect. ADX > 30 = trending = follow trend.
-5. Funding rate positive = shorts pay longs = slight long edge.
-6. A $2 move happens every 3–10 minutes even in Asia. NEVER be neutral without strong reason.
-7. Only NEUTRAL if 30m AND 1h momentum actively point opposite directions AND RSI is 48-52.
+BINANCE FEE STRUCTURE (XAUUSDT Perp):
+  Taker (market): 0.0450% — used for entry and SL
+  Maker (GTC limit): 0.0180% — used for TP
 
-Reply JSON array ONLY — no markdown, no text outside array:
-[{"symbol":"XAU/USDC","direction":"long","market_price":${price.toFixed(2)},"target_move":2.00,"confidence":0.72,"reasoning":"≤120 chars"}]`;
+ATR REGIME RULES — MUST FOLLOW EXACTLY:
+  ATR > $8.00  (HIGH vol): leverage=10x, TP=min(ATR×1.2, $12.00), size=60% of balance
+  ATR $4–$8    (MED vol):  leverage=20x, TP=min(ATR×1.5, $8.00),  size=80% of balance
+  ATR < $4.00  (LOW vol):  leverage=25x, TP=min(ATR×2.0, $4.00),  size=95% of balance
+Current ATR=$${ind.atr5m.toFixed(3)} → base regime: ${provisionalRegime.label} | base lev=${safetyLev}x | base TP=$${provisionalRegime.tp.toFixed(2)}
+
+TRADING RULES:
+1. TP floor: $1.50 minimum. TP ceiling: min(ATR×2, $15). Never exceed ceiling.
+2. SL always equals TP — strict 1:1 Risk:Reward (SL is monitored externally).
+3. Liquidation buffer: entry_price / leverage must be > ATR×2. Reduce leverage if not.
+4. Fee gate: (size × TP) must be > (taker_fee + maker_fee) × 3. Skip if not.
+5. confidence < 0.55 → drop leverage by 5 (25→20, 20→15, 15→10, 10→10).
+6. Near support (<$3.00 away) = favour LONG. Near resistance (<$3.00 away) = favour SHORT.
+7. ADX < 15 = ranging market — scalp both directions. ADX > 30 = trending — follow trend only.
+8. RSI > 82 = block long. RSI < 18 = block short.
+9. ONLY output neutral if: 30m AND 1h momentum conflict AND RSI is 48–52.
+10. Funding rate: negative = shorts paying longs = bullish pressure. Positive = bearish.
+11. Weekend/off-hours: tighter TP, lower leverage, smaller size.
+
+QUALITY STANDARDS:
+- Only signal when at least 5 of 9 bias factors agree.
+- If bias score < 5, reduce confidence below 0.55 to trigger leverage reduction.
+- Prefer entries near support/resistance for better R:R.
+- Confirm with 30m and 1h momentum alignment for higher confidence.
+
+Reply with a JSON array ONLY. No markdown, no explanation, no text outside the array:
+[{"symbol":"XAU/USDT","direction":"long","market_price":${price.toFixed(2)},"target_move":${provisionalRegime.tp.toFixed(2)},"confidence":0.72,"reasoning":"max 120 chars","suggested_tp":${provisionalRegime.tp.toFixed(2)},"suggested_leverage":${safetyLev},"session_size_pct":${(session.sizePct * provisionalRegime.baseSizePct).toFixed(2)}}]`;
 
         const geminiResult = await callGemini(prompt);
 
+        const buildFallback = (conf: number, dir: SignalDirection): GeneratedSignal => {
+            const regime = calcAtrRegime(ind.atr5m, conf);
+            const lev    = safeLeverage(regime.leverage, price, ind.atr5m);
+            return {
+                symbol, direction: dir, market_price: price,
+                target_move:        regime.tp,
+                confidence:         conf,
+                reasoning:          local.reasoning,
+                suggested_tp:       regime.tp,
+                suggested_leverage: lev,
+                session_size_pct:   session.sizePct * regime.baseSizePct,
+            };
+        };
+
         if (!geminiResult) {
             console.log(`[Signal] ⚙️ Gemini unavailable — local fallback: ${local.direction.toUpperCase()}`);
-            signals.push({
-                symbol, direction: local.direction, market_price: price,
-                target_move: TARGET_MOVE, confidence: 0.55, reasoning: local.reasoning,
-            });
+            signals.push(buildFallback(0.55, local.direction));
             continue;
         }
 
@@ -348,10 +420,7 @@ Reply JSON array ONLY — no markdown, no text outside array:
 
         if (!parsed || parsed.length === 0) {
             console.warn(`[Signal] Bad JSON from ${geminiResult.model} — local fallback.`);
-            signals.push({
-                symbol, direction: local.direction, market_price: price,
-                target_move: TARGET_MOVE, confidence: 0.55, reasoning: local.reasoning,
-            });
+            signals.push(buildFallback(0.55, local.direction));
             continue;
         }
 
@@ -360,7 +429,6 @@ Reply JSON array ONLY — no markdown, no text outside array:
             if (dir === 'buy')  dir = 'long';
             if (dir === 'sell') dir = 'short';
 
-            // Gemini neutral → local tiebreak (never waste a cycle)
             if (dir === 'neutral' || !['long', 'short'].includes(dir)) {
                 console.log(`[Signal] (${geminiResult.model}) Neutral → local: ${local.direction.toUpperCase()}`);
                 dir = local.direction;
@@ -371,29 +439,39 @@ Reply JSON array ONLY — no markdown, no text outside array:
 
             const confidence = Math.min(1, Math.max(0, Number(item.confidence ?? 0.60)));
 
-            // Low confidence → use local but don't skip
             if (confidence < 0.45) {
-                console.log(`[Signal] (${geminiResult.model}) conf=${confidence.toFixed(2)} low → local: ${local.direction.toUpperCase()}`);
-                signals.push({
-                    symbol, direction: local.direction as SignalDirection,
-                    market_price: price, target_move: TARGET_MOVE,
-                    confidence: 0.55, reasoning: local.reasoning,
-                });
+                console.log(`[Signal] conf=${confidence.toFixed(2)} too low → local fallback`);
+                signals.push(buildFallback(0.55, local.direction as SignalDirection));
                 continue;
             }
+
+            const regime     = calcAtrRegime(ind.atr5m, confidence);
+            const rawTp      = Number(item.suggested_tp ?? regime.tp);
+            const rawLev     = Number(item.suggested_leverage ?? regime.leverage);
+            const rawSizePct = Number(item.session_size_pct ?? session.sizePct * regime.baseSizePct);
+
+            const tpCeiling      = Math.min(ind.atr5m * 2, 15);
+            const suggested_tp   = Math.max(1.50, Math.min(rawTp, tpCeiling));
+            const clampedLev     = Math.max(1, Math.min(25, Math.round(rawLev)));
+            const suggested_leverage = safeLeverage(clampedLev, price, ind.atr5m);
+            const session_size_pct   = Math.max(0.20, Math.min(0.95, rawSizePct));
 
             const reasoning = String(item.reasoning ?? local.reasoning).slice(0, 200);
             const mp        = Number(item.market_price ?? price);
 
-            console.log(`[Signal] ✅ (${geminiResult.model}) ${dir.toUpperCase()} conf=${confidence.toFixed(2)} | ${reasoning}`);
+            console.log(`[Signal] ✅ (${geminiResult.model}) ${dir.toUpperCase()} conf=${confidence.toFixed(2)} TP=$${suggested_tp.toFixed(2)} lev=${suggested_leverage}x size=${(session_size_pct * 100).toFixed(0)}%`);
+            console.log(`[Signal]    ${reasoning}`);
 
             signals.push({
                 symbol,
-                direction: dir as SignalDirection,
-                market_price: mp,
-                target_move: TARGET_MOVE,
+                direction:          dir as SignalDirection,
+                market_price:       mp,
+                target_move:        suggested_tp,
                 confidence,
                 reasoning,
+                suggested_tp,
+                suggested_leverage,
+                session_size_pct,
             });
         }
     }
