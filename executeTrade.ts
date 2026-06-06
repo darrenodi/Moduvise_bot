@@ -103,17 +103,18 @@ const API_SECRET = IS_DEMO
         ? (process.env.BINANCE_BOT_SECRET ?? process.env.BINANCE_API_SECRET ?? '')
         : (process.env.BINANCE_API_SECRET ?? '');
 
-// demo.binance.com REST base: https://testnet.binancefuture.com (same underlying infra)
-// Keys from demo.binance.com ARE accepted at testnet.binancefuture.com fapi endpoints
+// Binance Demo Trading (USDⓈ-M Futures)
 const DEMO_URLS = {
     urls: {
         api: {
-            public:        'https://testnet.binancefuture.com',
-            private:       'https://testnet.binancefuture.com',
-            fapiPublic:    'https://testnet.binancefuture.com/fapi/v1/',
-            fapiPrivate:   'https://testnet.binancefuture.com/fapi/v1/',
-            fapiPublicV2:  'https://testnet.binancefuture.com/fapi/v2/',
-            fapiPrivateV2: 'https://testnet.binancefuture.com/fapi/v2/',
+            public:        'https://demo-fapi.binance.com',
+            private:       'https://demo-fapi.binance.com',
+
+            fapiPublic:    'https://demo-fapi.binance.com/fapi/v1/',
+            fapiPrivate:   'https://demo-fapi.binance.com/fapi/v1/',
+
+            fapiPublicV2:  'https://demo-fapi.binance.com/fapi/v2/',
+            fapiPrivateV2: 'https://demo-fapi.binance.com/fapi/v2/',
         },
     },
 };

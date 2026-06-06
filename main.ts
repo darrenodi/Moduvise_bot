@@ -45,20 +45,26 @@ const API_SECRET = ENVIRONMENT === 'live'
     : (process.env.BINANCE_BOT_SECRET ?? '');
 
 const exchange = new (ccxt as any).binanceusdm({
-    apiKey:          API_KEY,
-    secret:          API_SECRET,
-    timeout:         15_000,
+    apiKey: API_KEY,
+    secret: API_SECRET,
+    timeout: 15000,
     enableRateLimit: true,
-    options: { defaultType: 'future' },
+
+    options: {
+        defaultType: 'future',
+    },
+
     ...(IS_TESTNET ? {
         urls: {
             api: {
-                public:  'https://testnet.binancefuture.com',
-                private: 'https://testnet.binancefuture.com',
-                fapiPublic:        'https://testnet.binancefuture.com/fapi/v1/',
-                fapiPrivate:       'https://testnet.binancefuture.com/fapi/v1/',
-                fapiPublicV2:      'https://testnet.binancefuture.com/fapi/v2/',
-                fapiPrivateV2:     'https://testnet.binancefuture.com/fapi/v2/',
+                public: 'https://demo-fapi.binance.com',
+                private: 'https://demo-fapi.binance.com',
+
+                fapiPublic: 'https://demo-fapi.binance.com/fapi/v1/',
+                fapiPrivate: 'https://demo-fapi.binance.com/fapi/v1/',
+
+                fapiPublicV2: 'https://demo-fapi.binance.com/fapi/v2/',
+                fapiPrivateV2: 'https://demo-fapi.binance.com/fapi/v2/',
             },
         },
     } : {}),
