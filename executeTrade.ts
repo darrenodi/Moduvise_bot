@@ -103,16 +103,15 @@ const API_SECRET = IS_DEMO
         ? (process.env.BINANCE_BOT_SECRET ?? process.env.BINANCE_API_SECRET ?? '')
         : (process.env.BINANCE_API_SECRET ?? '');
 
-// Binance Demo Trading (USDⓈ-M Futures)
+// demo.binance.com REST base: https://testnet.binancefuture.com (same underlying infra)
+// Keys from demo.binance.com ARE accepted at testnet.binancefuture.com fapi endpoints
 const DEMO_URLS = {
     urls: {
         api: {
             public:        'https://demo-fapi.binance.com',
             private:       'https://demo-fapi.binance.com',
-
             fapiPublic:    'https://demo-fapi.binance.com/fapi/v1/',
             fapiPrivate:   'https://demo-fapi.binance.com/fapi/v1/',
-
             fapiPublicV2:  'https://demo-fapi.binance.com/fapi/v2/',
             fapiPrivateV2: 'https://demo-fapi.binance.com/fapi/v2/',
         },
@@ -134,41 +133,46 @@ console.log(`[Exchange] Binance USDM Futures | Mode: ${IS_TESTNET ? '🧪 TESTNE
 
 export async function getAvailableBalance(): Promise<number> {
     try {
-        const bal  = await exchange.fetchBalance({ type: 'future' });
+        // demo-fapi.binance.com: per-asset balance endpoints return empty for USDT.
+        // Use /fapi/v2/account which reliably returns totalWalletBalance / availableBalance.
+        const account = await exchange.fetchBalance({ type: 'future' });
 
-        // Try multiple paths — Binance testnet and mainnet differ slightly
-        const usdt =
-            bal['USDT'] ??
-            bal['usdt'] ??
-            bal?.info?.assets?.find((a: any) => a.asset === 'USDT') ??
-            null;
-
-        const free = Number(
-            usdt?.free ??
-            usdt?.availableBalance ??
-            usdt?.walletBalance ??
-            bal?.free?.USDT ??
+        // ccxt maps /fapi/v2/account → info.availableBalance (top-level account field)
+        const fromInfo = Number(
+            account?.info?.availableBalance ??
+            account?.info?.totalWalletBalance ??
             0
         );
 
-        // If ccxt top-level fails, dig into raw info from Binance
-        if (free === 0 && bal?.info?.assets) {
-            const raw = bal.info.assets.find((a: any) => a.asset === 'USDT');
-            if (raw) {
-                const rawFree = Number(raw.availableBalance ?? raw.walletBalance ?? 0);
-                console.log(`[Execute] Balance (raw fallback): $${rawFree.toFixed(4)}`);
-                return rawFree;
-            }
+        if (fromInfo > 0) {
+            console.log(`[Execute] Balance (account): $${fromInfo.toFixed(4)}`);
+            return fromInfo;
         }
 
-        if (free === 0) {
-            // Debug: dump what ccxt actually returned
-            const keys = Object.keys(bal).filter(k => !['info', 'timestamp', 'datetime', 'free', 'used', 'total'].includes(k));
-            console.warn(`[Execute] Balance=0 debug — ccxt keys: ${keys.join(', ')}`);
-            if (bal.free) console.warn(`[Execute] bal.free: ${JSON.stringify(bal.free).slice(0, 200)}`);
+        // Fallback: ccxt standard USDT path
+        const usdt = account['USDT'] ?? account['usdt'];
+        const fromUsdt = Number(usdt?.free ?? usdt?.total ?? 0);
+        if (fromUsdt > 0) {
+            console.log(`[Execute] Balance (USDT): $${fromUsdt.toFixed(4)}`);
+            return fromUsdt;
         }
-        console.log(`[Execute] Balance resolved: $${free.toFixed(4)}`);
-        return free;
+
+        // Last resort: raw fetch of /fapi/v3/account
+        const { createHmac } = await import('crypto');
+        const secret = process.env.BINANCE_BOT_SECRET ?? process.env.BINANCE_API_SECRET ?? '';
+        const apiKey = process.env.BINANCE_BOT_API    ?? process.env.BINANCE_API_KEY    ?? '';
+        const base   = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
+        const ts     = Date.now();
+        const query  = `timestamp=${ts}&recvWindow=10000`;
+        const sig    = createHmac('sha256', secret).update(query).digest('hex');
+        const res    = await fetch(`${base}/fapi/v3/account?${query}&signature=${sig}`, {
+            headers: { 'X-MBX-APIKEY': apiKey },
+        });
+        const data = await res.json() as any;
+        const raw  = Number(data?.availableBalance ?? data?.totalWalletBalance ?? 0);
+        console.log(`[Execute] Balance (v3/account raw): $${raw.toFixed(4)}`);
+        return raw;
+
     } catch (e: any) {
         console.error(`[Execute] Balance error: ${e.message}`);
         return 0;
