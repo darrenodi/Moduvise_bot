@@ -182,15 +182,25 @@ console.log(`[Exchange] Binance USDM Futures | Mode: ${IS_TESTNET ? '🧪 TESTNE
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 export async function getAvailableBalance(): Promise<number> {
-    try {
-        const data = await privateGet('/fapi/v3/account');
-        const bal  = Number(data?.availableBalance ?? data?.totalWalletBalance ?? 0);
-        console.log(`[Execute] Balance: $${bal.toFixed(4)}`);
-        return bal;
-    } catch (e: any) {
-        console.error(`[Execute] Balance error: ${e.message}`);
-        return 0;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const data = await privateGet('/fapi/v3/account');
+            const bal  = Number(data?.availableBalance ?? data?.totalWalletBalance ?? 0);
+            if (bal > 0) {
+                console.log(`[Execute] Balance: $${bal.toFixed(4)}`);
+                return bal;
+            }
+            // Got 0 — may be a transient demo API glitch, retry
+            console.warn(`[Execute] Balance returned 0 (attempt ${attempt}/3) — retrying...`);
+            await new Promise(r => setTimeout(r, 1500));
+        } catch (e: any) {
+            console.warn(`[Execute] Balance error attempt ${attempt}/3: ${String(e.message).slice(0, 80)}`);
+            if (attempt < 3) await new Promise(r => setTimeout(r, 1500));
+        }
     }
+    // All retries failed — return last known virtual balance if available
+    console.error(`[Execute] Balance unavailable after 3 attempts — using 0`);
+    return 0;
 }
 
 export async function hasOpenPosition(): Promise<boolean> {
@@ -384,11 +394,22 @@ export async function executeBinanceTrade(
             });
             const fillTimeMs = Date.now() - entryStart;
 
-            fillPrice = Number(
-                entryOrder.avgPrice ??
-                entryOrder.price    ??
-                livePrice
-            );
+            // Binance market orders return avgPrice as string — may be "0" until filled
+            // Fetch the actual fill price from the order status
+            let avgPrice = Number(entryOrder.avgPrice ?? entryOrder.price ?? 0);
+            if (avgPrice === 0) {
+                try {
+                    await new Promise(r => setTimeout(r, 500));
+                    const orderStatus = await privateGet('/fapi/v1/order', {
+                        symbol:  STRATEGY.SYMBOL,
+                        orderId: entryOrder.orderId,
+                    });
+                    avgPrice = Number(orderStatus.avgPrice ?? orderStatus.price ?? livePrice);
+                } catch {
+                    avgPrice = livePrice;
+                }
+            }
+            fillPrice = avgPrice > 0 ? avgPrice : livePrice;
 
             console.log(`[Execute] ✅ TAKER ENTRY: ${size} XAU @ $${fillPrice.toFixed(2)} (${fillTimeMs}ms)`);
 
