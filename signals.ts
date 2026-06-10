@@ -114,13 +114,13 @@ export function calcAtrRegime(atr5m: number, confidence: number): AtrRegime {
 
     if (atr5m > 8) {
         const tp = Math.min(atr5m * 1.2, 12);
-        regime   = { label: 'HIGH', leverage: 10, tp, sl: tp, baseSizePct: 0.60, minFeeMultiple: 3 };
+        regime   = { label: 'HIGH', leverage: 20, tp, sl: tp, baseSizePct: 0.60, minFeeMultiple: 3 };
     } else if (atr5m >= 4) {
         const tp = Math.min(atr5m * 1.5, 8);
         regime   = { label: 'MED',  leverage: 20, tp, sl: tp, baseSizePct: 0.80, minFeeMultiple: 3 };
     } else {
         const tp = Math.min(atr5m * 2.0, 4);
-        regime   = { label: 'LOW',  leverage: 25, tp, sl: tp, baseSizePct: 0.95, minFeeMultiple: 3 };
+        regime   = { label: 'LOW',  leverage: 20, tp, sl: tp, baseSizePct: 0.95, minFeeMultiple: 3 };
     }
 
     regime.tp = Math.max(regime.tp, 1.50);
@@ -215,8 +215,13 @@ function isExtremeVolatility(ind: TechnicalIndicators): boolean {
 }
 
 function isSpreadTooWide(ind: TechnicalIndicators): boolean {
-    // Binance XAUUSDT spread is typically $0.01–$0.10 — flag if > $0.50
-    return ind.spreadUsd >= 0.50;
+    // Demo environment has wider spreads than live (~$2-3 vs $0.01-0.10).
+    // Gate: spread must be less than 50% of TP target to be worth trading.
+    // We check this relative to ATR rather than a fixed threshold.
+    const maxSpread = ind.atr5m * 0.60;
+    const tooWide   = ind.spreadUsd >= maxSpread;
+    if (tooWide) console.log(`[Signal] ⚠️ Spread $${ind.spreadUsd.toFixed(2)} ≥ ATR×0.6 ($${maxSpread.toFixed(2)}) — skip.`);
+    return tooWide;
 }
 
 // ─── LOCAL FALLBACK ───────────────────────────────────────────────────────────

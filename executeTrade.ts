@@ -30,7 +30,7 @@ const STRATEGY = {
     GOLD_TICK:           0.10,
     MAX_TRADING_BALANCE: 20_000,
     MAX_SIGNAL_DRIFT:    5.00,
-    MIN_FEE_MULTIPLE:    3,
+    MIN_FEE_MULTIPLE:    2.5,
 } as const;
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
@@ -105,27 +105,77 @@ const API_SECRET = IS_DEMO
 
 // demo.binance.com REST base: https://testnet.binancefuture.com (same underlying infra)
 // Keys from demo.binance.com ARE accepted at testnet.binancefuture.com fapi endpoints
-const DEMO_URLS = {
-    urls: {
-        api: {
-            public:        'https://demo-fapi.binance.com',
-            private:       'https://demo-fapi.binance.com',
-            fapiPublic:    'https://demo-fapi.binance.com/fapi/v1/',
-            fapiPrivate:   'https://demo-fapi.binance.com/fapi/v1/',
-            fapiPublicV2:  'https://demo-fapi.binance.com/fapi/v2/',
-            fapiPrivateV2: 'https://demo-fapi.binance.com/fapi/v2/',
-        },
-    },
-};
+// ccxt does not properly support demo-fapi.binance.com URL overrides.
+// All PRIVATE calls (balance, orders, positions) use raw fetch + HMAC signing.
+// ccxt is kept only for PUBLIC market data (tickers, OHLCV, order book).
 
+const BASE_URL = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
+
+// Public-only ccxt instance — no auth needed, safe to point at demo
 const exchange = new (ccxt as any).binanceusdm({
-    apiKey:          API_KEY,
-    secret:          API_SECRET,
     timeout:         15_000,
     enableRateLimit: true,
-    options: { defaultType: 'future' },
-    ...(IS_TESTNET ? DEMO_URLS : {}),
+    options:         { defaultType: 'future' },
+    ...(IS_TESTNET ? {
+        urls: { api: {
+            public:       BASE_URL,
+            fapiPublic:   BASE_URL + '/fapi/v1/',
+            fapiPublicV2: BASE_URL + '/fapi/v2/',
+        }},
+    } : {}),
 });
+
+// ── Raw signed fetch (bypasses ccxt for private endpoints) ────────────────────
+import { createHmac } from 'crypto';
+
+function signedUrl(path: string, params: Record<string, string | number> = {}): string {
+    const ts      = Date.now();
+    const entries = { ...params, timestamp: ts, recvWindow: 10000 };
+    const query   = Object.entries(entries).map(([k, v]) => `${k}=${v}`).join('&');
+    const sig     = createHmac('sha256', API_SECRET).update(query).digest('hex');
+    return `${BASE_URL}${path}?${query}&signature=${sig}`;
+}
+
+async function privateGet(path: string, params: Record<string, string | number> = {}): Promise<any> {
+    const url = signedUrl(path, params);
+    const res = await fetch(url, {
+        headers: { 'X-MBX-APIKEY': API_KEY },
+        signal:  AbortSignal.timeout(10_000),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${res.status} ${text.slice(0, 200)}`);
+    return JSON.parse(text);
+}
+
+async function privatePost(path: string, params: Record<string, string | number> = {}): Promise<any> {
+    const ts      = Date.now();
+    const entries = { ...params, timestamp: ts, recvWindow: 10000 };
+    const body    = Object.entries(entries).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+    const sig     = createHmac('sha256', API_SECRET).update(
+        Object.entries(entries).map(([k, v]) => `${k}=${v}`).join('&')
+    ).digest('hex');
+    const res = await fetch(`${BASE_URL}${path}`, {
+        method:  'POST',
+        headers: { 'X-MBX-APIKEY': API_KEY, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body:    body + `&signature=${sig}`,
+        signal:  AbortSignal.timeout(10_000),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${res.status} ${text.slice(0, 300)}`);
+    return JSON.parse(text);
+}
+
+async function privateDelete(path: string, params: Record<string, string | number> = {}): Promise<any> {
+    const url = signedUrl(path, params);
+    const res = await fetch(url, {
+        method:  'DELETE',
+        headers: { 'X-MBX-APIKEY': API_KEY },
+        signal:  AbortSignal.timeout(10_000),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${res.status} ${text.slice(0, 200)}`);
+    return JSON.parse(text);
+}
 
 console.log(`[Exchange] Binance USDM Futures | Mode: ${IS_TESTNET ? '🧪 TESTNET (demo.binance.com keys)' : '🔴 MAINNET'}`);
 
@@ -133,46 +183,10 @@ console.log(`[Exchange] Binance USDM Futures | Mode: ${IS_TESTNET ? '🧪 TESTNE
 
 export async function getAvailableBalance(): Promise<number> {
     try {
-        // demo-fapi.binance.com: per-asset balance endpoints return empty for USDT.
-        // Use /fapi/v2/account which reliably returns totalWalletBalance / availableBalance.
-        const account = await exchange.fetchBalance({ type: 'future' });
-
-        // ccxt maps /fapi/v2/account → info.availableBalance (top-level account field)
-        const fromInfo = Number(
-            account?.info?.availableBalance ??
-            account?.info?.totalWalletBalance ??
-            0
-        );
-
-        if (fromInfo > 0) {
-            console.log(`[Execute] Balance (account): $${fromInfo.toFixed(4)}`);
-            return fromInfo;
-        }
-
-        // Fallback: ccxt standard USDT path
-        const usdt = account['USDT'] ?? account['usdt'];
-        const fromUsdt = Number(usdt?.free ?? usdt?.total ?? 0);
-        if (fromUsdt > 0) {
-            console.log(`[Execute] Balance (USDT): $${fromUsdt.toFixed(4)}`);
-            return fromUsdt;
-        }
-
-        // Last resort: raw fetch of /fapi/v3/account
-        const { createHmac } = await import('crypto');
-        const secret = process.env.BINANCE_BOT_SECRET ?? process.env.BINANCE_API_SECRET ?? '';
-        const apiKey = process.env.BINANCE_BOT_API    ?? process.env.BINANCE_API_KEY    ?? '';
-        const base   = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
-        const ts     = Date.now();
-        const query  = `timestamp=${ts}&recvWindow=10000`;
-        const sig    = createHmac('sha256', secret).update(query).digest('hex');
-        const res    = await fetch(`${base}/fapi/v3/account?${query}&signature=${sig}`, {
-            headers: { 'X-MBX-APIKEY': apiKey },
-        });
-        const data = await res.json() as any;
-        const raw  = Number(data?.availableBalance ?? data?.totalWalletBalance ?? 0);
-        console.log(`[Execute] Balance (v3/account raw): $${raw.toFixed(4)}`);
-        return raw;
-
+        const data = await privateGet('/fapi/v3/account');
+        const bal  = Number(data?.availableBalance ?? data?.totalWalletBalance ?? 0);
+        console.log(`[Execute] Balance: $${bal.toFixed(4)}`);
+        return bal;
     } catch (e: any) {
         console.error(`[Execute] Balance error: ${e.message}`);
         return 0;
@@ -181,10 +195,8 @@ export async function getAvailableBalance(): Promise<number> {
 
 export async function hasOpenPosition(): Promise<boolean> {
     try {
-        const positions = await exchange.fetchPositions([STRATEGY.SYMBOL]);
-        return positions.some((p: any) =>
-            Math.abs(Number(p.info?.positionAmt ?? p.contracts ?? 0)) > 0
-        );
+        const data = await privateGet('/fapi/v3/positionRisk', { symbol: STRATEGY.SYMBOL });
+        return Array.isArray(data) && data.some((p: any) => Math.abs(Number(p.positionAmt ?? 0)) > 0);
     } catch {
         return false;
     }
@@ -199,21 +211,22 @@ export async function getOpenPositionDetails(): Promise<{
     currentPrice:  number;
 }> {
     try {
-        const [positions, ticker] = await Promise.all([
-            exchange.fetchPositions([STRATEGY.SYMBOL]),
-            exchange.fetchTicker(STRATEGY.SYMBOL).catch(() => ({ last: 0 })),
+        const [positions, priceData] = await Promise.all([
+            privateGet('/fapi/v3/positionRisk', { symbol: STRATEGY.SYMBOL }),
+            fetch(`${BASE_URL}/fapi/v1/ticker/price?symbol=${STRATEGY.SYMBOL}`)
+                .then(r => r.json()).catch(() => ({ price: '0' })),
         ]);
-        const pos = positions.find((p: any) =>
-            Math.abs(Number(p.info?.positionAmt ?? p.contracts ?? 0)) > 0
-        );
+        const pos = Array.isArray(positions)
+            ? positions.find((p: any) => Math.abs(Number(p.positionAmt ?? 0)) > 0)
+            : null;
         if (!pos) return { exists: false, side: null, entryPrice: 0, size: 0, unrealisedPnl: 0, currentPrice: 0 };
 
-        const posAmt        = Number(pos.info?.positionAmt ?? pos.contracts ?? 0);
+        const posAmt        = Number(pos.positionAmt ?? 0);
         const size          = Math.abs(posAmt);
-        const entry         = Number(pos.entryPrice ?? pos.info?.entryPrice ?? 0);
+        const entry         = Number(pos.entryPrice ?? 0);
         const side          = posAmt > 0 ? 'long' : 'short';
-        const unrealisedPnl = Number(pos.unrealizedPnl ?? pos.info?.unRealizedProfit ?? 0);
-        const currentPrice  = Number((ticker as any).last ?? entry);
+        const unrealisedPnl = Number(pos.unRealizedProfit ?? 0);
+        const currentPrice  = Number((priceData as any).price ?? entry);
         return { exists: true, side, entryPrice: entry, size, unrealisedPnl, currentPrice };
     } catch {
         return { exists: false, side: null, entryPrice: 0, size: 0, unrealisedPnl: 0, currentPrice: 0 };
@@ -223,15 +236,18 @@ export async function getOpenPositionDetails(): Promise<{
 // ─── SL TRIGGER ───────────────────────────────────────────────────────────────
 
 export async function triggerStopLoss(side: 'long' | 'short', size: number, reason: string): Promise<void> {
-    const closeSide = side === 'long' ? 'sell' : 'buy';
+    const closeSide = side === 'long' ? 'SELL' : 'BUY';
     console.log(`[Execute] 🛑 STOP LOSS (${reason}) — market ${closeSide} ${size}`);
-    try { await exchange.cancelAllOrders(STRATEGY.SYMBOL); } catch { /* ok */ }
+    try { await privateDelete('/fapi/v1/allOpenOrders', { symbol: STRATEGY.SYMBOL }); } catch { /* ok */ }
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-            await exchange.createOrder(
-                STRATEGY.SYMBOL, 'market', closeSide, size, undefined,
-                { reduceOnly: true }
-            );
+            await privatePost('/fapi/v1/order', {
+                symbol:     STRATEGY.SYMBOL,
+                side:       closeSide,
+                type:       'MARKET',
+                quantity:   size,
+                reduceOnly: 'true',
+            });
             console.log(`[Execute] SL submitted (attempt ${attempt}).`);
             clearActiveTrade();
             return;
@@ -309,40 +325,34 @@ export async function executeBinanceTrade(
         }
 
         // ── 2. BALANCE ────────────────────────────────────────────────────
-        const balance          = await getAvailableBalance();
-        const effectiveBalance = virtualBalance ?? balance;
-        console.log(`[Execute] Balance: $${balance.toFixed(4)} | Virtual: $${effectiveBalance.toFixed(4)}`);
-        if (balance < STRATEGY.MIN_BALANCE) {
-            return { success: false, outcome: 'skipped', message: `Low balance: $${balance.toFixed(4)}` };
+        // Use virtualBalance passed from main.ts (already fetched this cycle).
+        // Only re-fetch from exchange if not provided.
+        const effectiveBalance = virtualBalance && virtualBalance > 0
+            ? virtualBalance
+            : await getAvailableBalance();
+        console.log(`[Execute] Effective balance: $${effectiveBalance.toFixed(4)}`);
+        if (effectiveBalance < STRATEGY.MIN_BALANCE) {
+            return { success: false, outcome: 'skipped', message: `Low balance: $${effectiveBalance.toFixed(4)}` };
         }
 
         // ── 3. LEVERAGE — set dynamically per trade ────────────────────────
-        // Binance: setLeverage on XAUUSDT, isolated margin mode
         try {
-            await exchange.setLeverage(leverage, STRATEGY.SYMBOL);
+            await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
             console.log(`[Execute] Leverage set: ${leverage}x`);
         } catch (e: any) {
-            if (!/already|same/i.test(e.message ?? '')) {
-                console.warn(`[Execute] Leverage warn: ${e.message}`);
-            }
+            // Demo account may not support leverage API — non-blocking
+            console.log(`[Execute] Leverage note: ${String(e.message ?? '').slice(0, 60)} (continuing)`);
         }
 
-        // ── 4. MARGIN MODE — isolated ─────────────────────────────────────
-        try {
-            await exchange.setMarginMode('isolated', STRATEGY.SYMBOL);
-            console.log(`[Execute] Margin mode: isolated`);
-        } catch (e: any) {
-            // Binance throws if already isolated — safe to ignore
-            if (!/already|No need/i.test(e.message ?? '')) {
-                console.warn(`[Execute] Margin mode warn: ${e.message}`);
-            }
-        }
+        // ── 4. MARGIN MODE — cross (demo default, isolated not required) ──
+        // Skipped: demo-fapi does not support marginType API (-1109)
 
         // ── 5. STALE SIGNAL CHECK ─────────────────────────────────────────
         let livePrice = signal.market_price;
         try {
-            const ticker = await exchange.fetchTicker(STRATEGY.SYMBOL);
-            livePrice    = ticker.last ?? signal.market_price;
+            const ticker = await fetch(`${BASE_URL}/fapi/v1/ticker/price?symbol=${STRATEGY.SYMBOL}`)
+                .then(r => r.json()) as any;
+            livePrice = Number(ticker?.price ?? signal.market_price);
         } catch { /* use signal price */ }
 
         const drift = Math.abs(livePrice - signal.market_price);
@@ -366,15 +376,17 @@ export async function executeBinanceTrade(
         let fillPrice    = livePrice;
 
         try {
-            const entryOrder = await exchange.createOrder(
-                STRATEGY.SYMBOL, 'market', side, size, undefined, {}
-            );
+            const entryOrder = await privatePost('/fapi/v1/order', {
+                symbol:   STRATEGY.SYMBOL,
+                side:     side.toUpperCase(),
+                type:     'MARKET',
+                quantity: size,
+            });
             const fillTimeMs = Date.now() - entryStart;
 
             fillPrice = Number(
-                entryOrder.average    ??
-                entryOrder.price      ??
-                entryOrder.info?.avgPrice ??
+                entryOrder.avgPrice ??
+                entryOrder.price    ??
                 livePrice
             );
 
@@ -395,11 +407,16 @@ export async function executeBinanceTrade(
 
             // Binance: GTC reduceOnly limit order for TP (maker)
             try {
-                const tpOrder = await exchange.createOrder(
-                    STRATEGY.SYMBOL, 'limit', closeSide, size, tpPrice,
-                    { timeInForce: 'GTC', reduceOnly: true }
-                );
-                console.log(`[Execute] ✅ MAKER TP placed: orderId=${tpOrder.id}`);
+                const tpOrder = await privatePost('/fapi/v1/order', {
+                    symbol:     STRATEGY.SYMBOL,
+                    side:       closeSide.toUpperCase(),
+                    type:       'LIMIT',
+                    price:      tpPrice.toFixed(2),
+                    quantity:   size,
+                    timeInForce:'GTC',
+                    reduceOnly: 'true',
+                });
+                console.log(`[Execute] ✅ MAKER TP placed: orderId=${tpOrder.orderId}`);
             } catch (e: any) {
                 console.error(`[Execute] TP order failed: ${e.message} — SL in main.ts will protect.`);
             }
