@@ -24,8 +24,8 @@ dotenv.config();
 
 const STRATEGY = {
     SYMBOL:              MARKET_SYMBOL,       // 'XAUUSDT'
-    TAKER_FEE:           0.000450,            // 0.0450%
-    MAKER_FEE:           0.000180,            // 0.0180%
+    TAKER_FEE:           0.0005,            // 0.0450%
+    MAKER_FEE:           0.0002,            // 0.0180%
     MIN_BALANCE:         1.50,
     GOLD_TICK:           0.10,
     MAX_TRADING_BALANCE: 20_000,
