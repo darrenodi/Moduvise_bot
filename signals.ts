@@ -6,7 +6,7 @@ dotenv.config();
 
 export const MARKET_SYMBOL  = 'XAUUSDT';      // Binance USDM Futures symbol
 export const DISPLAY_SYMBOL = 'XAU/USDT';
-export const TARGET_MOVE    = 4.00;           // default fallback only
+export const TARGET_MOVE    = 0.50;           // default fallback only
 
 // ─── MODEL FAILOVER ───────────────────────────────────────────────────────────
 // MODELS UNCHANGED — exactly as provided. Do not modify.
@@ -112,17 +112,17 @@ export interface AtrRegime {
 export function calcAtrRegime(atr5m: number, confidence: number): AtrRegime {
     let regime: AtrRegime;
 
-    // ── OPTION A: Fixed $4 TP across all regimes (ACTIVE) ────────────────────
-    // Matches the calculator projection exactly.
-    // $4 move on Gold at current prices (~$4200) is reliably achievable
-    // within minutes even on wrong-direction entries due to oscillation.
-    const FIXED_TP = 4.00;
+    // ── OPTION A: Fixed $0.50 TP across all regimes (ACTIVE) ─────────────────
+    // Matches the scalper logic: repeat many 50-cent moves.
+    // $0.50 move on Gold is the repeatable micro target for this strategy.
+    const FIXED_TP = 0.50;
+    const FIXED_SL = 10.00;
     if (atr5m > 8) {
-        regime = { label: 'HIGH', leverage: 40, tp: FIXED_TP, sl: FIXED_TP, baseSizePct: 0.60, minFeeMultiple: 3 };
+        regime = { label: 'HIGH', leverage: 40, tp: FIXED_TP, sl: FIXED_SL, baseSizePct: 0.60, minFeeMultiple: 3 };
     } else if (atr5m >= 4) {
-        regime = { label: 'MED',  leverage: 40, tp: FIXED_TP, sl: FIXED_TP, baseSizePct: 0.80, minFeeMultiple: 3 };
+        regime = { label: 'MED',  leverage: 40, tp: FIXED_TP, sl: FIXED_SL, baseSizePct: 0.80, minFeeMultiple: 3 };
     } else {
-        regime = { label: 'LOW',  leverage: 40, tp: FIXED_TP, sl: FIXED_TP, baseSizePct: 0.95, minFeeMultiple: 3 };
+        regime = { label: 'LOW',  leverage: 40, tp: FIXED_TP, sl: FIXED_SL, baseSizePct: 0.95, minFeeMultiple: 3 };
     }
 
     // ── OPTION B: Dynamic ATR-based TP (COMMENTED OUT — do not delete) ────────
@@ -366,12 +366,12 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
             ? `Funding: ${(ind.fundingRate * 100).toFixed(4)}% (${ind.fundingRate < 0 ? 'shorts pay longs → bull' : ind.fundingRate > 0 ? 'longs pay shorts → bear' : 'neutral'})`
             : 'Funding: N/A';
 
-        // ── Gemini prompt — scalper mindset: enter NOW, take $4, repeat ─────
+        // ── Gemini prompt — scalper mindset: enter NOW, take $0.50, repeat ────
         const prompt = `You are a professional gold futures scalper. Your ONLY job right now is to answer one question:
 
-"Should I enter LONG or SHORT on XAUUSDT RIGHT NOW to catch a $4 move?"
+"Should I enter LONG or SHORT on XAUUSDT RIGHT NOW to catch a $0.50 move?"
 
-You are NOT doing analysis. You are NOT writing a report. You are making a single trading decision that will be executed in the next 3 seconds. After this trade closes ($4 profit or $4 loss), you will make the same decision again. You do this 50 times per day.
+You are NOT doing analysis. You are NOT writing a report. You are making a single trading decision that will be executed in the next 3 seconds. After this trade closes ($0.50 profit or $0.50 loss), you will make the same decision again. You do this 50 times per day.
 
 CURRENT MARKET SNAPSHOT — ${new Date().toISOString()}:
 Price: $${price.toFixed(2)}
@@ -387,8 +387,8 @@ Swing low: $${ind.recentSwingLow.toFixed(2)} | Swing high: $${ind.recentSwingHig
 ${fundingNote}
 
 HOW TO DECIDE:
-- Gold oscillates $4–$10 every few minutes. Even a wrong-direction entry often sees $4 your way before reversing $4 against you.
-- Your TP is $4. Your SL is $4. 1:1 ratio. You just need to be right MORE than wrong.
+- Gold often moves $0.50–$2.00 in short bursts. Even a wrong-direction entry can still grind toward $0.50 before reversing.
+- Your TP is $0.50. Your SL is $10.00. This is a much wider stop, meaning you must be selective on entries.
 - LONG if: price is near support, momentum is turning up, OB buy pressure, RSI rising from low, 30m green.
 - SHORT if: price is near resistance, momentum rolling over, OB sell pressure, RSI falling from high, 30m red.
 - If price is mid-range with no clear lean: follow the 5m and 30m momentum direction. Something is always moving.
@@ -396,12 +396,12 @@ HOW TO DECIDE:
 - RSI > 82 = do NOT long. RSI < 18 = do NOT short. Everything else is tradeable.
 
 FIXED PARAMETERS (do not change these):
-- suggested_tp: 4.00 (always)
+- suggested_tp: 0.50 (always)
 - suggested_leverage: ${safetyLev} (always)
 - session_size_pct: ${(session.sizePct * provisionalRegime.baseSizePct).toFixed(2)} (always)
 
 Reply with JSON array ONLY. No markdown. No explanation. No text outside the array:
-[{"symbol":"XAU/USDT","direction":"long","market_price":${price.toFixed(2)},"target_move":4.00,"confidence":0.72,"reasoning":"max 100 chars — WHY this direction RIGHT NOW","suggested_tp":4.00,"suggested_leverage":${safetyLev},"session_size_pct":${(session.sizePct * provisionalRegime.baseSizePct).toFixed(2)}}]`;
+[{"symbol":"XAU/USDT","direction":"long","market_price":${price.toFixed(2)},"target_move":0.50,"confidence":0.72,"reasoning":"max 100 chars — WHY this direction RIGHT NOW","suggested_tp":0.50,"suggested_leverage":${safetyLev},"session_size_pct":${(session.sizePct * provisionalRegime.baseSizePct).toFixed(2)}}]`;
 
         const geminiResult = await callGemini(prompt);
 
@@ -460,8 +460,8 @@ Reply with JSON array ONLY. No markdown. No explanation. No text outside the arr
             const rawSizePct = Number(item.session_size_pct ?? session.sizePct * regime.baseSizePct);
 
             const tpCeiling      = Math.min(ind.atr5m * 2, 15);
-            // Option A active: force TP to 4.00 regardless of what Gemini returns
-            const suggested_tp   = 4.00;
+            // Option A active: force TP to 0.50 regardless of what Gemini returns
+            const suggested_tp   = 0.50;
             // Option B: const suggested_tp = Math.max(1.50, Math.min(rawTp, tpCeiling));
             const clampedLev     = Math.max(1, Math.min(40, Math.round(rawLev)));
             const suggested_leverage = safeLeverage(clampedLev, price, ind.atr5m);

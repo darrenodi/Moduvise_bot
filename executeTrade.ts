@@ -24,15 +24,17 @@ dotenv.config();
 
 const STRATEGY = {
     SYMBOL:              MARKET_SYMBOL,
-    TAKER_FEE:           0.0005,            // 0.05% — taker fee for stop-loss exits
-    MAKER_FEE:           0.0000,            // 0.00% — Binance zero maker fee
-    ENTRY_OFFSET:        1.00,              // resting limit entry offset from current market price
+    TAKER_FEE:           0.0005,            // 0.05% — taker fee for stop-loss exits (market order)
+    MAKER_FEE:           0.0000,            // 0.00% — Binance zero maker fee (ALO confirmed)
+    ENTRY_OFFSET:        0.20,              // ALO resting entry: $0.20 inside market (fills faster on $0.50 TP)
     ENTRY_FILL_TIMEOUT:  30_000,            // wait up to 30 seconds for maker entry fill
+    SL_MOVE:             10.00,             // fixed stop-loss distance: wide stop, tight TP (1:20 R:R)
+    TARGET_TP:           0.50,              // fixed $0.50 TP per trade (all regimes)
     MIN_BALANCE:         1.50,
     GOLD_TICK:           0.10,
     MAX_TRADING_BALANCE: 25_000,            // $25K margin cap → $1M notional at 40x
-    MAX_SIGNAL_DRIFT:    5.00,
-    MIN_FEE_MULTIPLE:    1.0,               // maker-only fee gate
+    MAX_SIGNAL_DRIFT:    2.00,              // tighter: $0.50 TP = stale signal kills entire profit
+    MIN_FEE_MULTIPLE:    1.0,               // fee gate: maker=0% so always passes; taker SL only on exit
 } as const;
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
@@ -318,7 +320,7 @@ export async function executeBinanceTrade(
     const side      = isBuy ? 'buy'  : 'sell';
     const closeSide = isBuy ? 'sell' : 'buy';
 
-    const tpMove   = signal.suggested_tp       ?? signal.target_move ?? 3.00;
+    const tpMove   = STRATEGY.TARGET_TP;   // always $0.50 — ALO maker-maker strategy
     const leverage = signal.suggested_leverage ?? 20;
     const sizePct  = signal.session_size_pct   ?? 0.80;
 
@@ -434,24 +436,23 @@ export async function executeBinanceTrade(
 
             // ── 9. MAKER GTC LIMIT TP — resting on book ───────────────────
             const tpPrice = tickRound(isBuy ? fillPrice + tpMove : fillPrice - tpMove);
-            const slPrice = tickRound(isBuy ? fillPrice - tpMove : fillPrice + tpMove);
+            const slPrice = tickRound(isBuy ? fillPrice - STRATEGY.SL_MOVE : fillPrice + STRATEGY.SL_MOVE);
 
             const makerFee  = filledSize * fillPrice * STRATEGY.MAKER_FEE;
             const totalFees = makerFee * 2;
             const gross     = filledSize * tpMove;
             const net       = gross - totalFees;
 
-            console.log(`[Execute] TP=$${tpPrice.toFixed(2)} (+$${tpMove.toFixed(2)}) | SL=$${slPrice.toFixed(2)} (-$${tpMove.toFixed(2)}) | 1:1 R:R`);
+            console.log(`[Execute] TP=$${tpPrice.toFixed(2)} (+$${tpMove.toFixed(2)}) | SL=$${slPrice.toFixed(2)} (-$${STRATEGY.SL_MOVE.toFixed(2)}) | R:R 1:20 (risk $10 for $0.50) | MAKER-MAKER ALO`);
             console.log(`[Execute] Gross=$${gross.toFixed(4)} | Fees=M:$${makerFee.toFixed(4)}+M:$${makerFee.toFixed(4)}=$${totalFees.toFixed(4)} | Net=$${net.toFixed(4)}`);
 
             try {
                 const tpOrder = await privatePost('/fapi/v1/order', {
                     symbol:      STRATEGY.SYMBOL,
                     side:        closeSide.toUpperCase(),
-                    type:        'LIMIT',
+                    type:        'LIMIT_MAKER',        // ALO — resting maker TP, zero fee
                     price:       tpPrice.toFixed(2),
                     quantity:    filledSize,
-                    timeInForce: 'GTC',
                     reduceOnly:  'true',
                 });
                 console.log(`[Execute] ✅ MAKER TP placed: orderId=${tpOrder.orderId}`);

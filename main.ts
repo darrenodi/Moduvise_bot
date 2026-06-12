@@ -26,7 +26,6 @@ const IS_TESTNET  = ENVIRONMENT !== 'live';
 
 const CONFIG = {
     MAX_TRADES_DAY:      300,
-    SL_MOVE:             4.00,       // matches calculator $4.00 gold move
     MAX_TRADING_BALANCE: 25_000,     // capped at 40x × $25K = $1M max notional
     BANK_FRACTION:       0.50,       // 50% banked per TP
     RECYCLE_BALANCE:     800,
@@ -187,7 +186,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         ? trade.entryPrice - pos.currentPrice
         : pos.currentPrice - trade.entryPrice;
 
-    const slThreshold = (trade as any).tpMove ?? CONFIG.SL_MOVE;
+    const slThreshold = Math.abs(trade.slPrice - trade.entryPrice);
     const inFavour    = -adverseMove;
 
     const emoji = adverseMove > slThreshold * 0.7 ? '🔴' :
@@ -201,7 +200,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         await triggerStopLoss(pos.side!, pos.size, `$${adverseMove.toFixed(2)} adverse ≥ $${slThreshold.toFixed(2)}`);
 
         const slLoss  = pos.size * adverseMove;
-        const fees    = pendingTrade?.fees ?? (pos.size * pos.currentPrice * 0.00063);
+        const fees    = pendingTrade?.fees ?? (pos.size * pos.currentPrice * 0.0005); // taker-only SL exit
         const netLoss = -(slLoss + fees);
 
         stats.slHits++;
@@ -687,11 +686,13 @@ const startupMsg = [
     `Mode:      ${IS_TESTNET ? '🧪 TESTNET (demo.binance.com)' : '🔴 MAINNET (live)'}`,
     `Asset:     XAUUSDT perp`,
     `Leverage:  40x fixed`,
-    `Entry:     Maker limit @ -$1.00 from market | zero maker fee`,
-    `TP:        DYNAMIC — ATR×multiplier | Maker GTC limit | min $1.50 | target $4.00`,
-    `SL:        = TP distance (1:1 R:R) → Taker market (0.05%)`,
+    `Entry:     ALO LIMIT_MAKER @ -$0.20 from market | 0.00% maker fee`,
+    `TP:        $0.50 FIXED | ALO LIMIT_MAKER resting | 0.00% maker fee`,
+    `SL:        $10.00 fixed | Taker market exit | 0.05% taker fee`,
+    `R:R:       1:20 (risk $10 to make $0.50) — high win-rate strategy`,
+    `Fees:      Entry=FREE | TP=FREE | SL exit=0.05% taker only`,
     `Size:      DYNAMIC — session quality × ATR regime (20%–95% of balance)`,
-    `Fee gate:  Gross must be > fees × 3 or trade is skipped`,
+    `Fee gate:  Gross > fees × 1 (always passes at 0% maker)`,
     `Cap:       $${CONFIG.MAX_TRADING_BALANCE.toLocaleString()} trading balance (40x = $1M max notional)`,
     `Banking:   50% banked per TP | 100% banked at cap`,
     `Start:     ${new Date().toISOString()}`,
