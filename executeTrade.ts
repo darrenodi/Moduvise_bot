@@ -9,28 +9,30 @@ dotenv.config();
 // Gold (XAUUSDT) on Binance USDⓈ-M Futures — dynamic leverage + dynamic TP.
 //
 // FEES (XAUUSDT Perp):
-//   Maker: 0.0180%  (GTC limit TP order)
-//   Taker: 0.0450%  (market entry + SL)
+//   Maker: 0.0000%  (Binance zero maker fee / maker rebate environment)
+//   Taker: 0.0450%  (market stop-loss exit)
 //
-// MODEL: Hybrid Taker/Maker
-//   ENTRY:  Market Taker → guaranteed fill    0.0450%
-//   TP:     GTC Maker limit → resting on book 0.0180%
+// MODEL: Maker/Maker
+//   ENTRY:  Maker limit at offset → resting on book, zero maker fee
+//   TP:     GTC Maker limit → resting on book
 //   SL:     Market Taker → monitored by main  0.0450%
 //
-// GATE: gross profit > fees × 3 — prevents fee-eating micro trades.
+// GATE: gross profit > fees × multiple — prevents fee-eating micro trades.
 //
-// ARCHITECTURE: decoupled — returns immediately after entry + TP placed.
+// ARCHITECTURE: decoupled — returns immediately after maker entry + TP placed.
 // main.ts monitors SL every cycle independently.
 
 const STRATEGY = {
     SYMBOL:              MARKET_SYMBOL,
-    TAKER_FEE:           0.0005,            // 0.05% — your actual taker fee
-    MAKER_FEE:           0.0002,            // 0.02% — your actual maker fee
+    TAKER_FEE:           0.0005,            // 0.05% — taker fee for stop-loss exits
+    MAKER_FEE:           0.0000,            // 0.00% — Binance zero maker fee
+    ENTRY_OFFSET:        1.00,              // resting limit entry offset from current market price
+    ENTRY_FILL_TIMEOUT:  30_000,            // wait up to 30 seconds for maker entry fill
     MIN_BALANCE:         1.50,
     GOLD_TICK:           0.10,
     MAX_TRADING_BALANCE: 25_000,            // $25K margin cap → $1M notional at 40x
     MAX_SIGNAL_DRIFT:    5.00,
-    MIN_FEE_MULTIPLE:    1.2,  // was 2.5 — blocking trades at small balance. Net still positive at 1.2x with 0.02/0.05 fees.
+    MIN_FEE_MULTIPLE:    1.0,               // maker-only fee gate
 } as const;
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
@@ -289,13 +291,12 @@ export function calcSize(balance: number, price: number, sizePct: number, levera
 // ─── FEE GATE ─────────────────────────────────────────────────────────────────
 
 function passesFeeGate(size: number, tpMove: number, entryPrice: number): boolean {
-    const posVal    = size * entryPrice;
-    const takerFee  = posVal * STRATEGY.TAKER_FEE;
-    const makerFee  = posVal * STRATEGY.MAKER_FEE;
-    const totalFees = takerFee + makerFee;
-    const gross     = size * tpMove;
-    const multiple  = totalFees > 0 ? gross / totalFees : 999;
-    const passes    = multiple >= STRATEGY.MIN_FEE_MULTIPLE;
+    const posVal     = size * entryPrice;
+    const makerFee   = posVal * STRATEGY.MAKER_FEE;
+    const totalFees  = makerFee * 2; // entry + TP
+    const gross      = size * tpMove;
+    const multiple   = totalFees > 0 ? gross / totalFees : 999;
+    const passes     = multiple >= STRATEGY.MIN_FEE_MULTIPLE;
 
     console.log(`[Execute] Fee gate: gross=$${gross.toFixed(4)} fees=$${totalFees.toFixed(4)} multiple=${multiple.toFixed(1)}x (need ${STRATEGY.MIN_FEE_MULTIPLE}x) → ${passes ? '✅ PASS' : '❌ FAIL'}`);
     return passes;
@@ -378,64 +379,80 @@ export async function executeBinanceTrade(
 
         // ── 7. FEE GATE ───────────────────────────────────────────────────
         if (!passesFeeGate(size, tpMove, livePrice)) {
-            return { success: false, outcome: 'skipped', message: 'Fee gate: gross < fees × 3' };
+            return { success: false, outcome: 'skipped', message: 'Fee gate: gross < maker fees' };
         }
 
-        // ── 8. TAKER MARKET ENTRY ─────────────────────────────────────────
-        const entryStart = Date.now();
-        let fillPrice    = livePrice;
+        // ── 8. MAKER LIMIT ENTRY ─────────────────────────────────────────
+        const entryStart  = Date.now();
+        const entryPrice  = tickRound(isBuy ? livePrice - STRATEGY.ENTRY_OFFSET : livePrice + STRATEGY.ENTRY_OFFSET);
+        let fillPrice     = entryPrice;
+        let filledSize    = 0;
+        let fillTimeMs    = 0;
 
         try {
             const entryOrder = await privatePost('/fapi/v1/order', {
                 symbol:   STRATEGY.SYMBOL,
                 side:     side.toUpperCase(),
-                type:     'MARKET',
+                type:     'LIMIT_MAKER',
+                price:    entryPrice.toFixed(2),
                 quantity: size,
             });
-            const fillTimeMs = Date.now() - entryStart;
 
-            // Binance market orders return avgPrice as string — may be "0" until filled
-            // Fetch the actual fill price from the order status
-            let avgPrice = Number(entryOrder.avgPrice ?? entryOrder.price ?? 0);
-            if (avgPrice === 0) {
-                try {
-                    await new Promise(r => setTimeout(r, 500));
-                    const orderStatus = await privateGet('/fapi/v1/order', {
-                        symbol:  STRATEGY.SYMBOL,
-                        orderId: entryOrder.orderId,
-                    });
-                    avgPrice = Number(orderStatus.avgPrice ?? orderStatus.price ?? livePrice);
-                } catch {
-                    avgPrice = livePrice;
-                }
+            console.log(`[Execute] ⏳ MAKER ENTRY submitted: ${size} XAU @ $${entryPrice.toFixed(2)} (orderId=${entryOrder.orderId})`);
+
+            let entryStatus: any = entryOrder;
+            let executedQty = Number(entryOrder.executedQty ?? 0);
+            let avgPrice    = Number(entryOrder.avgPrice ?? 0);
+
+            while (Date.now() - entryStart < STRATEGY.ENTRY_FILL_TIMEOUT && executedQty < size) {
+                await new Promise(r => setTimeout(r, 500));
+                entryStatus = await privateGet('/fapi/v1/order', {
+                    symbol:  STRATEGY.SYMBOL,
+                    orderId: entryOrder.orderId,
+                });
+                executedQty = Number(entryStatus.executedQty ?? executedQty);
+                avgPrice    = Number(entryStatus.avgPrice ?? avgPrice);
+                if (entryStatus.status === 'FILLED' || executedQty >= size) break;
             }
-            fillPrice = avgPrice > 0 ? avgPrice : livePrice;
 
-            console.log(`[Execute] ✅ TAKER ENTRY: ${size} XAU @ $${fillPrice.toFixed(2)} (${fillTimeMs}ms)`);
+            if (executedQty <= 0) {
+                try { await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }); } catch { /* ignore */ }
+                console.log(`[Execute] ❌ Maker entry not filled in ${STRATEGY.ENTRY_FILL_TIMEOUT / 1000}s — skipping.`);
+                return { success: false, outcome: 'skipped', message: 'Maker entry not filled' };
+            }
+
+            filledSize = executedQty;
+            fillPrice  = avgPrice > 0 ? avgPrice : entryPrice;
+            fillTimeMs = Date.now() - entryStart;
+
+            if (filledSize < size) {
+                console.log(`[Execute] ⚠️ Partial maker fill: ${filledSize.toFixed(2)}/${size.toFixed(2)} XAU — cancelling remainder...`);
+                try { await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }); } catch { /* ignore */ }
+            }
+
+            console.log(`[Execute] ✅ MAKER ENTRY filled: ${filledSize.toFixed(2)} XAU @ $${fillPrice.toFixed(2)} (${fillTimeMs}ms)`);
 
             // ── 9. MAKER GTC LIMIT TP — resting on book ───────────────────
             const tpPrice = tickRound(isBuy ? fillPrice + tpMove : fillPrice - tpMove);
             const slPrice = tickRound(isBuy ? fillPrice - tpMove : fillPrice + tpMove);
 
-            const takerFee  = posVal * STRATEGY.TAKER_FEE;
-            const makerFee  = posVal * STRATEGY.MAKER_FEE;
-            const totalFees = takerFee + makerFee;
-            const gross     = size * tpMove;
+            const makerFee  = filledSize * fillPrice * STRATEGY.MAKER_FEE;
+            const totalFees = makerFee * 2;
+            const gross     = filledSize * tpMove;
             const net       = gross - totalFees;
 
             console.log(`[Execute] TP=$${tpPrice.toFixed(2)} (+$${tpMove.toFixed(2)}) | SL=$${slPrice.toFixed(2)} (-$${tpMove.toFixed(2)}) | 1:1 R:R`);
-            console.log(`[Execute] Gross=$${gross.toFixed(4)} | Fees=T:$${takerFee.toFixed(4)}+M:$${makerFee.toFixed(4)}=$${totalFees.toFixed(4)} | Net=$${net.toFixed(4)}`);
+            console.log(`[Execute] Gross=$${gross.toFixed(4)} | Fees=M:$${makerFee.toFixed(4)}+M:$${makerFee.toFixed(4)}=$${totalFees.toFixed(4)} | Net=$${net.toFixed(4)}`);
 
-            // Binance: GTC reduceOnly limit order for TP (maker)
             try {
                 const tpOrder = await privatePost('/fapi/v1/order', {
-                    symbol:     STRATEGY.SYMBOL,
-                    side:       closeSide.toUpperCase(),
-                    type:       'LIMIT',
-                    price:      tpPrice.toFixed(2),
-                    quantity:   size,
-                    timeInForce:'GTC',
-                    reduceOnly: 'true',
+                    symbol:      STRATEGY.SYMBOL,
+                    side:        closeSide.toUpperCase(),
+                    type:        'LIMIT',
+                    price:       tpPrice.toFixed(2),
+                    quantity:    filledSize,
+                    timeInForce: 'GTC',
+                    reduceOnly:  'true',
                 });
                 console.log(`[Execute] ✅ MAKER TP placed: orderId=${tpOrder.orderId}`);
             } catch (e: any) {
@@ -444,7 +461,7 @@ export async function executeBinanceTrade(
 
             _activeTrade = {
                 entryPrice: fillPrice, tpPrice, slPrice, tpMove,
-                side: direction, size, posVal, leverage,
+                side: direction, size: filledSize, posVal: filledSize * fillPrice, leverage,
                 openedAt: Date.now(),
             };
 
@@ -458,8 +475,8 @@ export async function executeBinanceTrade(
             };
 
         } catch (e: any) {
-            console.error(`[Execute] Market entry failed: ${e.message}`);
-            return { success: false, outcome: 'error', message: `Entry failed: ${e.message}` };
+            console.error(`[Execute] Maker entry failed: ${e.message}`);
+            return { success: false, outcome: 'error', message: `Maker entry failed: ${e.message}` };
         }
 
     } catch (e: any) {
