@@ -6,7 +6,7 @@ dotenv.config();
 
 export const MARKET_SYMBOL  = 'XAUUSDT';      // Binance USDM Futures symbol
 export const DISPLAY_SYMBOL = 'XAU/USDT';
-export const TARGET_MOVE    = 3.00;           // default fallback only
+export const TARGET_MOVE    = 4.00;           // default fallback only
 
 // ─── MODEL FAILOVER ───────────────────────────────────────────────────────────
 // MODELS UNCHANGED — exactly as provided. Do not modify.
@@ -114,13 +114,13 @@ export function calcAtrRegime(atr5m: number, confidence: number): AtrRegime {
 
     if (atr5m > 8) {
         const tp = Math.min(atr5m * 1.2, 12);
-        regime   = { label: 'HIGH', leverage: 20, tp, sl: tp, baseSizePct: 0.60, minFeeMultiple: 3 };
+        regime   = { label: 'HIGH', leverage: 40, tp, sl: tp, baseSizePct: 0.60, minFeeMultiple: 3 };
     } else if (atr5m >= 4) {
         const tp = Math.min(atr5m * 1.5, 8);
-        regime   = { label: 'MED',  leverage: 20, tp, sl: tp, baseSizePct: 0.80, minFeeMultiple: 3 };
+        regime   = { label: 'MED',  leverage: 40, tp, sl: tp, baseSizePct: 0.80, minFeeMultiple: 3 };
     } else {
         const tp = Math.min(atr5m * 2.0, 4);
-        regime   = { label: 'LOW',  leverage: 20, tp, sl: tp, baseSizePct: 0.95, minFeeMultiple: 3 };
+        regime   = { label: 'LOW',  leverage: 40, tp, sl: tp, baseSizePct: 0.95, minFeeMultiple: 3 };
     }
 
     regime.tp = Math.max(regime.tp, 1.50);
@@ -368,13 +368,13 @@ ${fundingNote}
 Pre-computed bias: ${bias.direction} score=${bias.score}/9 | Signals: ${bias.reasons.join(', ')}
 
 BINANCE FEE STRUCTURE (XAUUSDT Perp):
-  Taker (market): 0.0450% — used for entry and SL
-  Maker (GTC limit): 0.0180% — used for TP
+  Taker (market): 0.0500% — used for entry and SL
+  Maker (GTC limit): 0.0200% — used for TP
 
 ATR REGIME RULES — MUST FOLLOW EXACTLY:
-  ATR > $8.00  (HIGH vol): leverage=10x, TP=min(ATR×1.2, $12.00), size=60% of balance
-  ATR $4–$8    (MED vol):  leverage=20x, TP=min(ATR×1.5, $8.00),  size=80% of balance
-  ATR < $4.00  (LOW vol):  leverage=25x, TP=min(ATR×2.0, $4.00),  size=95% of balance
+  ATR > $8.00  (HIGH vol): leverage=40x, TP=min(ATR×1.2, $12.00), size=60% of balance
+  ATR $4–$8    (MED vol):  leverage=40x, TP=min(ATR×1.5, $8.00),  size=80% of balance
+  ATR < $4.00  (LOW vol):  leverage=40x, TP=min(ATR×2.0, $4.00),  size=95% of balance
 Current ATR=$${ind.atr5m.toFixed(3)} → base regime: ${provisionalRegime.label} | base lev=${safetyLev}x | base TP=$${provisionalRegime.tp.toFixed(2)}
 
 TRADING RULES:
@@ -457,7 +457,7 @@ Reply with a JSON array ONLY. No markdown, no explanation, no text outside the a
 
             const tpCeiling      = Math.min(ind.atr5m * 2, 15);
             const suggested_tp   = Math.max(1.50, Math.min(rawTp, tpCeiling));
-            const clampedLev     = Math.max(1, Math.min(25, Math.round(rawLev)));
+            const clampedLev     = Math.max(1, Math.min(40, Math.round(rawLev)));
             const suggested_leverage = safeLeverage(clampedLev, price, ind.atr5m);
             const session_size_pct   = Math.max(0.20, Math.min(0.95, rawSizePct));
 

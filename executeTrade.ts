@@ -23,12 +23,12 @@ dotenv.config();
 // main.ts monitors SL every cycle independently.
 
 const STRATEGY = {
-    SYMBOL:              MARKET_SYMBOL,       // 'XAUUSDT'
-    TAKER_FEE:           0.0005,            // 0.0450%
-    MAKER_FEE:           0.0002,            // 0.0180%
+    SYMBOL:              MARKET_SYMBOL,
+    TAKER_FEE:           0.0005,            // 0.05% — your actual taker fee
+    MAKER_FEE:           0.0002,            // 0.02% — your actual maker fee
     MIN_BALANCE:         1.50,
     GOLD_TICK:           0.10,
-    MAX_TRADING_BALANCE: 20_000,
+    MAX_TRADING_BALANCE: 25_000,            // $25K margin cap → $1M notional at 40x
     MAX_SIGNAL_DRIFT:    5.00,
     MIN_FEE_MULTIPLE:    2.5,
 } as const;

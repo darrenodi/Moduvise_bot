@@ -25,13 +25,13 @@ const IS_TESTNET  = ENVIRONMENT !== 'live';
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 
 const CONFIG = {
-    MAX_TRADES_DAY: 300,
-    SL_MOVE: 3.00,
-    MAX_TRADING_BALANCE: 20_000,
-    BANK_FRACTION: 0.50,
-    RECYCLE_BALANCE: 800,
-    RECYCLE_KEEP: 400,
-    MOMENTUM_CANDLES: 3,
+    MAX_TRADES_DAY:      300,
+    SL_MOVE:             4.00,       // matches calculator $4.00 gold move
+    MAX_TRADING_BALANCE: 25_000,     // capped at 40x × $25K = $1M max notional
+    BANK_FRACTION:       0.50,       // 50% banked per TP
+    RECYCLE_BALANCE:     800,
+    RECYCLE_KEEP:        400,
+    MOMENTUM_CANDLES:    3,
 } as const;
 
 // ─── EXCHANGE (market data only) ──────────────────────────────────────────────
@@ -686,13 +686,13 @@ const startupMsg = [
     `MODUVISE GOLD PERP BOT — BINANCE FUTURES`,
     `Mode:      ${IS_TESTNET ? '🧪 TESTNET (demo.binance.com)' : '🔴 MAINNET (live)'}`,
     `Asset:     XAUUSDT perp`,
-    `Leverage:  DYNAMIC — 10x (ATR>$8) | 20x (ATR $4-8) | 25x (ATR<$4)`,
-    `Entry:     Taker market (0.0450%)`,
-    `TP:        DYNAMIC — ATR×multiplier | Maker GTC limit (0.0180%) | min $1.50`,
-    `SL:        = TP distance (1:1 R:R) → Taker market (0.0450%)`,
+    `Leverage:  40x fixed`,
+    `Entry:     Taker market (0.05%)`,
+    `TP:        DYNAMIC — ATR×multiplier | Maker GTC limit (0.02%) | min $1.50 | target $4.00`,
+    `SL:        = TP distance (1:1 R:R) → Taker market (0.05%)`,
     `Size:      DYNAMIC — session quality × ATR regime (20%–95% of balance)`,
     `Fee gate:  Gross must be > fees × 3 or trade is skipped`,
-    `Cap:       $${CONFIG.MAX_TRADING_BALANCE.toLocaleString()} trading balance`,
+    `Cap:       $${CONFIG.MAX_TRADING_BALANCE.toLocaleString()} trading balance (40x = $1M max notional)`,
     `Banking:   50% banked per TP | 100% banked at cap`,
     `Start:     ${new Date().toISOString()}`,
 ].join('\n  ');
