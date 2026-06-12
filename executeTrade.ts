@@ -26,8 +26,8 @@ const STRATEGY = {
     SYMBOL:              MARKET_SYMBOL,
     TAKER_FEE:           0.0005,            // 0.05% — taker fee for stop-loss exits (market order)
     MAKER_FEE:           0.0000,            // 0.00% — Binance zero maker fee (ALO confirmed)
-    ENTRY_OFFSET:        0.20,              // ALO resting entry: $0.20 inside market (fills faster on $0.50 TP)
-    ENTRY_FILL_TIMEOUT:  30_000,            // wait up to 30 seconds for maker entry fill
+    ENTRY_OFFSET:        0.10,              // GTX resting entry: 1 tick inside market — fills on any $0.10 dip
+    ENTRY_FILL_TIMEOUT:  60_000,            // 60s fill window — Asia session moves slowly
     SL_MOVE:             10.00,             // fixed stop-loss distance: wide stop, tight TP (1:20 R:R)
     TARGET_TP:           0.50,              // fixed $0.50 TP per trade (all regimes)
     MIN_BALANCE:         1.50,
