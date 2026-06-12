@@ -112,19 +112,34 @@ export interface AtrRegime {
 export function calcAtrRegime(atr5m: number, confidence: number): AtrRegime {
     let regime: AtrRegime;
 
+    // ── OPTION A: Fixed $4 TP across all regimes (ACTIVE) ────────────────────
+    // Matches the calculator projection exactly.
+    // $4 move on Gold at current prices (~$4200) is reliably achievable
+    // within minutes even on wrong-direction entries due to oscillation.
+    const FIXED_TP = 4.00;
     if (atr5m > 8) {
-        const tp = Math.min(atr5m * 1.2, 12);
-        regime   = { label: 'HIGH', leverage: 40, tp, sl: tp, baseSizePct: 0.60, minFeeMultiple: 3 };
+        regime = { label: 'HIGH', leverage: 40, tp: FIXED_TP, sl: FIXED_TP, baseSizePct: 0.60, minFeeMultiple: 3 };
     } else if (atr5m >= 4) {
-        const tp = Math.min(atr5m * 1.5, 8);
-        regime   = { label: 'MED',  leverage: 40, tp, sl: tp, baseSizePct: 0.80, minFeeMultiple: 3 };
+        regime = { label: 'MED',  leverage: 40, tp: FIXED_TP, sl: FIXED_TP, baseSizePct: 0.80, minFeeMultiple: 3 };
     } else {
-        const tp = Math.min(atr5m * 2.0, 4);
-        regime   = { label: 'LOW',  leverage: 40, tp, sl: tp, baseSizePct: 0.95, minFeeMultiple: 3 };
+        regime = { label: 'LOW',  leverage: 40, tp: FIXED_TP, sl: FIXED_TP, baseSizePct: 0.95, minFeeMultiple: 3 };
     }
 
-    regime.tp = Math.max(regime.tp, 1.50);
-    regime.sl = regime.tp;
+    // ── OPTION B: Dynamic ATR-based TP (COMMENTED OUT — do not delete) ────────
+    // Reactivate by commenting out Option A above and uncommenting this block.
+    // if (atr5m > 8) {
+    //     const tp = Math.min(atr5m * 1.2, 12);
+    //     regime   = { label: 'HIGH', leverage: 40, tp, sl: tp, baseSizePct: 0.60, minFeeMultiple: 3 };
+    // } else if (atr5m >= 4) {
+    //     const tp = Math.min(atr5m * 1.5, 8);
+    //     regime   = { label: 'MED',  leverage: 40, tp, sl: tp, baseSizePct: 0.80, minFeeMultiple: 3 };
+    // } else {
+    //     const tp = Math.min(atr5m * 2.0, 4);
+    //     regime   = { label: 'LOW',  leverage: 40, tp, sl: tp, baseSizePct: 0.95, minFeeMultiple: 3 };
+    // }
+    // regime.tp = Math.max(regime.tp, 1.50);
+    // regime.sl = regime.tp;
+    // ── END OPTION B ──────────────────────────────────────────────────────────
 
     if (confidence < 0.55 && regime.leverage > 10) {
         regime.leverage = Math.max(10, regime.leverage - 5);
@@ -349,55 +364,42 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
             ? `Funding: ${(ind.fundingRate * 100).toFixed(4)}% (${ind.fundingRate < 0 ? 'shorts pay longs → bull' : ind.fundingRate > 0 ? 'longs pay shorts → bear' : 'neutral'})`
             : 'Funding: N/A';
 
-        // ── Gemini prompt — rich context, strict JSON output ──────────────
-        const prompt = `You are the best gold futures scalper in the world. You are trading XAUUSDT perpetual on Binance USDM Futures.
-Session: ${session.name} [${session.quality}]. Date: ${new Date().toISOString()}
+        // ── Gemini prompt — scalper mindset: enter NOW, take $4, repeat ─────
+        const prompt = `You are a professional gold futures scalper. Your ONLY job right now is to answer one question:
 
-LIVE MARKET DATA:
-Price: $${price.toFixed(2)} | 24h range: $${ind.low24h.toFixed(2)}–$${ind.high24h.toFixed(2)} (position in range: ${rangePos}%)
-EMA stack: ${ind.emaTrend} (EMA8=$${ind.ema8.toFixed(2)} EMA21=$${ind.ema21.toFixed(2)} EMA50=$${ind.ema50.toFixed(2)})
-RSI(14): ${ind.rsi.toFixed(1)} | ADX(14): ${ind.adx.toFixed(1)} | Structure: ${ind.priceStructure}
-Momentum: 5m=${ind.momentum5m.toFixed(4)}% | 30m=${ind.momentum30m.toFixed(4)}% | 1h=${ind.momentum1h.toFixed(4)}%
-ATR(5m): $${ind.atr5m.toFixed(3)} | ATR%: ${ind.atrPct.toFixed(4)}% | Volume ratio: ${ind.volumeRatio.toFixed(2)}x
-Spread: $${ind.spreadUsd.toFixed(3)} | 4h bias: ${ind.trendBias4h} | Weekly bias: ${ind.weeklyBias}
-Order book imbalance: ${(ind.obImbalance * 100).toFixed(1)}% (>0=buy pressure, <0=sell pressure)
-Price vs VWAP: ${ind.priceVsVwap.toFixed(3)}%
-Support: $${ind.nearestSupport.toFixed(2)} (${ind.distanceToSupport.toFixed(2)} away) | Resistance: $${ind.nearestResistance.toFixed(2)} (${ind.distanceToResistance.toFixed(2)} away)
-Swing high: $${ind.recentSwingHigh.toFixed(2)} | Swing low: $${ind.recentSwingLow.toFixed(2)}
+"Should I enter LONG or SHORT on XAUUSDT RIGHT NOW to catch a $4 move?"
+
+You are NOT doing analysis. You are NOT writing a report. You are making a single trading decision that will be executed in the next 3 seconds. After this trade closes ($4 profit or $4 loss), you will make the same decision again. You do this 50 times per day.
+
+CURRENT MARKET SNAPSHOT — ${new Date().toISOString()}:
+Price: $${price.toFixed(2)}
+24h range: $${ind.low24h.toFixed(2)} – $${ind.high24h.toFixed(2)} | Position in range: ${rangePos}%
+EMA trend: ${ind.emaTrend} | RSI: ${ind.rsi.toFixed(1)} | ADX: ${ind.adx.toFixed(1)}
+Momentum: 5m=${ind.momentum5m.toFixed(3)}% | 30m=${ind.momentum30m.toFixed(3)}% | 1h=${ind.momentum1h.toFixed(3)}%
+ATR(5m): $${ind.atr5m.toFixed(2)} | Spread: $${ind.spreadUsd.toFixed(3)} | Volume: ${ind.volumeRatio.toFixed(2)}x avg
+Order book: ${(ind.obImbalance * 100).toFixed(1)}% buy imbalance | Price vs VWAP: ${ind.priceVsVwap.toFixed(3)}%
+Nearest support: $${ind.nearestSupport.toFixed(2)} (${ind.distanceToSupport.toFixed(2)} away)
+Nearest resistance: $${ind.nearestResistance.toFixed(2)} (${ind.distanceToResistance.toFixed(2)} away)
+Swing low: $${ind.recentSwingLow.toFixed(2)} | Swing high: $${ind.recentSwingHigh.toFixed(2)}
+4h bias: ${ind.trendBias4h} | Weekly: ${ind.weeklyBias}
 ${fundingNote}
-Pre-computed bias: ${bias.direction} score=${bias.score}/9 | Signals: ${bias.reasons.join(', ')}
 
-BINANCE FEE STRUCTURE (XAUUSDT Perp):
-  Taker (market): 0.0500% — used for entry and SL
-  Maker (GTC limit): 0.0200% — used for TP
+HOW TO DECIDE:
+- Gold oscillates $4–$10 every few minutes. Even a wrong-direction entry often sees $4 your way before reversing $4 against you.
+- Your TP is $4. Your SL is $4. 1:1 ratio. You just need to be right MORE than wrong.
+- LONG if: price is near support, momentum is turning up, OB buy pressure, RSI rising from low, 30m green.
+- SHORT if: price is near resistance, momentum rolling over, OB sell pressure, RSI falling from high, 30m red.
+- If price is mid-range with no clear lean: follow the 5m and 30m momentum direction. Something is always moving.
+- NEVER output neutral. There is always a better side. If truly 50/50, follow OB imbalance. If OB is 0, follow 5m momentum. If 5m is 0, go LONG (gold has upward drift).
+- RSI > 82 = do NOT long. RSI < 18 = do NOT short. Everything else is tradeable.
 
-ATR REGIME RULES — MUST FOLLOW EXACTLY:
-  ATR > $8.00  (HIGH vol): leverage=40x, TP=min(ATR×1.2, $12.00), size=60% of balance
-  ATR $4–$8    (MED vol):  leverage=40x, TP=min(ATR×1.5, $8.00),  size=80% of balance
-  ATR < $4.00  (LOW vol):  leverage=40x, TP=min(ATR×2.0, $4.00),  size=95% of balance
-Current ATR=$${ind.atr5m.toFixed(3)} → base regime: ${provisionalRegime.label} | base lev=${safetyLev}x | base TP=$${provisionalRegime.tp.toFixed(2)}
+FIXED PARAMETERS (do not change these):
+- suggested_tp: 4.00 (always)
+- suggested_leverage: ${safetyLev} (always)
+- session_size_pct: ${(session.sizePct * provisionalRegime.baseSizePct).toFixed(2)} (always)
 
-TRADING RULES:
-1. TP floor: $1.50 minimum. TP ceiling: min(ATR×2, $15). Never exceed ceiling.
-2. SL always equals TP — strict 1:1 Risk:Reward (SL is monitored externally).
-3. Liquidation buffer: entry_price / leverage must be > ATR×2. Reduce leverage if not.
-4. Fee gate: (size × TP) must be > (taker_fee + maker_fee) × 3. Skip if not.
-5. confidence < 0.55 → drop leverage by 5 (25→20, 20→15, 15→10, 10→10).
-6. Near support (<$3.00 away) = favour LONG. Near resistance (<$3.00 away) = favour SHORT.
-7. ADX < 15 = ranging market — scalp both directions. ADX > 30 = trending — follow trend only.
-8. RSI > 82 = block long. RSI < 18 = block short.
-9. ONLY output neutral if: 30m AND 1h momentum conflict AND RSI is 48–52.
-10. Funding rate: negative = shorts paying longs = bullish pressure. Positive = bearish.
-11. Weekend/off-hours: tighter TP, lower leverage, smaller size.
-
-QUALITY STANDARDS:
-- Only signal when at least 5 of 9 bias factors agree.
-- If bias score < 5, reduce confidence below 0.55 to trigger leverage reduction.
-- Prefer entries near support/resistance for better R:R.
-- Confirm with 30m and 1h momentum alignment for higher confidence.
-
-Reply with a JSON array ONLY. No markdown, no explanation, no text outside the array:
-[{"symbol":"XAU/USDT","direction":"long","market_price":${price.toFixed(2)},"target_move":${provisionalRegime.tp.toFixed(2)},"confidence":0.72,"reasoning":"max 120 chars","suggested_tp":${provisionalRegime.tp.toFixed(2)},"suggested_leverage":${safetyLev},"session_size_pct":${(session.sizePct * provisionalRegime.baseSizePct).toFixed(2)}}]`;
+Reply with JSON array ONLY. No markdown. No explanation. No text outside the array:
+[{"symbol":"XAU/USDT","direction":"long","market_price":${price.toFixed(2)},"target_move":4.00,"confidence":0.72,"reasoning":"max 100 chars — WHY this direction RIGHT NOW","suggested_tp":4.00,"suggested_leverage":${safetyLev},"session_size_pct":${(session.sizePct * provisionalRegime.baseSizePct).toFixed(2)}}]`;
 
         const geminiResult = await callGemini(prompt);
 
@@ -456,7 +458,9 @@ Reply with a JSON array ONLY. No markdown, no explanation, no text outside the a
             const rawSizePct = Number(item.session_size_pct ?? session.sizePct * regime.baseSizePct);
 
             const tpCeiling      = Math.min(ind.atr5m * 2, 15);
-            const suggested_tp   = Math.max(1.50, Math.min(rawTp, tpCeiling));
+            // Option A active: force TP to 4.00 regardless of what Gemini returns
+            const suggested_tp   = 4.00;
+            // Option B: const suggested_tp = Math.max(1.50, Math.min(rawTp, tpCeiling));
             const clampedLev     = Math.max(1, Math.min(40, Math.round(rawLev)));
             const suggested_leverage = safeLeverage(clampedLev, price, ind.atr5m);
             const session_size_pct   = Math.max(0.20, Math.min(0.95, rawSizePct));
