@@ -326,7 +326,7 @@ export async function executeBinanceTrade(
 
     console.log(`\n${'─'.repeat(65)}`);
     console.log(`[Execute] XAUUSDT ${isBuy ? 'LONG 📈' : 'SHORT 📉'} | $${signal.market_price.toFixed(2)} | conf=${signal.confidence.toFixed(2)}`);
-    console.log(`[Execute] TP=$${tpMove.toFixed(2)} | SL=$${tpMove.toFixed(2)} | Lev=${leverage}x | Size=${(sizePct * 100).toFixed(0)}% | ${IS_TESTNET ? '🧪 TESTNET' : '🔴 LIVE'}`);
+    console.log(`[Execute] TP=$${tpMove.toFixed(2)} | SL=$${STRATEGY.SL_MOVE.toFixed(2)} | Lev=${leverage}x | Size=${(sizePct * 100).toFixed(0)}% | ${IS_TESTNET ? '🧪 TESTNET' : '🔴 LIVE'}`);
     console.log(`[Execute] ${signal.reasoning}`);
     console.log(`${'─'.repeat(65)}`);
 
@@ -393,11 +393,12 @@ export async function executeBinanceTrade(
 
         try {
             const entryOrder = await privatePost('/fapi/v1/order', {
-                symbol:   STRATEGY.SYMBOL,
-                side:     side.toUpperCase(),
-                type:     'LIMIT_MAKER',
-                price:    entryPrice.toFixed(2),
-                quantity: size,
+                symbol:      STRATEGY.SYMBOL,
+                side:        side.toUpperCase(),
+                type:        'LIMIT',
+                timeInForce: 'GTX',        // GTX = Good Till Crossing = Post-Only/ALO on USDM Futures
+                price:       entryPrice.toFixed(2),
+                quantity:    size,
             });
 
             console.log(`[Execute] ⏳ MAKER ENTRY submitted: ${size} XAU @ $${entryPrice.toFixed(2)} (orderId=${entryOrder.orderId})`);
@@ -450,7 +451,8 @@ export async function executeBinanceTrade(
                 const tpOrder = await privatePost('/fapi/v1/order', {
                     symbol:      STRATEGY.SYMBOL,
                     side:        closeSide.toUpperCase(),
-                    type:        'LIMIT_MAKER',        // ALO — resting maker TP, zero fee
+                    type:        'LIMIT',
+                    timeInForce: 'GTX',        // GTX = Post-Only/ALO on USDM Futures — maker fee guaranteed
                     price:       tpPrice.toFixed(2),
                     quantity:    filledSize,
                     reduceOnly:  'true',
