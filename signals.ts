@@ -141,9 +141,11 @@ export function calcAtrRegime(atr5m: number, confidence: number): AtrRegime {
     // regime.sl = regime.tp;
     // ── END OPTION B ──────────────────────────────────────────────────────────
 
-    if (confidence < 0.55 && regime.leverage > 10) {
-        regime.leverage = Math.max(10, regime.leverage - 5);
-    }
+    // Confidence penalty disabled — leverage is fixed at 40x by design (Option A).
+    // Option B users: uncomment below to re-enable.
+    // if (confidence < 0.55 && regime.leverage > 10) {
+    //     regime.leverage = Math.max(10, regime.leverage - 5);
+    // }
 
     return regime;
 }

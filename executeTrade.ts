@@ -30,7 +30,7 @@ const STRATEGY = {
     GOLD_TICK:           0.10,
     MAX_TRADING_BALANCE: 25_000,            // $25K margin cap → $1M notional at 40x
     MAX_SIGNAL_DRIFT:    5.00,
-    MIN_FEE_MULTIPLE:    2.5,
+    MIN_FEE_MULTIPLE:    1.2,  // was 2.5 — blocking trades at small balance. Net still positive at 1.2x with 0.02/0.05 fees.
 } as const;
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
