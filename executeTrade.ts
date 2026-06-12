@@ -26,7 +26,7 @@ const STRATEGY = {
     SYMBOL:              MARKET_SYMBOL,
     TAKER_FEE:           0.0005,            // 0.05% — taker fee for stop-loss exits (market order)
     MAKER_FEE:           0.0000,            // 0.00% — Binance zero maker fee (ALO confirmed)
-    ENTRY_OFFSET:        0.10,              // GTX resting entry: 1 tick inside market — fills on any $0.10 dip
+    ENTRY_OFFSET:        0.30,              // GTX resting: $0.30 from market — wide enough to not cross, reachable on $3 ATR
     ENTRY_FILL_TIMEOUT:  60_000,            // 60s fill window — Asia session moves slowly
     SL_MOVE:             10.00,             // fixed stop-loss distance: wide stop, tight TP (1:20 R:R)
     TARGET_TP:           0.50,              // fixed $0.50 TP per trade (all regimes)
@@ -385,24 +385,57 @@ export async function executeBinanceTrade(
         }
 
         // ── 8. MAKER LIMIT ENTRY ─────────────────────────────────────────
-        const entryStart  = Date.now();
-        const entryPrice  = tickRound(isBuy ? livePrice - STRATEGY.ENTRY_OFFSET : livePrice + STRATEGY.ENTRY_OFFSET);
-        let fillPrice     = entryPrice;
-        let filledSize    = 0;
-        let fillTimeMs    = 0;
+        const entryStart = Date.now();
+        let fillPrice    = 0;
+        let filledSize   = 0;
+        let fillTimeMs   = 0;
+
+        // GTX entry — attempt up to 2 times with a fresh price fetch on -5022 rejection
+        let entryOrder: any = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            // Re-fetch price on retry so offset is calculated from current market
+            let attemptPrice = livePrice;
+            if (attempt > 1) {
+                try {
+                    const ticker = await fetch(`${BASE_URL}/fapi/v1/ticker/price?symbol=${STRATEGY.SYMBOL}`)
+                        .then(r => r.json()) as any;
+                    attemptPrice = Number(ticker?.price ?? livePrice);
+                    console.log(`[Execute] GTX retry — refreshed price: $${attemptPrice.toFixed(2)}`);
+                } catch { /* use livePrice */ }
+                await new Promise(r => setTimeout(r, 1_500));
+            }
+
+            const entryPrice = tickRound(isBuy ? attemptPrice - STRATEGY.ENTRY_OFFSET : attemptPrice + STRATEGY.ENTRY_OFFSET);
+
+            try {
+                entryOrder = await privatePost('/fapi/v1/order', {
+                    symbol:      STRATEGY.SYMBOL,
+                    side:        side.toUpperCase(),
+                    type:        'LIMIT',
+                    timeInForce: 'GTX',   // GTX = Good Till Crossing = Post-Only/ALO on USDM Futures
+                    price:       entryPrice.toFixed(2),
+                    quantity:    size,
+                });
+                console.log(`[Execute] ⏳ MAKER ENTRY submitted: ${size} XAU @ $${entryPrice.toFixed(2)} (orderId=${entryOrder.orderId}) attempt=${attempt}`);
+                fillPrice = entryPrice;
+                break; // order placed — exit retry loop
+            } catch (e: any) {
+                const msg = String(e.message ?? '');
+                if (msg.includes('-5022') && attempt < 2) {
+                    console.log(`[Execute] ⚠️ GTX -5022 (would cross book) — retrying with fresh price...`);
+                    continue;
+                }
+                // Non-retryable error or exhausted retries
+                console.error(`[Execute] Maker entry failed: ${e.message}`);
+                return { success: false, outcome: 'error', message: `Maker entry failed: ${e.message}` };
+            }
+        }
+
+        if (!entryOrder) {
+            return { success: false, outcome: 'skipped', message: 'GTX entry rejected after retries' };
+        }
 
         try {
-            const entryOrder = await privatePost('/fapi/v1/order', {
-                symbol:      STRATEGY.SYMBOL,
-                side:        side.toUpperCase(),
-                type:        'LIMIT',
-                timeInForce: 'GTX',        // GTX = Good Till Crossing = Post-Only/ALO on USDM Futures
-                price:       entryPrice.toFixed(2),
-                quantity:    size,
-            });
-
-            console.log(`[Execute] ⏳ MAKER ENTRY submitted: ${size} XAU @ $${entryPrice.toFixed(2)} (orderId=${entryOrder.orderId})`);
-
             let entryStatus: any = entryOrder;
             let executedQty = Number(entryOrder.executedQty ?? 0);
             let avgPrice    = Number(entryOrder.avgPrice ?? 0);
@@ -425,7 +458,7 @@ export async function executeBinanceTrade(
             }
 
             filledSize = executedQty;
-            fillPrice  = avgPrice > 0 ? avgPrice : entryPrice;
+            fillPrice  = avgPrice > 0 ? avgPrice : fillPrice;
             fillTimeMs = Date.now() - entryStart;
 
             if (filledSize < size) {
@@ -476,11 +509,6 @@ export async function executeBinanceTrade(
                 entryPrice: fillPrice, tpPrice, slPrice, tpMove, leverage, sizePct,
                 grossProfit: gross, netProfit: net, fees: totalFees, fillTimeMs,
             };
-
-        } catch (e: any) {
-            console.error(`[Execute] Maker entry failed: ${e.message}`);
-            return { success: false, outcome: 'error', message: `Maker entry failed: ${e.message}` };
-        }
 
     } catch (e: any) {
         console.error(`[Execute] Fatal: ${e.message}`);
