@@ -28,7 +28,7 @@ const STRATEGY = {
     MAKER_FEE:           0.0000,            // 0.00% — Binance zero maker fee (ALO confirmed)
     ENTRY_OFFSET:        0.30,              // GTX resting: $0.30 from market — wide enough to not cross, reachable on $3 ATR
     ENTRY_FILL_TIMEOUT:  60_000,            // 60s fill window — Asia session moves slowly
-    SL_MOVE:             10.00,             // fixed stop-loss distance: wide stop, tight TP (1:20 R:R)
+    SL_MOVE:             2.00,              // SL = $2.00 — 8 TPs to recover 1 SL | breakeven=89% win rate | liq@$105 so safe
     TARGET_TP:           0.50,              // fixed $0.50 TP per trade (all regimes)
     MIN_BALANCE:         1.50,
     GOLD_TICK:           0.10,
