@@ -27,7 +27,7 @@ const STRATEGY = {
     TAKER_FEE:           0.0005,            // 0.05% — taker fee for stop-loss exits (market order)
     MAKER_FEE:           0.0000,            // 0.00% — Binance zero maker fee (ALO confirmed)
     ENTRY_OFFSET:        0.30,              // GTX resting: $0.30 from market — wide enough to not cross, reachable on $3 ATR
-    ENTRY_FILL_TIMEOUT:  60_000,            // 60s fill window — Asia session moves slowly
+    ENTRY_FILL_TIMEOUT:  300_000,            // 60s fill window — Asia session moves slowly
     SL_MOVE:             2.00,              // SL = $2.00 — 8 TPs to recover 1 SL | breakeven=89% win rate | liq@$105 so safe
     TARGET_TP:           0.50,              // fixed $0.50 TP per trade (all regimes)
     MIN_BALANCE:         1.50,
@@ -435,10 +435,9 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'skipped', message: 'GTX entry rejected after retries' };
         }
 
-        try {
-            let entryStatus: any = entryOrder;
-            let executedQty = Number(entryOrder.executedQty ?? 0);
-            let avgPrice    = Number(entryOrder.avgPrice ?? 0);
+        let entryStatus: any = entryOrder;
+        let executedQty = Number(entryOrder.executedQty ?? 0);
+        let avgPrice    = Number(entryOrder.avgPrice ?? 0);
 
             while (Date.now() - entryStart < STRATEGY.ENTRY_FILL_TIMEOUT && executedQty < size) {
                 await new Promise(r => setTimeout(r, 500));
