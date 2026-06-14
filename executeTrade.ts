@@ -24,7 +24,7 @@ const STRATEGY = {
     ENTRY_OFFSET:        0.15,             // $0.15 below/above market — reachable on $3 ATR, fills faster
     ENTRY_FILL_TIMEOUT:  90_000,           // 90 seconds — if unfilled, skip and free the cycle
     SL_MOVE:             2.00,             // $2.00 stop loss — breakeven at 80% win rate
-    TARGET_TP:           0.50,             // $0.50 fixed TP
+    TARGET_TP:           0.70,             // $0.50 fixed TP
     MIN_BALANCE:         1.50,
     GOLD_TICK:           0.10,
     MAX_TRADING_BALANCE: 25_000,
@@ -292,7 +292,7 @@ export async function executeBinanceTrade(
     const closeSide = isBuy ? 'sell' : 'buy';
 
     const tpMove   = STRATEGY.TARGET_TP;
-    const leverage = signal.suggested_leverage ?? 40;
+    const leverage = signal.suggested_leverage ?? 45;
     const sizePct  = signal.session_size_pct   ?? 0.80;
 
     console.log(`\n${'─'.repeat(65)}`);
