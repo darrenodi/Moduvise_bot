@@ -15,35 +15,25 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 // ─── ENVIRONMENT ──────────────────────────────────────────────────────────────
-// 'demo'    → demo.binance.com keys (BINANCE_BOT_API / BINANCE_BOT_SECRET)
-// 'testnet' → testnet.binancefuture.com keys
-// 'live'    → binance.com live keys
 
 const ENVIRONMENT = process.env.ENVIRONMENT ?? 'demo';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
+// KEY CHANGE: MAX_TRADES_DAY raised from 300 → 400
+// isMomentumFresh removed from cycle — saved 1 API call per cycle (klines fetch)
+// Momentum is embedded in the bias scoring inside signals.ts
 
 const CONFIG = {
-    MAX_TRADES_DAY:      300,
-    MAX_TRADING_BALANCE: 25_000,     // capped at 40x × $25K = $1M max notional
-    BANK_FRACTION:       0.50,       // 50% banked per TP
+    MAX_TRADES_DAY:      400,            // raised from 300
+    MAX_TRADING_BALANCE: 25_000,
+    BANK_FRACTION:       0.50,
     RECYCLE_BALANCE:     800,
     RECYCLE_KEEP:        400,
-    MOMENTUM_CANDLES:    3,
 } as const;
 
 // ─── EXCHANGE (market data only) ──────────────────────────────────────────────
 
-const API_KEY    = ENVIRONMENT === 'live'
-    ? (process.env.BINANCE_API_KEY    ?? '')
-    : (process.env.BINANCE_BOT_API    ?? '');
-
-const API_SECRET = ENVIRONMENT === 'live'
-    ? (process.env.BINANCE_API_SECRET ?? '')
-    : (process.env.BINANCE_BOT_SECRET ?? '');
-
-// Public market data — no auth, point directly at demo-fapi.binance.com
 const BASE_URL = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
 
 const exchange = new (ccxt as any).binanceusdm({
@@ -62,18 +52,18 @@ const exchange = new (ccxt as any).binanceusdm({
 // ─── DAILY STATS ──────────────────────────────────────────────────────────────
 
 interface DayStats {
-    date:            string;
-    attempts:        number;
-    fills:           number;
-    tpHits:          number;
-    slHits:          number;
-    momentumBlocked: number;
-    grossProfit:     number;
-    netProfit:       number;
-    slLoss:          number;
-    sessionBanked:   number;
-    fillTimes:       number[];
-    avgFillMs:       number;
+    date:          string;
+    attempts:      number;
+    fills:         number;
+    tpHits:        number;
+    slHits:        number;
+    skipped:       number;
+    grossProfit:   number;
+    netProfit:     number;
+    slLoss:        number;
+    sessionBanked: number;
+    fillTimes:     number[];
+    avgFillMs:     number;
 }
 
 let stats: DayStats = freshStats();
@@ -81,9 +71,9 @@ let stats: DayStats = freshStats();
 function freshStats(): DayStats {
     return {
         date: new Date().toISOString().slice(0, 10),
-        attempts: 0, fills: 0, tpHits: 0, slHits: 0,
-        momentumBlocked: 0, grossProfit: 0, netProfit: 0,
-        slLoss: 0, sessionBanked: 0, fillTimes: [], avgFillMs: 0,
+        attempts: 0, fills: 0, tpHits: 0, slHits: 0, skipped: 0,
+        grossProfit: 0, netProfit: 0, slLoss: 0, sessionBanked: 0,
+        fillTimes: [], avgFillMs: 0,
     };
 }
 
@@ -119,16 +109,18 @@ function checkReset(): void {
 }
 
 function printDailySummary(): void {
-    const total  = virtualTradingBalance + sessionBanked;
-    const uptime = ((Date.now() - startTime) / 3600000).toFixed(1);
-    const tpRate = stats.fills > 0 ? ((stats.tpHits / stats.fills) * 100).toFixed(0) : '0';
+    const total    = virtualTradingBalance + sessionBanked;
+    const uptime   = ((Date.now() - startTime) / 3600000).toFixed(1);
+    const tpRate   = stats.fills > 0 ? ((stats.tpHits / stats.fills) * 100).toFixed(0) : '0';
+    const fillRate = stats.attempts > 0 ? ((stats.fills / stats.attempts) * 100).toFixed(0) : '0';
     stats.avgFillMs = stats.fillTimes.length > 0
         ? stats.fillTimes.reduce((a, b) => a + b, 0) / stats.fillTimes.length : 0;
 
     const summary = [
         `📊 DAILY SUMMARY — ${stats.date} (${uptime}h uptime)`,
-        `Attempts: ${stats.attempts} | Fills: ${stats.fills} | TP: ${stats.tpHits} (${tpRate}%) | SL: ${stats.slHits} | MomBlock: ${stats.momentumBlocked}`,
+        `Attempts: ${stats.attempts} | Fills: ${stats.fills} (${fillRate}%) | TP: ${stats.tpHits} (${tpRate}%) | SL: ${stats.slHits} | Skipped: ${stats.skipped}`,
         `Gross P&L: $${stats.grossProfit.toFixed(4)} | Net: $${stats.netProfit.toFixed(4)} | SL losses: $${stats.slLoss.toFixed(4)}`,
+        `Avg fill time: ${(stats.avgFillMs / 1000).toFixed(1)}s`,
         `Banked today: $${stats.sessionBanked.toFixed(4)}`,
         `💼 vBal: $${virtualTradingBalance.toFixed(2)} | 🏦 Banked: $${sessionBanked.toFixed(2)} | 📊 Total: $${total.toFixed(2)}`,
         initialBalance.set ? `📈 Return: ${((total - initialBalance.value) / initialBalance.value * 100).toFixed(2)}%` : '',
@@ -137,33 +129,24 @@ function printDailySummary(): void {
     console.log(`\n${'█'.repeat(65)}\n${summary}\n${'█'.repeat(65)}\n`);
 }
 
-// ─── MOMENTUM FRESHNESS ───────────────────────────────────────────────────────
+function bankProfit(net: number): void {
+    if (net <= 0) return;
+    const toBank   = net * CONFIG.BANK_FRACTION;
+    const toReinvest = net - toBank;
+    sessionBanked         += toBank;
+    virtualTradingBalance += toReinvest;
+    stats.sessionBanked   += toBank;
+    virtualTradingBalance  = Math.min(virtualTradingBalance, CONFIG.MAX_TRADING_BALANCE);
+    console.log(`[Bank] +$${net.toFixed(4)} → bank=$${toBank.toFixed(4)} reinvest=$${toReinvest.toFixed(4)} | vBal=$${virtualTradingBalance.toFixed(2)} banked=$${sessionBanked.toFixed(2)}`);
+}
 
-async function isMomentumFresh(direction: 'long' | 'short'): Promise<boolean> {
+async function updateRealPnl(): Promise<void> {
     try {
-        const candles = await fetchKlines(MARKET_SYMBOL, '1m', CONFIG.MOMENTUM_CANDLES + 2);
-        if (!candles || candles.length < CONFIG.MOMENTUM_CANDLES + 1) return true;
-
-        const recent = candles.slice(-(CONFIG.MOMENTUM_CANDLES + 1));
-        let conflicts = 0;
-
-        for (let i = 1; i < recent.length; i++) {
-            const open  = Number(recent[i]?.[1] ?? 0);
-            const close = Number(recent[i]?.[4] ?? 0);
-            if (direction === 'long'  && close < open) conflicts++;
-            if (direction === 'short' && close > open) conflicts++;
+        const bal = await getAvailableBalance();
+        if (bal > 0 && bal !== virtualTradingBalance) {
+            console.log(`[Bank] On-chain=$${bal.toFixed(4)} | virtual=$${virtualTradingBalance.toFixed(4)}`);
         }
-
-        if (conflicts >= CONFIG.MOMENTUM_CANDLES) {
-            console.log(`[Momentum] 🚫 All ${CONFIG.MOMENTUM_CANDLES} candles against ${direction.toUpperCase()} — skip.`);
-            return false;
-        }
-        console.log(`[Momentum] ✅ ${direction.toUpperCase()} fresh (${conflicts}/${CONFIG.MOMENTUM_CANDLES} conflicts).`);
-        return true;
-    } catch (e: any) {
-        console.warn(`[Momentum] Check failed: ${e.message} — allowing entry.`);
-        return true;
-    }
+    } catch { /* non-critical */ }
 }
 
 // ─── POSITION HEALTH CHECK ────────────────────────────────────────────────────
@@ -178,7 +161,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
 
     const trade = pendingTrade ?? getActiveTrade();
     if (!trade) {
-        console.log(`[Health] Orphan position detected — no trade record.`);
+        console.log(`[Health] Orphan position detected — no local trade record.`);
         return 'open';
     }
 
@@ -192,315 +175,196 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     const emoji = adverseMove > slThreshold * 0.7 ? '🔴' :
                   adverseMove > 0                 ? '🟡' : '🟢';
 
-    console.log(`[Health] ${emoji} ${pos.side?.toUpperCase()} @ $${trade.entryPrice.toFixed(2)} | now $${pos.currentPrice.toFixed(2)} | ${adverseMove > 0 ? `adverse -$${adverseMove.toFixed(2)}` : `+$${inFavour.toFixed(2)}`} | SL@$${trade.slPrice.toFixed(2)} (±$${slThreshold.toFixed(2)})`);
+    console.log(`[Health] ${emoji} ${pos.side?.toUpperCase()} @ $${trade.entryPrice.toFixed(2)} | now $${pos.currentPrice.toFixed(2)} | ${adverseMove > 0 ? `adverse -$${adverseMove.toFixed(2)}` : `+$${inFavour.toFixed(2)}`} | SL@$${trade.slPrice.toFixed(2)}`);
 
     if (adverseMove >= slThreshold) {
-        console.log(`[Health] 🛑 SL TRIGGERED — $${adverseMove.toFixed(2)} ≥ $${slThreshold.toFixed(2)} | 1:1 R:R`);
-
-        await triggerStopLoss(pos.side!, pos.size, `$${adverseMove.toFixed(2)} adverse ≥ $${slThreshold.toFixed(2)}`);
-
-        const slLoss  = pos.size * adverseMove;
-        const fees    = pendingTrade?.fees ?? (pos.size * pos.currentPrice * 0.0005); // taker-only SL exit
-        const netLoss = -(slLoss + fees);
-
+        console.log(`[Health] 🛑 SL — $${adverseMove.toFixed(2)} ≥ $${slThreshold.toFixed(2)}`);
+        const side = pos.side ?? (pendingTrade?.side ?? getActiveTrade()?.side ?? 'long');
+        await triggerStopLoss(side, pos.size, `SL threshold hit`);
         stats.slHits++;
-        stats.slLoss    += slLoss;
-        stats.netProfit += netLoss;
-        virtualTradingBalance = Math.max(1.50, virtualTradingBalance + netLoss);
-
+        stats.slLoss += pos.size * slThreshold;
         pendingTrade = null;
-        clearActiveTrade();
+        await updateRealPnl();
         return 'sl';
     }
 
     return 'open';
 }
 
-// ─── BANKING ──────────────────────────────────────────────────────────────────
-
-function bankProfit(netProfit: number): void {
-    const atCap = virtualTradingBalance >= CONFIG.MAX_TRADING_BALANCE;
-
-    if (atCap) {
-        sessionBanked       += netProfit;
-        stats.sessionBanked += netProfit;
-        console.log(`[Bank] 🏦 CAP REACHED — 100% banked: +$${netProfit.toFixed(4)} | Total banked: $${sessionBanked.toFixed(4)}`);
-    } else {
-        const banked   = netProfit * CONFIG.BANK_FRACTION;
-        const compound = netProfit * (1 - CONFIG.BANK_FRACTION);
-
-        sessionBanked         += banked;
-        virtualTradingBalance  = Math.min(virtualTradingBalance + compound, CONFIG.MAX_TRADING_BALANCE);
-        stats.sessionBanked   += banked;
-
-        console.log(`[Bank] ✅ Net=$${netProfit.toFixed(4)} | +$${compound.toFixed(4)} compound | +$${banked.toFixed(4)} banked`);
-        console.log(`[Bank] 💼 vBal=$${virtualTradingBalance.toFixed(2)} | 🏦 Banked=$${sessionBanked.toFixed(2)} | Total=$${(virtualTradingBalance + sessionBanked).toFixed(2)}`);
-    }
-}
-
-// ─── REAL PnL TRACKER ─────────────────────────────────────────────────────────
-
-async function updateRealPnl(): Promise<void> {
-    try {
-        // Raw signed fetch — ccxt private calls don't work on demo-fapi
-        const { createHmac } = await import('crypto');
-        const secret  = process.env.BINANCE_BOT_SECRET ?? process.env.BINANCE_API_SECRET ?? '';
-        const apiKey  = process.env.BINANCE_BOT_API    ?? process.env.BINANCE_API_KEY    ?? '';
-        const ts      = Date.now();
-        const query   = `symbol=${MARKET_SYMBOL}&limit=20&timestamp=${ts}&recvWindow=10000`;
-        const sig     = createHmac('sha256', secret).update(query).digest('hex');
-        const res     = await fetch(`${BASE_URL}/fapi/v1/userTrades?${query}&signature=${sig}`, {
-            headers: { 'X-MBX-APIKEY': apiKey },
-        });
-        if (!res.ok) return;
-        const trades = await res.json() as any[];
-        if (!trades?.length) return;
-        let pnl = 0, w = 0, l = 0;
-        for (const t of trades) {
-            const p = parseFloat(t.realizedPnl ?? '0');
-            if (!isNaN(p) && p !== 0) { pnl += p; if (p > 0) w++; else l++; }
-        }
-        if (w + l > 0) console.log(`[Main] 📊 Exchange recent ${w + l} trades: $${pnl.toFixed(4)} W:${w} L:${l} WR:${((w / (w + l)) * 100).toFixed(0)}%`);
-    } catch { /* non-critical */ }
-}
-
-// ─── MATH HELPERS ─────────────────────────────────────────────────────────────
-
-function ema(candles: any[], period: number): number {
-    if (candles.length < period) return Number(candles[candles.length - 1]?.[4] ?? 0);
-    const k = 2 / (period + 1);
-    let val = candles.slice(0, period).reduce((s: number, c: any) => s + Number(c?.[4] ?? 0), 0) / period;
-    for (let i = period; i < candles.length; i++) {
-        val = Number(candles[i]?.[4] ?? val) * k + val * (1 - k);
-    }
-    return val;
-}
-
-function calcRSI(candles: any[], period = 14): number {
-    if (candles.length < period + 1) return 50;
-    let g = 0, l = 0;
-    for (let i = candles.length - period; i < candles.length; i++) {
-        const d = Number(candles[i]?.[4] ?? 0) - Number(candles[i - 1]?.[4] ?? 0);
-        if (d > 0) g += d; else l -= d;
-    }
-    if (l === 0) return 100;
-    return 100 - 100 / (1 + (g / period) / (l / period));
-}
-
-function calcADX(candles: any[], period = 14): number {
-    if (candles.length < period + 2) return 20;
-    const trs: number[] = [], pDMs: number[] = [], mDMs: number[] = [];
-    for (let i = 1; i < candles.length; i++) {
-        const c = candles[i], p = candles[i - 1];
-        const hi = +c?.[2]||0, lo = +c?.[3]||0, phi = +p?.[2]||0, plo = +p?.[3]||0, pCl = +p?.[4]||0;
-        trs.push(Math.max(hi - lo, Math.abs(hi - pCl), Math.abs(lo - pCl)));
-        pDMs.push(hi - phi > plo - lo ? Math.max(hi - phi, 0) : 0);
-        mDMs.push(plo - lo > hi - phi ? Math.max(plo - lo, 0) : 0);
-    }
-    const smooth = (arr: number[]): number[] => {
-        let s = arr.slice(0, period).reduce((a, b) => a + b, 0);
-        const out = [s];
-        for (let i = period; i < arr.length; i++) { s = s - s / period + arr[i]; out.push(s); }
-        return out;
-    };
-    const sTR = smooth(trs), sP = smooth(pDMs), sM = smooth(mDMs);
-    const dxs = sTR.map((tr, i) => {
-        if (!tr) return 0;
-        const pDI = sP[i] / tr * 100, mDI = sM[i] / tr * 100;
-        return (pDI + mDI) ? Math.abs(pDI - mDI) / (pDI + mDI) * 100 : 0;
-    });
-    return dxs.slice(-period).reduce((a, b) => a + b, 0) / period;
-}
-
-function calcVwap(candles: any[]): number {
-    let tpv = 0, vol = 0;
-    for (const c of candles) {
-        const tp = (+c?.[2]||0 + +c?.[3]||0 + +c?.[4]||0) / 3;
-        tpv += tp * (+c?.[5]||0); vol += +c?.[5]||0;
-    }
-    return vol > 0 ? tpv / vol : 0;
-}
-
-function calcSwings(candles: any[], n = 20): { high: number; low: number } {
-    const s = candles.slice(-n);
-    let h = 0, l = Infinity;
-    for (const c of s) { if (+c?.[2] > h) h = +c[2]; if (+c?.[3] < l) l = +c[3]; }
-    return { high: h, low: l === Infinity ? 0 : l };
-}
-
 // ─── MARKET DATA ──────────────────────────────────────────────────────────────
 
-async function rawGet(path: string, params: Record<string, string | number> = {}): Promise<any> {
-    const qs  = Object.entries(params).map(([k, v]) => `${k}=${v}`).join('&');
-    const url = `${BASE_URL}${path}${qs ? '?' + qs : ''}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) throw new Error(`${res.status} ${path}`);
+async function fetchKlines(symbol: string, timeframe: string, limit: number): Promise<any[]> {
+    const url = `${BASE_URL}/fapi/v1/klines?symbol=${symbol}&interval=${timeframe}&limit=${limit}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    if (!res.ok) throw new Error(`klines ${res.status}`);
     return res.json();
 }
 
-async function fetchKlines(symbol: string, interval: string, limit: number): Promise<any[]> {
-    const data = await rawGet('/fapi/v1/klines', { symbol, interval, limit });
-    return Array.isArray(data) ? data : [];
+function computeEMA(values: number[], period: number): number {
+    if (values.length < period) return values[values.length - 1] ?? 0;
+    const k = 2 / (period + 1);
+    let ema  = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    for (let i = period; i < values.length; i++) ema = values[i]! * k + ema * (1 - k);
+    return ema;
+}
+
+function computeRSI(closes: number[], period = 14): number {
+    if (closes.length < period + 1) return 50;
+    let gains = 0, losses = 0;
+    for (let i = closes.length - period; i < closes.length; i++) {
+        const diff = closes[i]! - closes[i - 1]!;
+        if (diff > 0) gains += diff; else losses -= diff;
+    }
+    const rs = losses === 0 ? 100 : gains / losses;
+    return 100 - 100 / (1 + rs);
+}
+
+function computeADX(highs: number[], lows: number[], closes: number[], period = 14): number {
+    if (highs.length < period + 1) return 20;
+    const trs: number[] = [], plusDMs: number[] = [], minusDMs: number[] = [];
+    for (let i = 1; i < highs.length; i++) {
+        const tr      = Math.max(highs[i]! - lows[i]!, Math.abs(highs[i]! - closes[i - 1]!), Math.abs(lows[i]! - closes[i - 1]!));
+        const plusDM  = Math.max(highs[i]! - highs[i - 1]!, 0);
+        const minusDM = Math.max(lows[i - 1]! - lows[i]!, 0);
+        trs.push(tr);
+        plusDMs.push(plusDM > minusDM ? plusDM : 0);
+        minusDMs.push(minusDM > plusDM ? minusDM : 0);
+    }
+    const sumTR = trs.slice(-period).reduce((a, b) => a + b, 0);
+    const pDI   = sumTR > 0 ? (plusDMs.slice(-period).reduce((a, b) => a + b, 0) / sumTR) * 100 : 0;
+    const mDI   = sumTR > 0 ? (minusDMs.slice(-period).reduce((a, b) => a + b, 0) / sumTR) * 100 : 0;
+    const dx    = (pDI + mDI) > 0 ? Math.abs(pDI - mDI) / (pDI + mDI) * 100 : 0;
+    return dx;
 }
 
 async function fetchMarketData(): Promise<MarketData[]> {
-    console.log(`[Data] Fetching XAUUSDT market data from Binance...`);
     try {
-        const [ticker, ob, c5m, c30m, c1h, c4h, c1w, frData] = await Promise.all([
-            rawGet('/fapi/v1/ticker/24hr', { symbol: MARKET_SYMBOL }),
-            rawGet('/fapi/v1/depth',       { symbol: MARKET_SYMBOL, limit: 20 }),
-            fetchKlines(MARKET_SYMBOL, '5m',  50),
-            fetchKlines(MARKET_SYMBOL, '30m', 12),
+        // All fetches in parallel — single round trip to exchange
+        const [
+            ticker,
+            ohlcv5m,
+            ohlcv30m,
+            ohlcv1h,
+            ohlcv4h,
+            ohlcvW,
+            depthData,
+            fundingData,
+        ] = await Promise.all([
+            fetch(`${BASE_URL}/fapi/v1/ticker/24hr?symbol=${MARKET_SYMBOL}`).then(r => r.json()),
+            fetchKlines(MARKET_SYMBOL, '5m',  120),
+            fetchKlines(MARKET_SYMBOL, '30m', 60),
             fetchKlines(MARKET_SYMBOL, '1h',  60),
-            fetchKlines(MARKET_SYMBOL, '4h',  10),
-            fetchKlines(MARKET_SYMBOL, '1w',   3),
-            rawGet('/fapi/v1/premiumIndex', { symbol: MARKET_SYMBOL }).catch(() => null),
+            fetchKlines(MARKET_SYMBOL, '4h',  30),
+            fetchKlines(MARKET_SYMBOL, '1w',  4),
+            fetch(`${BASE_URL}/fapi/v1/depth?symbol=${MARKET_SYMBOL}&limit=20`).then(r => r.json()),
+            fetch(`${BASE_URL}/fapi/v1/premiumIndex?symbol=${MARKET_SYMBOL}`).then(r => r.json()).catch(() => null),
         ]);
 
-        // Binance klines: [openTime, open, high, low, close, volume, ...]
-        // ccxt format:    [openTime, open, high, low, close, volume]
-        // They match — index same.
+        const price = Number(ticker.lastPrice ?? ticker.price ?? 0);
+        if (!price) throw new Error('No price from ticker');
 
-        const price = Number(ticker.lastPrice ?? 0);
-        if (!price) { console.warn(`[Data] No price`); return []; }
+        const closes5m  = ohlcv5m.map((c: any[]) => Number(c[4]));
+        const highs5m   = ohlcv5m.map((c: any[]) => Number(c[2]));
+        const lows5m    = ohlcv5m.map((c: any[]) => Number(c[3]));
+        const closes30m = ohlcv30m.map((c: any[]) => Number(c[4]));
+        const closes1h  = ohlcv1h.map((c: any[]) => Number(c[4]));
+        const closes4h  = ohlcv4h.map((c: any[]) => Number(c[4]));
+        const closesW   = ohlcvW.map((c: any[]) => Number(c[4]));
+        const volumes5m = ohlcv5m.map((c: any[]) => Number(c[5]));
 
-        let totalTR = 0, volSum = 0;
-        const vols: number[] = [];
-        for (let i = 1; i < c5m.length; i++) {
-            const c = c5m[i], p = c5m[i - 1];
-            if (!c || !p) continue;
-            const hi = +c[2]||price, lo = +c[3]||price, pCl = +p[4]||price;
-            totalTR += Math.max(hi - lo, Math.abs(hi - pCl), Math.abs(lo - pCl));
-            const v = +c[5]||0; volSum += v; vols.push(v);
-        }
-        const atr5m       = totalTR / Math.max(c5m.length - 1, 1);
-        const avgVol      = volSum / Math.max(vols.length, 1);
-        const volumeRatio = avgVol > 0 ? (vols[vols.length - 1] ?? 0) / avgVol : 1;
+        const ema8  = computeEMA(closes5m, 8);
+        const ema21 = computeEMA(closes5m, 21);
+        const ema50 = computeEMA(closes5m, 50);
+        const emaTrend = ema8 > ema21 && ema21 > ema50 ? 'bullish'
+                       : ema8 < ema21 && ema21 < ema50 ? 'bearish' : 'neutral';
 
-        const ema = (candles: any[], period: number): number => {
-            if (candles.length < period) return Number(candles[candles.length - 1]?.[4] ?? 0);
-            const k = 2 / (period + 1);
-            let val = candles.slice(0, period).reduce((s: number, c: any) => s + Number(c?.[4] ?? 0), 0) / period;
-            for (let i = period; i < candles.length; i++) val = Number(candles[i]?.[4] ?? val) * k + val * (1 - k);
-            return val;
-        };
+        const rsi = computeRSI(closes5m);
+        const adx = computeADX(highs5m, lows5m, closes5m);
 
-        const ema8  = ema(c1h, 8);
-        const ema21 = ema(c1h, 21);
-        const ema50 = ema(c1h, 50);
-        const emaTrend: 'bullish' | 'bearish' | 'neutral' =
-            ema8 > ema21 && ema21 > ema50 ? 'bullish' :
-            ema8 < ema21 && ema21 < ema50 ? 'bearish' : 'neutral';
+        const c5m  = closes5m;
+        const mom5m  = c5m.length >= 2  ? ((c5m[c5m.length - 1]! - c5m[c5m.length - 2]!)  / c5m[c5m.length - 2]!  * 100) : 0;
+        const mom30m = closes30m.length  >= 2  ? ((closes30m.at(-1)! - closes30m.at(-2)!)  / closes30m.at(-2)!  * 100) : 0;
+        const mom1h  = closes1h.length   >= 2  ? ((closes1h.at(-1)!  - closes1h.at(-2)!)   / closes1h.at(-2)!   * 100) : 0;
 
-        const calcRSI = (candles: any[], period = 14): number => {
-            if (candles.length < period + 1) return 50;
-            let g = 0, l = 0;
-            for (let i = candles.length - period; i < candles.length; i++) {
-                const d = Number(candles[i]?.[4] ?? 0) - Number(candles[i - 1]?.[4] ?? 0);
-                if (d > 0) g += d; else l -= d;
-            }
-            if (l === 0) return 100;
-            return 100 - 100 / (1 + (g / period) / (l / period));
-        };
-
-        const rsi = calcRSI(c1h, 14);
-
-        const now  = +c5m[c5m.length - 1]?.[4]  || price;
-        const p5m  = +c5m[Math.max(0, c5m.length - 2)]?.[4]  || price;
-        const p30m = +c30m[Math.max(0, c30m.length - 2)]?.[4] || price;
-        const p1h  = +c1h[Math.max(0, c1h.length - 13)]?.[4] || price;
-
-        const c4hClose = +c4h[c4h.length - 1]?.[4] || price;
-        const c4hPrev  = +c4h[Math.max(0, c4h.length - 2)]?.[4] || price;
-        const trendBias4h: 'bull' | 'bear' | 'neutral' =
-            c4hClose > c4hPrev * 1.001 ? 'bull' :
-            c4hClose < c4hPrev * 0.999 ? 'bear' : 'neutral';
-
-        const wClose = +c1w[c1w.length - 1]?.[4] || price;
-        const wPrev  = +c1w[Math.max(0, c1w.length - 2)]?.[4] || price;
-        const weeklyBias: 'bullish' | 'bearish' | 'neutral' =
-            wClose > wPrev ? 'bullish' : wClose < wPrev ? 'bearish' : 'neutral';
-
-        const h24 = Number(ticker.highPrice ?? price);
-        const l24 = Number(ticker.lowPrice  ?? price);
-        const mid = (h24 + l24) / 2;
         const priceStructure: 'uptrend' | 'downtrend' | 'ranging' =
-            price > mid * 1.001 ? 'uptrend' :
-            price < mid * 0.999 ? 'downtrend' : 'ranging';
+            ema8 > ema50 * 1.001 ? 'uptrend' :
+            ema8 < ema50 * 0.999 ? 'downtrend' : 'ranging';
 
-        const calcADX = (candles: any[], period = 14): number => {
-            if (candles.length < period + 2) return 20;
-            const trs: number[] = [], pDMs: number[] = [], mDMs: number[] = [];
-            for (let i = 1; i < candles.length; i++) {
-                const c = candles[i], p = candles[i - 1];
-                const hi = +c?.[2]||0, lo = +c?.[3]||0, phi = +p?.[2]||0, plo = +p?.[3]||0, pCl = +p?.[4]||0;
-                trs.push(Math.max(hi - lo, Math.abs(hi - pCl), Math.abs(lo - pCl)));
-                pDMs.push(hi - phi > plo - lo ? Math.max(hi - phi, 0) : 0);
-                mDMs.push(plo - lo > hi - phi ? Math.max(plo - lo, 0) : 0);
-            }
-            const smooth = (arr: number[]): number[] => {
-                let s = arr.slice(0, period).reduce((a, b) => a + b, 0);
-                const out = [s];
-                for (let i = period; i < arr.length; i++) { s = s - s / period + arr[i]; out.push(s); }
-                return out;
-            };
-            const sTR = smooth(trs), sP = smooth(pDMs), sM = smooth(mDMs);
-            const dxs = sTR.map((tr, i) => {
-                if (!tr) return 0;
-                const pDI = sP[i] / tr * 100, mDI = sM[i] / tr * 100;
-                return (pDI + mDI) ? Math.abs(pDI - mDI) / (pDI + mDI) * 100 : 0;
-            });
-            return dxs.slice(-period).reduce((a, b) => a + b, 0) / period;
+        const trendBias4h: 'bull' | 'bear' | 'neutral' =
+            closes4h.at(-1)! > closes4h.at(-5)! * 1.002 ? 'bull' :
+            closes4h.at(-1)! < closes4h.at(-5)! * 0.998 ? 'bear' : 'neutral';
+
+        const weeklyBias: 'bullish' | 'bearish' | 'neutral' =
+            closesW.at(-1)! > closesW.at(-2)! * 1.005 ? 'bullish' :
+            closesW.at(-1)! < closesW.at(-2)! * 0.995 ? 'bearish' : 'neutral';
+
+        // ATR (5m)
+        const trueRanges = highs5m.slice(-20).map((h, i, arr) => {
+            const l = lows5m.slice(-20)[i]!;
+            const pc = i > 0 ? closes5m.slice(-20)[i - 1]! : l;
+            return Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+        });
+        const atr5m = trueRanges.reduce((a, b) => a + b, 0) / trueRanges.length;
+
+        // Volume ratio
+        const recentVol = volumes5m.slice(-5).reduce((a, b) => a + b, 0) / 5;
+        const avgVol    = volumes5m.slice(-20).reduce((a, b) => a + b, 0) / 20;
+        const volumeRatio = avgVol > 0 ? recentVol / avgVol : 1;
+
+        // S/R (swing highs/lows over 30 candles)
+        const lookback = 30;
+        const recent5m = ohlcv5m.slice(-lookback);
+        const swingHighs: number[] = [], swingLows: number[] = [];
+        for (let i = 2; i < recent5m.length - 2; i++) {
+            const h = Number(recent5m[i]![2]);
+            const l = Number(recent5m[i]![3]);
+            if (h > Number(recent5m[i-1]![2]) && h > Number(recent5m[i+1]![2])) swingHighs.push(h);
+            if (l < Number(recent5m[i-1]![3]) && l < Number(recent5m[i+1]![3])) swingLows.push(l);
+        }
+        const swings = {
+            high: swingHighs.length ? Math.min(...swingHighs.filter(h => h > price)) || price + atr5m : price + atr5m,
+            low:  swingLows.length  ? Math.max(...swingLows.filter(l => l < price))  || price - atr5m : price - atr5m,
         };
+        const nearestResistance = swings.high;
+        const nearestSupport    = swings.low === Infinity ? price - atr5m : swings.low;
 
-        const adx = calcADX(c5m, 14);
+        // 24h range
+        const h24 = Number(ticker.highPrice ?? price + atr5m);
+        const l24 = Number(ticker.lowPrice  ?? price - atr5m);
 
-        // Order book — Binance depth format: { bids: [[price, qty]], asks: [[price, qty]] }
-        const wallFilter = (levels: string[][]) =>
-            levels.map(l => ({ price: +l[0]||0, notionalUsd: (+l[0]||0) * (+l[1]||0) }))
-                  .filter(w => w.notionalUsd > 500).slice(0, 5);
+        // Funding rate
+        const fundingRate = fundingData?.lastFundingRate != null
+            ? Number(fundingData.lastFundingRate) : null;
 
-        const bidWalls          = wallFilter(ob.bids ?? []);
-        const askWalls          = wallFilter(ob.asks ?? []);
-        const nearestSupport    = bidWalls[0]?.price ?? price - 10;
-        const nearestResistance = askWalls[0]?.price ?? price + 10;
+        // Spread from order book
+        const bestBid    = Number(depthData?.bids?.[0]?.[0] ?? price - 0.05);
+        const bestAsk    = Number(depthData?.asks?.[0]?.[0] ?? price + 0.05);
+        const spreadUsd  = bestAsk - bestBid;
 
-        const bestBid   = +(ob.bids?.[0]?.[0] ?? price);
-        const bestAsk   = +(ob.asks?.[0]?.[0] ?? price);
-        const spreadUsd = Math.max(0, bestAsk - bestBid);
+        // OB imbalance (top 10 levels)
+        const bids  = (depthData?.bids ?? []).slice(0, 10);
+        const asks  = (depthData?.asks ?? []).slice(0, 10);
+        const bidQ  = bids.reduce((s: number, b: any[]) => s + Number(b[1]), 0);
+        const askQ  = asks.reduce((s: number, a: any[]) => s + Number(a[1]), 0);
+        const obImbalance = (bidQ + askQ) > 0 ? (bidQ - askQ) / (bidQ + askQ) : 0;
 
-        const bidVol     = (ob.bids ?? []).slice(0, 5).reduce((s: number, l: string[]) => s + (+l[1]||0), 0);
-        const askVol     = (ob.asks ?? []).slice(0, 5).reduce((s: number, l: string[]) => s + (+l[1]||0), 0);
-        const totalObVol = bidVol + askVol;
-        const obImbalance = totalObVol > 0 ? (bidVol - askVol) / totalObVol : 0;
+        // VWAP (5m)
+        const vwapNumer = ohlcv5m.slice(-20).reduce((s: number, c: any[]) => s + ((Number(c[2]) + Number(c[3]) + Number(c[4])) / 3) * Number(c[5]), 0);
+        const vwapDenom = ohlcv5m.slice(-20).reduce((s: number, c: any[]) => s + Number(c[5]), 0);
+        const vwap      = vwapDenom > 0 ? vwapNumer / vwapDenom : price;
+        const priceVsVwap = ((price - vwap) / vwap) * 100;
 
-        const calcVwap = (candles: any[]): number => {
-            let tpv = 0, vol = 0;
-            for (const c of candles) {
-                const tp = (+c?.[2]||0 + +c?.[3]||0 + +c?.[4]||0) / 3;
-                tpv += tp * (+c?.[5]||0); vol += +c?.[5]||0;
-            }
-            return vol > 0 ? tpv / vol : 0;
-        };
-
-        const vwap        = calcVwap(c5m);
-        const priceVsVwap = vwap > 0 ? ((price - vwap) / vwap) * 100 : 0;
-
-        const swings = c5m.slice(-20).reduce(
-            (acc: { high: number; low: number }, c: any) => ({
-                high: Math.max(acc.high, +c?.[2]||0),
-                low:  Math.min(acc.low,  +c?.[3]||Infinity),
-            }),
-            { high: 0, low: Infinity }
-        );
-
-        const fundingRate: number | null = frData ? Number(frData.lastFundingRate ?? null) : null;
+        // OB walls (notional > $50K)
+        const bidWalls = bids
+            .map((b: any[]) => ({ price: Number(b[0]), notionalUsd: Number(b[0]) * Number(b[1]) }))
+            .filter((b: any) => b.notionalUsd > 50_000);
+        const askWalls = asks
+            .map((a: any[]) => ({ price: Number(a[0]), notionalUsd: Number(a[0]) * Number(a[1]) }))
+            .filter((a: any) => a.notionalUsd > 50_000);
 
         const indicators: TechnicalIndicators = {
-            emaTrend, ema8, ema21, ema50, rsi,
-            momentum5m:  (now - p5m) / (p5m || 1) * 100,
-            momentum30m: (now - p30m) / (p30m || 1) * 100,
-            momentum1h:  (now - p1h) / (p1h || 1) * 100,
+            emaTrend, ema8, ema21, ema50,
+            rsi, momentum5m: mom5m, momentum30m: mom30m, momentum1h: mom1h,
             priceStructure, trendBias4h, weeklyBias,
             atr5m, atrPct: (atr5m / price) * 100, volumeRatio,
             nearestResistance, nearestSupport,
@@ -513,9 +377,14 @@ async function fetchMarketData(): Promise<MarketData[]> {
         };
 
         const rangePos = h24 > l24 ? ((price - l24) / (h24 - l24) * 100).toFixed(0) : '50';
-        console.log(`[Data] $${price.toFixed(2)} EMA:${emaTrend} RSI:${rsi.toFixed(1)} ADX:${adx.toFixed(1)} Spread:$${spreadUsd.toFixed(3)} Range:${rangePos}%`);
+        console.log(`[Data] $${price.toFixed(2)} EMA:${emaTrend} RSI:${rsi.toFixed(1)} ADX:${adx.toFixed(1)} ATR:$${atr5m.toFixed(2)} Spread:$${spreadUsd.toFixed(3)} OB:${(obImbalance*100).toFixed(0)}% Range:${rangePos}%`);
 
-        return [{ symbol: DISPLAY_SYMBOL, price, change_24h: Number(ticker.priceChangePercent ?? 0), indicators, orderBook: { bidWalls, askWalls } }];
+        return [{
+            symbol: DISPLAY_SYMBOL, price,
+            change_24h: Number(ticker.priceChangePercent ?? 0),
+            indicators,
+            orderBook: { bidWalls, askWalls },
+        }];
     } catch (e: any) {
         console.error(`[Data] Error: ${e.message}`);
         return [];
@@ -523,6 +392,9 @@ async function fetchMarketData(): Promise<MarketData[]> {
 }
 
 // ─── MAIN CYCLE ───────────────────────────────────────────────────────────────
+// isMomentumFresh REMOVED — was a separate klines fetch per cycle.
+// Momentum conflict detection is now embedded in signals.ts bias scoring.
+// This saves 1 API round trip per cycle and ~500ms of latency.
 
 async function runCycle(): Promise<void> {
     checkReset();
@@ -530,12 +402,12 @@ async function runCycle(): Promise<void> {
     const session = getSession();
     console.log(`\n${'═'.repeat(65)}`);
     console.log(`[Main] ${new Date().toISOString()} | ${session.name} [${session.quality}] | ${IS_TESTNET ? '🧪 TESTNET' : '🔴 LIVE'}`);
-    console.log(`[Main] attempts=${stats.attempts} fills=${stats.fills} tp=${stats.tpHits} sl=${stats.slHits} momBlocked=${stats.momentumBlocked}`);
-    console.log(`[Main] vBal=$${virtualTradingBalance.toFixed(2)} | Banked=$${sessionBanked.toFixed(2)} | Total=$${(virtualTradingBalance + sessionBanked).toFixed(2)} | Cap=$${CONFIG.MAX_TRADING_BALANCE.toLocaleString()}`);
+    console.log(`[Main] trades=${stats.fills}/${CONFIG.MAX_TRADES_DAY} | tp=${stats.tpHits} sl=${stats.slHits} skipped=${stats.skipped}`);
+    console.log(`[Main] vBal=$${virtualTradingBalance.toFixed(2)} | Banked=$${sessionBanked.toFixed(2)} | Total=$${(virtualTradingBalance + sessionBanked).toFixed(2)}`);
     console.log(`${'═'.repeat(65)}`);
 
-    if (stats.attempts >= CONFIG.MAX_TRADES_DAY) {
-        console.log(`[Main] Daily limit reached.`);
+    if (stats.fills >= CONFIG.MAX_TRADES_DAY) {
+        console.log(`[Main] Daily limit reached (${CONFIG.MAX_TRADES_DAY}).`);
         return;
     }
 
@@ -550,7 +422,6 @@ async function runCycle(): Promise<void> {
                 stats.grossProfit += pendingTrade.grossProfit;
                 stats.netProfit   += net;
                 if (pendingTrade.fillTimeMs) stats.fillTimes.push(pendingTrade.fillTimeMs);
-
                 bankProfit(net);
                 clearActiveTrade();
                 pendingTrade = null;
@@ -567,53 +438,47 @@ async function runCycle(): Promise<void> {
 
         if (health === 'open') {
             if (!pendingTrade) {
-                // Orphan position — no local record. Close it immediately to protect capital.
-                console.log(`[Main] 🚨 Orphan position — closing to protect capital...`);
+                console.log(`[Main] 🚨 Orphan position — closing...`);
                 const pos = await getOpenPositionDetails();
                 if (pos.exists && pos.side && pos.size > 0) {
-                    await triggerStopLoss(pos.side, pos.size, 'orphan position on restart');
-                    console.log(`[Main] ✅ Orphan position closed.`);
+                    await triggerStopLoss(pos.side, pos.size, 'orphan on startup');
                 }
                 return;
             }
-            console.log(`[Main] 📊 Trade in progress — SL@$${pendingTrade.slPrice.toFixed(2)} TP@$${pendingTrade.tpPrice.toFixed(2)}`);
+            console.log(`[Main] 📊 Trade open — SL@$${pendingTrade.slPrice.toFixed(2)} TP@$${pendingTrade.tpPrice.toFixed(2)}`);
             return;
         }
 
-        // ── No position — attempt new trade ──────────────────────────────
+        // ── No position — attempt new entry ──────────────────────────────
 
         const balance = await getAvailableBalance();
-        console.log(`[Main] On-chain balance: $${balance.toFixed(4)}`);
 
         if (virtualTradingBalance <= 0) {
             if (balance <= 0) {
-                console.log(`[Main] ⚠️ Balance unavailable this cycle — retrying next cycle.`);
+                console.log(`[Main] ⚠️ Balance unavailable this cycle.`);
                 return;
             }
             virtualTradingBalance = balance;
             initialBalance.value  = balance;
             initialBalance.set    = true;
-            console.log(`[Bank] 💰 Init virtual balance: $${virtualTradingBalance.toFixed(4)}`);
+            console.log(`[Bank] 💰 Init: $${virtualTradingBalance.toFixed(4)}`);
         }
 
-        // Use virtualTradingBalance as fallback if on-chain fetch returned 0
-        const effectiveOnChain = balance > 0 ? balance : virtualTradingBalance;
-        if (effectiveOnChain < 1.50) { console.log(`[Main] ⚠️ Balance too low.`); return; }
+        const effectiveBalance = balance > 0 ? balance : virtualTradingBalance;
+        if (effectiveBalance < 1.50) { console.log(`[Main] ⚠️ Balance too low.`); return; }
 
         if (balance >= CONFIG.RECYCLE_BALANCE) {
-            console.log(`[Main] 🎯 RECYCLE ALERT — $${balance.toFixed(2)} ≥ $${CONFIG.RECYCLE_BALANCE}\nConsider withdrawing $${(balance - CONFIG.RECYCLE_KEEP).toFixed(2)}, keeping $${CONFIG.RECYCLE_KEEP}.`);
+            console.log(`[Main] 🎯 RECYCLE — $${balance.toFixed(2)} ≥ $${CONFIG.RECYCLE_BALANCE} | Consider withdrawing $${(balance - CONFIG.RECYCLE_KEEP).toFixed(2)}`);
         }
 
         const assets = await fetchMarketData();
-        if (!assets.length) { console.log(`[Main] No data.`); return; }
+        if (!assets.length) { console.log(`[Main] No market data.`); return; }
 
+        // generateSignals is now synchronous (no Gemini API call)
         const signals = await generateSignals(assets);
 
         for (const signal of signals) {
-            if (signal.direction === 'neutral') { console.log(`[Main] ⏸️ Neutral.`); continue; }
-
-            const fresh = await isMomentumFresh(signal.direction as 'long' | 'short');
-            if (!fresh) { stats.momentumBlocked++; continue; }
+            if (signal.direction === 'neutral') { stats.skipped++; continue; }
 
             stats.attempts++;
 
@@ -625,22 +490,23 @@ async function runCycle(): Promise<void> {
                     tpPrice:     result.tpPrice!,
                     slPrice:     result.slPrice!,
                     side:        signal.direction as 'long' | 'short',
-                    size:        calcSize(virtualTradingBalance, result.entryPrice, result.sizePct ?? 0.80, result.leverage ?? 20),
+                    size:        calcSize(virtualTradingBalance, result.entryPrice, result.sizePct ?? 0.80, result.leverage ?? 40),
                     grossProfit: result.grossProfit!,
                     netProfit:   result.netProfit!,
                     fees:        result.fees!,
                     openedAt:    Date.now(),
                     tpMove:      result.tpMove,
                     fillTimeMs:  result.fillTimeMs,
-                } as any;
+                };
             } else if (result.outcome === 'skipped') {
                 stats.attempts--;
+                stats.skipped++;
             } else if (result.outcome === 'error') {
                 console.error(`[Main] Trade error: ${result.message}`);
                 stats.attempts--;
             }
 
-            break;
+            break; // one signal per cycle
         }
 
     } catch (e: any) {
@@ -662,7 +528,7 @@ function scheduleNext(): void {
     }, ms);
 }
 
-// ─── GRACEFUL SHUTDOWN ────────────────────────────────────────────────────────
+// ─── SHUTDOWN ─────────────────────────────────────────────────────────────────
 
 process.on('SIGTERM', () => { printDailySummary(); process.exit(0); });
 process.on('SIGINT',  () => { printDailySummary(); process.exit(0); });
@@ -675,27 +541,27 @@ const hasKeys = ENVIRONMENT === 'live'
 
 if (!hasKeys) {
     console.error(ENVIRONMENT === 'live'
-        ? '❌ Missing: BINANCE_API_KEY, BINANCE_API_SECRET (live binance.com keys)'
-        : '❌ Missing: BINANCE_BOT_API, BINANCE_BOT_SECRET (from demo.binance.com/api-management)'
+        ? '❌ Missing: BINANCE_API_KEY, BINANCE_API_SECRET'
+        : '❌ Missing: BINANCE_BOT_API, BINANCE_BOT_SECRET'
     );
     process.exit(1);
 }
 
 const startupMsg = [
-    `MODUVISE GOLD PERP BOT — BINANCE FUTURES`,
-    `Mode:      ${IS_TESTNET ? '🧪 TESTNET (demo.binance.com)' : '🔴 MAINNET (live)'}`,
-    `Asset:     XAUUSDT perp`,
-    `Leverage:  40x fixed`,
-    `Entry:     ALO GTX @ -$0.30 from market | 0.00% maker fee`,
-    `TP:        $0.50 FIXED | GTX resting maker | 0.00% maker fee`,
-    `SL:        $2.00 fixed | Taker market exit | 0.05% taker fee`,
-    `R:R:       1:4 (risk $2 to make $0.50) — breakeven at 89% win rate`,
-    `Fees:      Entry=FREE | TP=FREE | SL exit=0.05% taker only`,
-    `Size:      DYNAMIC — session quality × ATR regime (20%–95% of balance)`,
-    `Fee gate:  Gross > fees × 1 (always passes at 0% maker)`,
-    `Cap:       $${CONFIG.MAX_TRADING_BALANCE.toLocaleString()} trading balance (40x = $1M max notional)`,
-    `Banking:   50% banked per TP | 100% banked at cap`,
-    `Start:     ${new Date().toISOString()}`,
+    `MODUVISE GOLD PERP BOT v2 — BINANCE FUTURES`,
+    `Mode:       ${IS_TESTNET ? '🧪 TESTNET' : '🔴 MAINNET'}`,
+    `Asset:      XAUUSDT perp`,
+    `Leverage:   40x`,
+    `Entry:      GTX (ALO) @ ±$0.15 from market | 0.00% maker fee`,
+    `TP:         $0.50 GTX resting | 0.00% maker fee`,
+    `SL:         $2.00 monitored | MARKET reduceOnly | 0.045% taker`,
+    `R:R:        1:4 — breakeven at 80% win rate (before taker fee on SL)`,
+    `Daily cap:  ${CONFIG.MAX_TRADES_DAY} trades`,
+    `Cycles:     Peak 20–30s | High 25–40s | Off-hours 60–90s`,
+    `Gemini:     REMOVED — pure local bias engine, zero API latency`,
+    `Momentum:   Embedded in bias score — no separate klines call`,
+    `Banking:    50% banked per TP | Recycle at $${CONFIG.RECYCLE_BALANCE}`,
+    `Start:      ${new Date().toISOString()}`,
 ].join('\n  ');
 
 console.log(`\n${'█'.repeat(65)}\n  ${startupMsg}\n${'█'.repeat(65)}\n`);
