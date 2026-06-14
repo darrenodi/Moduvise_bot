@@ -29,7 +29,7 @@ const STRATEGY = {
     ENTRY_OFFSET:        0.30,              // GTX resting: $0.30 from market — wide enough to not cross, reachable on $3 ATR
     ENTRY_FILL_TIMEOUT:  600_000,            // 60s fill window — Asia session moves slowly
     SL_MOVE:             2.00,              // SL = $2.00 — 8 TPs to recover 1 SL | breakeven=89% win rate | liq@$105 so safe
-    TARGET_TP:           0.50,              // fixed $0.50 TP per trade (all regimes)
+    TARGET_TP:           1.00,              // fixed $0.50 TP per trade (all regimes)
     MIN_BALANCE:         1.50,
     GOLD_TICK:           0.10,
     MAX_TRADING_BALANCE: 25_000,            // $25K margin cap → $1M notional at 40x

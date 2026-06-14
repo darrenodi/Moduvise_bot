@@ -27,7 +27,7 @@ const IS_TESTNET  = ENVIRONMENT !== 'live';
 const CONFIG = {
     MAX_TRADES_DAY:      300,
     MAX_TRADING_BALANCE: 25_000,     // capped at 40x × $25K = $1M max notional
-    BANK_FRACTION:       0.50,       // 50% banked per TP
+    BANK_FRACTION:       0.30,       // 50% banked per TP
     RECYCLE_BALANCE:     800,
     RECYCLE_KEEP:        400,
     MOMENTUM_CANDLES:    3,

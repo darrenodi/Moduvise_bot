@@ -6,7 +6,7 @@ dotenv.config();
 
 export const MARKET_SYMBOL  = 'XAUUSDT';      // Binance USDM Futures symbol
 export const DISPLAY_SYMBOL = 'XAU/USDT';
-export const TARGET_MOVE    = 0.50;           // default fallback only
+export const TARGET_MOVE    = 1.00;           // default fallback only
 
 // ─── MODEL FAILOVER ───────────────────────────────────────────────────────────
 // MODELS UNCHANGED — exactly as provided. Do not modify.
@@ -118,11 +118,11 @@ export function calcAtrRegime(atr5m: number, confidence: number): AtrRegime {
     const FIXED_TP = 0.50;
     const FIXED_SL = 10.00;
     if (atr5m > 8) {
-        regime = { label: 'HIGH', leverage: 40, tp: FIXED_TP, sl: FIXED_SL, baseSizePct: 0.60, minFeeMultiple: 3 };
+        regime = { label: 'HIGH', leverage: 40, tp: FIXED_TP, sl: FIXED_SL, baseSizePct: 0.99, minFeeMultiple: 3 };
     } else if (atr5m >= 4) {
-        regime = { label: 'MED',  leverage: 40, tp: FIXED_TP, sl: FIXED_SL, baseSizePct: 0.80, minFeeMultiple: 3 };
+        regime = { label: 'MED',  leverage: 40, tp: FIXED_TP, sl: FIXED_SL, baseSizePct: 0.99, minFeeMultiple: 3 };
     } else {
-        regime = { label: 'LOW',  leverage: 40, tp: FIXED_TP, sl: FIXED_SL, baseSizePct: 0.95, minFeeMultiple: 3 };
+        regime = { label: 'LOW',  leverage: 40, tp: FIXED_TP, sl: FIXED_SL, baseSizePct: 0.99, minFeeMultiple: 3 };
     }
 
     // ── OPTION B: Dynamic ATR-based TP (COMMENTED OUT — do not delete) ────────
@@ -388,7 +388,7 @@ ${fundingNote}
 
 HOW TO DECIDE:
 - Gold often moves $0.50–$2.00 in short bursts. Even a wrong-direction entry can still grind toward $0.50 before reversing.
-- Your TP is $0.50. Your SL is $10.00. This is a much wider stop, meaning you must be selective on entries.
+- Your TP is $1. Your SL is $4.00. This is a much wider stop, meaning you must be selective on entries.
 - LONG if: price is near support, momentum is turning up, OB buy pressure, RSI rising from low, 30m green.
 - SHORT if: price is near resistance, momentum rolling over, OB sell pressure, RSI falling from high, 30m red.
 - If price is mid-range with no clear lean: follow the 5m and 30m momentum direction. Something is always moving.
@@ -396,12 +396,12 @@ HOW TO DECIDE:
 - RSI > 82 = do NOT long. RSI < 18 = do NOT short. Everything else is tradeable.
 
 FIXED PARAMETERS (do not change these):
-- suggested_tp: 0.50 (always)
+- suggested_tp: 1.00 (always)
 - suggested_leverage: ${safetyLev} (always)
 - session_size_pct: ${(session.sizePct * provisionalRegime.baseSizePct).toFixed(2)} (always)
 
 Reply with JSON array ONLY. No markdown. No explanation. No text outside the array:
-[{"symbol":"XAU/USDT","direction":"long","market_price":${price.toFixed(2)},"target_move":0.50,"confidence":0.72,"reasoning":"max 100 chars — WHY this direction RIGHT NOW","suggested_tp":0.50,"suggested_leverage":${safetyLev},"session_size_pct":${(session.sizePct * provisionalRegime.baseSizePct).toFixed(2)}}]`;
+[{"symbol":"XAU/USDT","direction":"long","market_price":${price.toFixed(2)},"target_move":1.00,"confidence":0.72,"reasoning":"max 100 chars — WHY this direction RIGHT NOW","suggested_tp":1.00,"suggested_leverage":${safetyLev},"session_size_pct":${(session.sizePct * provisionalRegime.baseSizePct).toFixed(2)}}]`;
 
         const geminiResult = await callGemini(prompt);
 
