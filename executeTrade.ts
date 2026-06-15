@@ -27,8 +27,8 @@ const STRATEGY = {
     MAKER_FEE:           0.0000,
     ENTRY_OFFSET:        0.20,          // $0.20 — safe GTX zone, fills fast on $3+ ATR
     ENTRY_FILL_TIMEOUT:  90_000,        // 90s — if price hasn't moved $0.20 toward us, signal stale
-    TP_MOVE:             1.00,          // $1.00 TP
-    SL_MOVE:             3.00,          // $3.00 SL → breakeven 75%
+    TP_MOVE:             0.80,          // $1.00 TP
+    SL_MOVE:             1.20,          // $3.00 SL → breakeven 75%
     MIN_BALANCE:         1.50,
     GOLD_TICK:           0.10,
     MAX_TRADING_BALANCE: 25_000,
