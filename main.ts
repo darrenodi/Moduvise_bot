@@ -231,7 +231,7 @@ async function fetchKlines(symbol: string, interval: string, limit: number): Pro
     const url = `${BASE_URL}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
     if (!res.ok) throw new Error(`klines ${res.status}`);
-    return res.json();
+    return res.json() as Promise<any[]>;
 }
 
 function emaOf(values: number[], period: number): number {
@@ -272,14 +272,14 @@ function adxOf(highs: number[], lows: number[], closes: number[], period = 14): 
 async function fetchMarketData(): Promise<MarketData[]> {
     try {
         const [ticker, k5m, k30m, k1h, k4h, kW, depth, funding] = await Promise.all([
-            fetch(`${BASE_URL}/fapi/v1/ticker/24hr?symbol=${MARKET_SYMBOL}`).then(r => r.json()),
+            fetch(`${BASE_URL}/fapi/v1/ticker/24hr?symbol=${MARKET_SYMBOL}`).then(r => r.json() as Promise<any>),
             fetchKlines(MARKET_SYMBOL, '5m',  120),
             fetchKlines(MARKET_SYMBOL, '30m', 60),
             fetchKlines(MARKET_SYMBOL, '1h',  60),
             fetchKlines(MARKET_SYMBOL, '4h',  30),
             fetchKlines(MARKET_SYMBOL, '1w',  4),
-            fetch(`${BASE_URL}/fapi/v1/depth?symbol=${MARKET_SYMBOL}&limit=20`).then(r => r.json()),
-            fetch(`${BASE_URL}/fapi/v1/premiumIndex?symbol=${MARKET_SYMBOL}`).then(r => r.json()).catch(() => null),
+            fetch(`${BASE_URL}/fapi/v1/depth?symbol=${MARKET_SYMBOL}&limit=20`).then(r => r.json() as Promise<any>),
+            fetch(`${BASE_URL}/fapi/v1/premiumIndex?symbol=${MARKET_SYMBOL}`).then(r => r.json() as Promise<any>).catch(() => null),
         ]);
 
         const price = Number(ticker.lastPrice ?? 0);
@@ -438,7 +438,7 @@ async function runCycle(): Promise<void> {
         }
 
         const effectiveBalance = balance > 0 ? balance : virtualTradingBalance;
-        if (effectiveBalance < 1.50) { console.log(`[Main] Balance too low.`); return; }
+        // No bot-side balance floor — Binance enforces its own minimum order size
 
         if (balance >= CONFIG.RECYCLE_BALANCE) {
             console.log(`[Main] 🎯 RECYCLE — $${balance.toFixed(2)} ≥ $${CONFIG.RECYCLE_BALANCE}. Consider withdrawing $${(balance - CONFIG.RECYCLE_KEEP).toFixed(2)}.`);

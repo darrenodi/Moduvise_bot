@@ -13,10 +13,16 @@ export const TARGET_MOVE    = 1.00;   // $1.00 TP — confirmed by user
 // No complex tier logic — just try KEY1 models then KEY2 models in sequence.
 
 const MODEL_TIERS: Array<{ key: string; model: string }> = [
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3.1-flash-lite' },
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3.5-flash'      },
     { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.5-flash'      },
     { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-2.5-flash-lite' },
+    { key: process.env.GEMINI_API_KEY  || '', model: 'gemini-3-flash'        },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3.1-flash-lite' },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3.5-flash'      },
     { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.5-flash'      },
     { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-2.5-flash-lite' },
+    { key: process.env.GEMINI_API_KEY2 || '', model: 'gemini-3-flash'        },
 ];
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
@@ -260,10 +266,14 @@ async function callGemini(prompt: string): Promise<{ raw: string; model: string 
         try {
             const client = new GoogleGenerativeAI(tier.key);
             const model  = client.getGenerativeModel({ model: tier.model });
-            const result = await model.generateContent(prompt);
-            return { raw: result.response.text(), model: tier.model };
+            // 4s timeout — if Gemini is slow, fall through to local bias immediately
+            const result = await Promise.race([
+                model.generateContent(prompt),
+                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4_000)),
+            ]);
+            return { raw: (result as any).response.text(), model: tier.model };
         } catch (err: any) {
-            console.warn(`[Signal] ${tier.model} failed — ${String(err?.message ?? '').slice(0, 60)}`);
+            console.warn(`[Signal] ${tier.model} failed — ${String(err?.message ?? '').slice(0, 40)}`);
         }
     }
     return null;

@@ -27,9 +27,9 @@ const STRATEGY = {
     MAKER_FEE:           0.0000,
     ENTRY_OFFSET:        0.20,          // $0.20 — safe GTX zone, fills fast on $3+ ATR
     ENTRY_FILL_TIMEOUT:  90_000,        // 90s — if price hasn't moved $0.20 toward us, signal stale
-    TP_MOVE:             2.30,          // $1.00 TP
-    SL_MOVE:             2.80,          // $3.00 SL → breakeven 75%
-    MIN_BALANCE:         1.0,
+    TP_MOVE:             0.80,          // $0.80 TP
+    SL_MOVE:             1.20,          // $1.20 SL → breakeven 60% (risk $1.20 to make $0.80)
+    MIN_BALANCE:         0.00,          // no bot-side floor — Binance enforces its own minimum
     GOLD_TICK:           0.10,
     MAX_TRADING_BALANCE: 25_000,
     MAX_SIGNAL_DRIFT:    1.50,          // skip if price moved >$1.50 since signal generated
@@ -267,9 +267,7 @@ export async function executeBinanceTrade(
             ? virtualBalance : await getAvailableBalance();
         console.log(`[Execute] Balance: $${effectiveBalance.toFixed(4)}`);
 
-        if (effectiveBalance < STRATEGY.MIN_BALANCE) {
-            return { success: false, outcome: 'skipped', message: `Balance too low: $${effectiveBalance.toFixed(4)}` };
-        }
+        // No bot-side balance floor — Binance will reject if truly insufficient
 
         // 3. LEVERAGE
         try {
@@ -402,22 +400,24 @@ export async function executeBinanceTrade(
         } catch (e: any) {
             console.error(`[Execute] TP failed: ${e.message} — SL monitor will protect.`);
         }
-        // 👇 THE UPDATED SL BLOCK 👇
+        // SL — exchange-side STOP_MARKET, triggers on mark price
+        // Uses closePosition=true (no quantity needed) — works on all USDM account types
+        // workingType MARK_PRICE prevents wick-triggered false exits
+        let slOrderId = 0;
         try {
-            const slOrder = await privatePost('/fapi/v1/algoOrder', {
-                algoType:      'CONDITIONAL',
+            const slOrder = await privatePost('/fapi/v1/order', {
                 symbol:        STRATEGY.SYMBOL,
                 side:          closeSide,
                 type:          'STOP_MARKET',
-                triggerPrice:  slPrice.toFixed(2),
-                closePosition: 'true'
+                stopPrice:     slPrice.toFixed(2),
+                closePosition: 'true',
+                workingType:   'MARK_PRICE',
             });
-            // Note: The Algo endpoint returns 'algoId' instead of 'orderId'
-            console.log(`[Execute] ✅ SL placed: algoId=${slOrder.algoId}`);
+            slOrderId = slOrder.orderId;
+            console.log(`[Execute] ✅ SL placed: id=${slOrderId} @ $${slPrice.toFixed(2)} (STOP_MARKET mark price)`);
         } catch (e: any) {
-            console.error(`[Execute] SL failed: ${e.message} — SL monitor will protect.`);
+            console.error(`[Execute] ⚠️ SL order failed: ${e.message} — monitor loop is backup.`);
         }
-        // 👆 -------------------- 👆
 
         _activeTrade = {
             entryPrice: fillPrice, tpPrice, slPrice,
