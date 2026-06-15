@@ -29,7 +29,7 @@ const STRATEGY = {
     ENTRY_FILL_TIMEOUT:  90_000,        // 90s — if price hasn't moved $0.20 toward us, signal stale
     TP_MOVE:             2.30,          // $1.00 TP
     SL_MOVE:             2.80,          // $3.00 SL → breakeven 75%
-    MIN_BALANCE:         1.30,
+    MIN_BALANCE:         1.0,
     GOLD_TICK:           0.10,
     MAX_TRADING_BALANCE: 25_000,
     MAX_SIGNAL_DRIFT:    1.50,          // skip if price moved >$1.50 since signal generated
