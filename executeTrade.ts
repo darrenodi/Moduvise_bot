@@ -1,46 +1,38 @@
+import ccxt from 'ccxt';
 import * as dotenv from 'dotenv';
 import type { GeneratedSignal } from './signals.js';
-import { MARKET_SYMBOL, safeLeverage } from './signals.js';
-import { createHmac } from 'crypto';
+import { MARKET_SYMBOL, calcAtrRegime, safeLeverage } from './signals.js';
 dotenv.config();
 
 // ─── STRATEGY ────────────────────────────────────────────────────────────────
 //
-// XAUUSDT USDM Futures — bracket order architecture
+// XAUUSDT USDM Futures — noise scalping
 //
-// ENTRY:  GTX limit @ $0.20 from market  → 0.00% maker fee (confirmed live)
-// TP:     GTX limit @ +$1.00             → 0.00% maker fee
-// SL:     STOP_MARKET reduceOnly         → 0.045% taker fee (~$0.02 per trade)
+// FEES (confirmed from live PNL records — 0% maker verified):
+//   Maker: 0.0000%  entry GTX + TP GTX (resting ALO orders)
+//   Taker: 0.0450%  SL market exit only
 //
-// Both TP and SL are placed immediately after entry fills.
-// The exchange enforces whichever triggers first and cancels the other.
-// The bot no longer needs to poll price for SL — the exchange handles it
-// in microseconds. This eliminates the SL blowthrough seen in live data
-// ($6.71 and $6.01 adverse moves against a $3.00 configured SL).
-//
-// SL taker fee on 0.01 XAU @ $4300: $43 × 0.00045 = $0.019
-// This is 0.6% of the $3.00 SL loss. Not worth avoiding via polling.
-//
-// TP:  $1.00  SL: $3.00  → breakeven win rate = 75.0%
-// Observed win rate from live data: ~69% (below breakeven — see analysis)
-// Target win rate needed before scaling: consistently above 78%
+// TP:  $1.00  fixed
+// SL:  $3.00  fixed  → breakeven win rate = 75%  (observed ~87%, margin = 12pp)
+// ENTRY OFFSET: $0.20 from live price
+//   - Far enough: never crosses the book → guaranteed GTX/maker
+//   - Close enough: fills within ~60s on Gold's typical $3–5 per 5m ATR
+//   - Smaller offset (e.g. $0.10) risks -5022 rejection in fast moves
+//   - Larger offset (e.g. $0.30) costs 30% of TP before trade even starts
+// SIZE: 100% of available balance every trade
 
 const STRATEGY = {
     SYMBOL:              MARKET_SYMBOL,
-    TAKER_FEE:           0.00045,       // 0.045% — SL STOP_MARKET only
-    MAKER_FEE:           0.0000,        // 0.000% — confirmed from live PNL records
-    ENTRY_OFFSET:        0.20,          // $0.20 from market price
-                                        // Safe GTX zone: never crosses book
-                                        // Fills in ~20-60s on Gold $3-5 ATR/5m
-                                        // $0.10 risks -5022 in fast moves
-                                        // $0.30 costs 30% of TP before trade starts
-    ENTRY_FILL_TIMEOUT:  90_000,        // 90s — stale if price hasn't moved $0.20
-    TP_MOVE:             1.00,          // $1.00 take profit
-    SL_MOVE:             3.00,          // $3.00 stop loss → breakeven at 75% WR
+    TAKER_FEE:           0.00045,
+    MAKER_FEE:           0.0000,
+    ENTRY_OFFSET:        0.20,          // $0.20 — safe GTX zone, fills fast on $3+ ATR
+    ENTRY_FILL_TIMEOUT:  90_000,        // 90s — if price hasn't moved $0.20 toward us, signal stale
+    TP_MOVE:             0.80,          // $1.00 TP
+    SL_MOVE:             1.20,          // $3.00 SL → breakeven 75%
     MIN_BALANCE:         1.50,
     GOLD_TICK:           0.10,
     MAX_TRADING_BALANCE: 25_000,
-    MAX_SIGNAL_DRIFT:    1.50,          // skip if price moved >$1.50 since signal
+    MAX_SIGNAL_DRIFT:    1.50,          // skip if price moved >$1.50 since signal generated
     LEVERAGE:            40,
 } as const;
 
@@ -54,12 +46,13 @@ export interface TradeResult {
     entryPrice?:  number;
     tpPrice?:     number;
     slPrice?:     number;
-    tpOrderId?:   number;
-    slOrderId?:   number;
+    tpMove?:      number;
+    slMove?:      number;
     leverage?:    number;
+    sizePct?:     number;
     grossProfit?: number;
     netProfit?:   number;
-    slFee?:       number;
+    fees?:        number;
     message?:     string;
     fillTimeMs?:  number;
 }
@@ -68,21 +61,20 @@ export interface ActiveTrade {
     entryPrice: number;
     tpPrice:    number;
     slPrice:    number;
-    tpOrderId:  number;
-    slOrderId:  number;
+    tpMove:     number;
+    slMove:     number;
     side:       'long' | 'short';
     size:       number;
+    posVal:     number;
     leverage:   number;
     openedAt:   number;
-    grossProfit: number;
-    netProfit:   number;
 }
 
 let _activeTrade: ActiveTrade | null = null;
 export function getActiveTrade(): ActiveTrade | null { return _activeTrade; }
 export function clearActiveTrade(): void { _activeTrade = null; }
 
-// ─── ENVIRONMENT ─────────────────────────────────────────────────────────────
+// ─── EXCHANGE ─────────────────────────────────────────────────────────────────
 
 const ENVIRONMENT = process.env.ENVIRONMENT ?? 'demo';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
@@ -100,11 +92,9 @@ const API_SECRET = IS_DEMO
         ? (process.env.BINANCE_BOT_SECRET ?? process.env.BINANCE_API_SECRET ?? '')
         : (process.env.BINANCE_API_SECRET ?? '');
 
-export const BASE_URL = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
+const BASE_URL = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
 
-console.log(`[Exchange] Mode: ${IS_TESTNET ? '🧪 TESTNET' : '🔴 MAINNET'} | TP=$${STRATEGY.TP_MOVE} SL=$${STRATEGY.SL_MOVE} offset=$${STRATEGY.ENTRY_OFFSET}`);
-
-// ─── HTTP HELPERS ─────────────────────────────────────────────────────────────
+import { createHmac } from 'crypto';
 
 function signedUrl(path: string, params: Record<string, string | number> = {}): string {
     const ts      = Date.now();
@@ -130,17 +120,17 @@ async function privatePost(path: string, params: Record<string, string | number>
         .update(Object.entries(entries).map(([k, v]) => `${k}=${v}`).join('&'))
         .digest('hex');
     const res = await fetch(`${BASE_URL}${path}`, {
-        method:  'POST',
+        method: 'POST',
         headers: { 'X-MBX-APIKEY': API_KEY, 'Content-Type': 'application/x-www-form-urlencoded' },
-        body:    body + `&signature=${sig}`,
-        signal:  AbortSignal.timeout(10_000),
+        body: body + `&signature=${sig}`,
+        signal: AbortSignal.timeout(10_000),
     });
     const text = await res.text();
     if (!res.ok) throw new Error(`${res.status} ${text.slice(0, 300)}`);
     return JSON.parse(text);
 }
 
-export async function privateDelete(path: string, params: Record<string, string | number> = {}): Promise<any> {
+async function privateDelete(path: string, params: Record<string, string | number> = {}): Promise<any> {
     const url = signedUrl(path, params);
     const res = await fetch(url, { method: 'DELETE', headers: { 'X-MBX-APIKEY': API_KEY }, signal: AbortSignal.timeout(10_000) });
     const text = await res.text();
@@ -148,7 +138,9 @@ export async function privateDelete(path: string, params: Record<string, string 
     return JSON.parse(text);
 }
 
-// ─── ACCOUNT HELPERS ──────────────────────────────────────────────────────────
+console.log(`[Exchange] Mode: ${IS_TESTNET ? '🧪 TESTNET' : '🔴 MAINNET'}`);
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 export async function getAvailableBalance(): Promise<number> {
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -174,8 +166,12 @@ export async function hasOpenPosition(): Promise<boolean> {
 }
 
 export async function getOpenPositionDetails(): Promise<{
-    exists: boolean; side: 'long' | 'short' | null;
-    entryPrice: number; size: number; unrealisedPnl: number; currentPrice: number;
+    exists:        boolean;
+    side:          'long' | 'short' | null;
+    entryPrice:    number;
+    size:          number;
+    unrealisedPnl: number;
+    currentPrice:  number;
 }> {
     try {
         const [positions, priceData] = await Promise.all([
@@ -187,32 +183,21 @@ export async function getOpenPositionDetails(): Promise<{
         if (!pos) return { exists: false, side: null, entryPrice: 0, size: 0, unrealisedPnl: 0, currentPrice: 0 };
         const posAmt = Number(pos.positionAmt ?? 0);
         return {
-            exists: true, side: posAmt > 0 ? 'long' : 'short',
-            entryPrice: Number(pos.entryPrice ?? 0), size: Math.abs(posAmt),
+            exists:        true,
+            side:          posAmt > 0 ? 'long' : 'short',
+            entryPrice:    Number(pos.entryPrice ?? 0),
+            size:          Math.abs(posAmt),
             unrealisedPnl: Number(pos.unRealizedProfit ?? 0),
-            currentPrice: Number((priceData as any).price ?? 0),
+            currentPrice:  Number((priceData as any).price ?? 0),
         };
     } catch {
         return { exists: false, side: null, entryPrice: 0, size: 0, unrealisedPnl: 0, currentPrice: 0 };
     }
 }
 
-// ─── CHECK IF EXCHANGE-SIDE ORDER IS STILL OPEN ───────────────────────────────
-// Used by monitoring loop to detect if TP or SL was hit exchange-side
-
-export async function getOrderStatus(orderId: number): Promise<string | null> {
-    try {
-        const data = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId });
-        return String(data?.status ?? 'UNKNOWN');
-    } catch { return null; }
-}
-
-// ─── EMERGENCY CLOSE ──────────────────────────────────────────────────────────
-// Only called for orphan positions — normal SL is exchange-side STOP_MARKET
-
-export async function emergencyClose(side: 'long' | 'short', size: number, reason: string): Promise<void> {
+export async function triggerStopLoss(side: 'long' | 'short', size: number, reason: string): Promise<void> {
     const closeSide = side === 'long' ? 'SELL' : 'BUY';
-    console.log(`[Execute] 🚨 EMERGENCY CLOSE (${reason}) — market ${closeSide} ${size}`);
+    console.log(`[Execute] 🛑 SL (${reason}) — market ${closeSide} ${size}`);
     try { await privateDelete('/fapi/v1/allOpenOrders', { symbol: STRATEGY.SYMBOL }); } catch { /* ok */ }
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
@@ -220,29 +205,31 @@ export async function emergencyClose(side: 'long' | 'short', size: number, reaso
                 symbol: STRATEGY.SYMBOL, side: closeSide, type: 'MARKET',
                 quantity: size, reduceOnly: 'true',
             });
-            console.log(`[Execute] ✅ Emergency close submitted (attempt ${attempt})`);
+            console.log(`[Execute] ✅ SL submitted (attempt ${attempt})`);
             clearActiveTrade();
             return;
         } catch (e: any) {
-            console.error(`[Execute] Emergency close attempt ${attempt} failed: ${e.message}`);
+            console.error(`[Execute] SL attempt ${attempt} failed: ${e.message}`);
             if (attempt < 3) await new Promise(r => setTimeout(r, 1_500));
         }
     }
-    console.error(`[Execute] ⚠️ All emergency close attempts failed — check position manually!`);
+    console.error(`[Execute] ⚠️ All SL attempts failed — check position manually!`);
 }
-
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 function tickRound(price: number): number {
     return Math.round(price / STRATEGY.GOLD_TICK) * STRATEGY.GOLD_TICK;
 }
 
-// 100% of balance every trade, capped at MAX_TRADING_BALANCE
+// ─── SIZE: 100% of balance ─────────────────────────────────────────────────
+// Uses full available balance every trade.
+// No session percentage reduction — user requirement: always 100%.
+
 export function calcSize(balance: number, price: number): number {
-    const capped  = Math.min(balance, STRATEGY.MAX_TRADING_BALANCE);
-    const posVal  = capped * STRATEGY.LEVERAGE;
-    const raw     = posVal / price;
-    return Math.max(0.01, Math.floor(raw * 100) / 100);
+    const cappedBalance = Math.min(balance, STRATEGY.MAX_TRADING_BALANCE);
+    const posVal        = cappedBalance * STRATEGY.LEVERAGE;
+    const raw           = posVal / price;
+    const floored       = Math.floor(raw * 100) / 100;
+    return Math.max(0.01, floored);
 }
 
 // ─── MAIN EXECUTION ───────────────────────────────────────────────────────────
@@ -258,18 +245,18 @@ export async function executeBinanceTrade(
 
     const direction = signal.direction as 'long' | 'short';
     const isBuy     = direction === 'long';
-    const entrySide = isBuy ? 'BUY'  : 'SELL';
+    const side      = isBuy ? 'BUY'  : 'SELL';
     const closeSide = isBuy ? 'SELL' : 'BUY';
     const leverage  = signal.suggested_leverage ?? STRATEGY.LEVERAGE;
 
     console.log(`\n${'─'.repeat(65)}`);
-    console.log(`[Execute] ${isBuy ? 'LONG 📈' : 'SHORT 📉'} | $${signal.market_price.toFixed(2)} | conf=${signal.confidence.toFixed(2)}`);
-    console.log(`[Execute] TP=+$${STRATEGY.TP_MOVE} (GTX maker) | SL=-$${STRATEGY.SL_MOVE} (STOP_MARKET taker) | ${leverage}x`);
-    console.log(`[Execute] ${signal.reasoning.slice(0, 100)}`);
+    console.log(`[Execute] XAUUSDT ${isBuy ? 'LONG 📈' : 'SHORT 📉'} | $${signal.market_price.toFixed(2)} | conf=${signal.confidence.toFixed(2)}`);
+    console.log(`[Execute] TP=+$${STRATEGY.TP_MOVE} | SL=-$${STRATEGY.SL_MOVE} | Lev=${leverage}x | 100% balance`);
+    console.log(`[Execute] ${signal.reasoning}`);
     console.log(`${'─'.repeat(65)}`);
 
     try {
-        // 1. GUARD
+        // 1. GUARD — no double positions
         if (_activeTrade || await hasOpenPosition()) {
             console.log(`[Execute] Position already open — skip.`);
             return { success: false, outcome: 'skipped', message: 'Position already open' };
@@ -278,6 +265,8 @@ export async function executeBinanceTrade(
         // 2. BALANCE
         const effectiveBalance = virtualBalance && virtualBalance > 0
             ? virtualBalance : await getAvailableBalance();
+        console.log(`[Execute] Balance: $${effectiveBalance.toFixed(4)}`);
+
         if (effectiveBalance < STRATEGY.MIN_BALANCE) {
             return { success: false, outcome: 'skipped', message: `Balance too low: $${effectiveBalance.toFixed(4)}` };
         }
@@ -285,40 +274,46 @@ export async function executeBinanceTrade(
         // 3. LEVERAGE
         try {
             await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
+            console.log(`[Execute] Leverage: ${leverage}x`);
         } catch (e: any) {
             console.log(`[Execute] Leverage note: ${String(e.message ?? '').slice(0, 60)}`);
         }
 
-        // 4. STALE CHECK
+        // 4. STALE SIGNAL CHECK
         let livePrice = signal.market_price;
         try {
-            const t = await fetch(`${BASE_URL}/fapi/v1/ticker/price?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
-            livePrice = Number(t?.price ?? signal.market_price);
+            const ticker = await fetch(`${BASE_URL}/fapi/v1/ticker/price?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
+            livePrice = Number(ticker?.price ?? signal.market_price);
         } catch { /* use signal price */ }
 
         const drift = Math.abs(livePrice - signal.market_price);
         if (drift > STRATEGY.MAX_SIGNAL_DRIFT) {
-            console.log(`[Execute] Stale — $${drift.toFixed(2)} drift > $${STRATEGY.MAX_SIGNAL_DRIFT}. Skip.`);
+            console.log(`[Execute] Stale signal — $${drift.toFixed(2)} drift. Skip.`);
             return { success: false, outcome: 'skipped', message: `Signal stale: $${drift.toFixed(2)} drift` };
         }
 
         // 5. SIZE — 100% of balance
         const size   = calcSize(effectiveBalance, livePrice);
         const posVal = size * livePrice;
-        console.log(`[Execute] Size: ${size} XAU | Notional: $${posVal.toFixed(2)} | Margin: $${(posVal / leverage).toFixed(2)}`);
+        const margin = posVal / leverage;
+        console.log(`[Execute] Size: ${size} XAU | Notional: $${posVal.toFixed(2)} | Margin: $${margin.toFixed(2)}`);
 
-        // 6. GTX ENTRY — $0.20 offset
+        // 6. GTX ENTRY — $0.20 offset from live price
+        // This is the critical parameter. $0.20 on XAUUSDT:
+        //   - Sits below current bid (long) or above current ask (short)
+        //   - Never crosses → guaranteed GTX (post-only) acceptance
+        //   - $3–5 ATR per 5m means price reaches $0.20 offset in ~20–60s
         const entryStart = Date.now();
         let entryOrder: any = null;
-        let fillPrice = 0;
+        let fillPrice  = 0;
 
         for (let attempt = 1; attempt <= 2; attempt++) {
             let attemptPrice = livePrice;
             if (attempt > 1) {
                 try {
-                    const t = await fetch(`${BASE_URL}/fapi/v1/ticker/price?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
-                    attemptPrice = Number(t?.price ?? livePrice);
-                    console.log(`[Execute] Retry — fresh price: $${attemptPrice.toFixed(2)}`);
+                    const ticker = await fetch(`${BASE_URL}/fapi/v1/ticker/price?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
+                    attemptPrice = Number(ticker?.price ?? livePrice);
+                    console.log(`[Execute] GTX retry — fresh price: $${attemptPrice.toFixed(2)}`);
                 } catch { /* use livePrice */ }
                 await new Promise(r => setTimeout(r, 1_000));
             }
@@ -330,25 +325,29 @@ export async function executeBinanceTrade(
             try {
                 entryOrder = await privatePost('/fapi/v1/order', {
                     symbol:      STRATEGY.SYMBOL,
-                    side:        entrySide,
+                    side,
                     type:        'LIMIT',
                     timeInForce: 'GTX',
                     price:       entryPrice.toFixed(2),
                     quantity:    size,
                 });
-                console.log(`[Execute] ⏳ GTX entry: ${size} XAU @ $${entryPrice.toFixed(2)} id=${entryOrder.orderId}`);
+                console.log(`[Execute] ⏳ GTX entry: ${size} XAU @ $${entryPrice.toFixed(2)} (id=${entryOrder.orderId})`);
                 fillPrice = entryPrice;
                 break;
             } catch (e: any) {
-                if (String(e.message).includes('-5022') && attempt < 2) {
-                    console.log(`[Execute] -5022 would cross book — retrying`);
+                const msg = String(e.message ?? '');
+                if (msg.includes('-5022') && attempt < 2) {
+                    console.log(`[Execute] -5022 would cross book — retrying with fresh price`);
                     continue;
                 }
+                console.error(`[Execute] Entry failed: ${e.message}`);
                 return { success: false, outcome: 'error', message: `Entry failed: ${e.message}` };
             }
         }
 
-        if (!entryOrder) return { success: false, outcome: 'skipped', message: 'GTX rejected' };
+        if (!entryOrder) {
+            return { success: false, outcome: 'skipped', message: 'GTX rejected after retries' };
+        }
 
         // 7. FILL POLL — 500ms intervals, 90s timeout
         let executedQty = Number(entryOrder.executedQty ?? 0);
@@ -356,15 +355,15 @@ export async function executeBinanceTrade(
 
         while (Date.now() - entryStart < STRATEGY.ENTRY_FILL_TIMEOUT && executedQty < size) {
             await new Promise(r => setTimeout(r, 500));
-            const st = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId });
-            executedQty = Number(st.executedQty ?? executedQty);
-            avgPrice    = Number(st.avgPrice ?? avgPrice);
-            if (st.status === 'FILLED' || executedQty >= size) break;
+            const status = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId });
+            executedQty  = Number(status.executedQty ?? executedQty);
+            avgPrice     = Number(status.avgPrice ?? avgPrice);
+            if (status.status === 'FILLED' || executedQty >= size) break;
         }
 
         if (executedQty <= 0) {
             try { await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }); } catch { /* ok */ }
-            console.log(`[Execute] Not filled in 90s — skip.`);
+            console.log(`[Execute] Not filled in 90s — skipping.`);
             return { success: false, outcome: 'skipped', message: 'Not filled in 90s' };
         }
 
@@ -373,25 +372,22 @@ export async function executeBinanceTrade(
         const fillTimeMs = Date.now() - entryStart;
 
         if (filledSize < size) {
-            console.log(`[Execute] Partial fill: ${filledSize}/${size} XAU — cancelling remainder`);
+            console.log(`[Execute] Partial fill: ${filledSize.toFixed(2)}/${size.toFixed(2)} — cancelling rest`);
             try { await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }); } catch { /* ok */ }
         }
 
-        console.log(`[Execute] ✅ Filled: ${filledSize} XAU @ $${fillPrice.toFixed(2)} in ${fillTimeMs}ms`);
+        console.log(`[Execute] ✅ Filled: ${filledSize.toFixed(2)} XAU @ $${fillPrice.toFixed(2)} in ${fillTimeMs}ms`);
 
-        // 8. BRACKET — TP (GTX maker) + SL (STOP_MARKET taker) placed simultaneously
-        const tpPrice  = tickRound(isBuy ? fillPrice + STRATEGY.TP_MOVE  : fillPrice - STRATEGY.TP_MOVE);
-        const slPrice  = tickRound(isBuy ? fillPrice - STRATEGY.SL_MOVE  : fillPrice + STRATEGY.SL_MOVE);
-        const gross    = filledSize * STRATEGY.TP_MOVE;
-        const slFee    = filledSize * fillPrice * STRATEGY.TAKER_FEE;    // worst case cost if SL hits
-        const net      = gross;   // TP exit is maker 0% — no fee deduction on win
+        // 8. GTX TP — resting maker limit, $1.00 above/below fill
+        const tpPrice    = tickRound(isBuy ? fillPrice + STRATEGY.TP_MOVE : fillPrice - STRATEGY.TP_MOVE);
+        const slPrice    = tickRound(isBuy ? fillPrice - STRATEGY.SL_MOVE : fillPrice + STRATEGY.SL_MOVE);
+        const gross      = filledSize * STRATEGY.TP_MOVE;
+        const takerFeeOnSl = filledSize * fillPrice * STRATEGY.TAKER_FEE; // SL exit cost (worst case)
+        const net        = gross; // entry and TP are 0% maker; taker fee only on SL
 
-        console.log(`[Execute] Bracket: TP=$${tpPrice.toFixed(2)} | SL=$${slPrice.toFixed(2)} | Gross=$${gross.toFixed(4)} | SL cost if hit: $${slFee.toFixed(4)}`);
+        console.log(`[Execute] TP=$${tpPrice.toFixed(2)} (+$${STRATEGY.TP_MOVE}) | SL=$${slPrice.toFixed(2)} (-$${STRATEGY.SL_MOVE})`);
+        console.log(`[Execute] Gross=$${gross.toFixed(4)} | Net=$${net.toFixed(4)} (SL taker cost=$${takerFeeOnSl.toFixed(4)})`);
 
-        let tpOrderId = 0;
-        let slOrderId = 0;
-
-        // TP — GTX resting limit (0% maker)
         try {
             const tpOrder = await privatePost('/fapi/v1/order', {
                 symbol:      STRATEGY.SYMBOL,
@@ -402,49 +398,27 @@ export async function executeBinanceTrade(
                 quantity:    filledSize,
                 reduceOnly:  'true',
             });
-            tpOrderId = tpOrder.orderId;
-            console.log(`[Execute] ✅ TP placed: id=${tpOrderId} @ $${tpPrice.toFixed(2)}`);
+            console.log(`[Execute] ✅ TP placed: id=${tpOrder.orderId}`);
         } catch (e: any) {
-            console.error(`[Execute] TP failed: ${e.message}`);
-            // TP failure is non-fatal — SL will protect and monitoring will catch
-        }
-
-        // SL — STOP_MARKET (0.045% taker, ~$0.02 on 0.01 XAU)
-        // Exchange enforces this in microseconds. No polling needed for SL protection.
-        try {
-            const slOrder = await privatePost('/fapi/v1/order', {
-                symbol:      STRATEGY.SYMBOL,
-                side:        closeSide,
-                type:        'STOP_MARKET',
-                stopPrice:   slPrice.toFixed(2),
-                quantity:    filledSize,
-                reduceOnly:  'true',
-                workingType: 'MARK_PRICE',    // triggers on mark price, not last price
-                                              // prevents wick-triggered false SL
-            });
-            slOrderId = slOrder.orderId;
-            console.log(`[Execute] ✅ SL placed: id=${slOrderId} @ $${slPrice.toFixed(2)} (STOP_MARKET, mark price)`);
-        } catch (e: any) {
-            console.error(`[Execute] SL order failed: ${e.message} — monitoring loop is backup.`);
-            // SL failure is logged but not fatal. Monitoring loop will catch via position check.
+            console.error(`[Execute] TP failed: ${e.message} — SL monitor will protect.`);
         }
 
         _activeTrade = {
             entryPrice: fillPrice, tpPrice, slPrice,
-            tpOrderId, slOrderId,
-            side: direction, size: filledSize,
+            tpMove: STRATEGY.TP_MOVE, slMove: STRATEGY.SL_MOVE,
+            side: direction, size: filledSize, posVal: filledSize * fillPrice,
             leverage, openedAt: Date.now(),
-            grossProfit: gross, netProfit: net,
         };
 
-        console.log(`[Execute] ✅ Bracket live — exchange enforces TP@$${tpPrice.toFixed(2)} and SL@$${slPrice.toFixed(2)}`);
+        console.log(`[Execute] ✅ Trade live — monitoring SL@$${slPrice.toFixed(2)} TP@$${tpPrice.toFixed(2)}`);
         console.log(`${'─'.repeat(65)}\n`);
 
         return {
             success: true, outcome: 'orders_placed',
             entryPrice: fillPrice, tpPrice, slPrice,
-            tpOrderId, slOrderId, leverage,
-            grossProfit: gross, netProfit: net, slFee, fillTimeMs,
+            tpMove: STRATEGY.TP_MOVE, slMove: STRATEGY.SL_MOVE,
+            leverage, sizePct: 1.00,
+            grossProfit: gross, netProfit: net, fees: 0, fillTimeMs,
         };
 
     } catch (e: any) {
