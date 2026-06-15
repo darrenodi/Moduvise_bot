@@ -402,18 +402,22 @@ export async function executeBinanceTrade(
         } catch (e: any) {
             console.error(`[Execute] TP failed: ${e.message} — SL monitor will protect.`);
         }
+        // 👇 THE UPDATED SL BLOCK 👇
         try {
-            const slOrder = await privatePost('/fapi/v1/order', {
+            const slOrder = await privatePost('/fapi/v1/algoOrder', {
+                algoType:      'CONDITIONAL',
                 symbol:        STRATEGY.SYMBOL,
                 side:          closeSide,
                 type:          'STOP_MARKET',
-                stopPrice:     slPrice.toFixed(2),
+                triggerPrice:  slPrice.toFixed(2),
                 closePosition: 'true'
             });
-            console.log(`[Execute] ✅ SL placed: id=${slOrder.orderId}`);
+            // Note: The Algo endpoint returns 'algoId' instead of 'orderId'
+            console.log(`[Execute] ✅ SL placed: algoId=${slOrder.algoId}`);
         } catch (e: any) {
             console.error(`[Execute] SL failed: ${e.message} — SL monitor will protect.`);
         }
+        // 👆 -------------------- 👆
 
         _activeTrade = {
             entryPrice: fillPrice, tpPrice, slPrice,
