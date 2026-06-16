@@ -408,13 +408,14 @@ export async function executeBinanceTrade(
         // Confirmed from: developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order
         // Parameters: algoType=CONDITIONAL, orderType=STOP_MARKET, triggerPrice (NOT stopPrice)
         // workingType=MARK_PRICE prevents wick-triggered false exits
+        // 👇 THE CORRECTED SL ALGO BLOCK 👇
         let slAlgoId = 0;
         try {
             const slOrder = await privatePost('/fapi/v1/algoOrder', {
                 symbol:       STRATEGY.SYMBOL,
                 side:         closeSide,
                 algoType:     'CONDITIONAL',
-                orderType:    'STOP_MARKET',
+                type:         'STOP_MARKET', // Changed from orderType to type
                 quantity:     filledSize,
                 triggerPrice: slPrice.toFixed(2),
                 workingType:  'MARK_PRICE',
@@ -426,6 +427,7 @@ export async function executeBinanceTrade(
             console.error(`[Execute] ⚠️ SL algo order failed: ${e.message}`);
             console.error(`[Execute] ⚠️ Falling back to monitoring loop for SL protection.`);
         }
+        // 👆 ---------------------------- 👆
 
         _activeTrade = {
             entryPrice: fillPrice, tpPrice, slPrice,
