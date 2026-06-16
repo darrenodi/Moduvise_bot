@@ -403,20 +403,28 @@ export async function executeBinanceTrade(
         // SL — exchange-side STOP_MARKET, triggers on mark price
         // Uses closePosition=true (no quantity needed) — works on all USDM account types
         // workingType MARK_PRICE prevents wick-triggered false exits
-        let slOrderId = 0;
+ 
+        // STOP_MARKET on /fapi/v1/order returns -4120. Must use /fapi/v1/algoOrder.
+        // Confirmed from: developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order
+        // Parameters: algoType=CONDITIONAL, orderType=STOP_MARKET, triggerPrice (NOT stopPrice)
+        // workingType=MARK_PRICE prevents wick-triggered false exits
+        let slAlgoId = 0;
         try {
-            const slOrder = await privatePost('/fapi/v1/order', {
-                symbol:        STRATEGY.SYMBOL,
-                side:          closeSide,
-                type:          'STOP_MARKET',
-                stopPrice:     slPrice.toFixed(2),
-                closePosition: 'true',
-                workingType:   'MARK_PRICE',
+            const slOrder = await privatePost('/fapi/v1/algoOrder', {
+                symbol:       STRATEGY.SYMBOL,
+                side:         closeSide,
+                algoType:     'CONDITIONAL',
+                orderType:    'STOP_MARKET',
+                quantity:     filledSize,
+                triggerPrice: slPrice.toFixed(2),
+                workingType:  'MARK_PRICE',
+                reduceOnly:   'true',
             });
-            slOrderId = slOrder.orderId;
-            console.log(`[Execute] ✅ SL placed: id=${slOrderId} @ $${slPrice.toFixed(2)} (STOP_MARKET mark price)`);
+            slAlgoId = slOrder.algoId;
+            console.log(`[Execute] ✅ SL placed: algoId=${slAlgoId} @ $${slPrice.toFixed(2)} (STOP_MARKET MARK_PRICE)`);
         } catch (e: any) {
-            console.error(`[Execute] ⚠️ SL order failed: ${e.message} — monitor loop is backup.`);
+            console.error(`[Execute] ⚠️ SL algo order failed: ${e.message}`);
+            console.error(`[Execute] ⚠️ Falling back to monitoring loop for SL protection.`);
         }
 
         _activeTrade = {
