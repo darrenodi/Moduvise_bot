@@ -238,7 +238,11 @@ export async function cancelAlgoOrder(algoId: number): Promise<void> {
         console.log(`[Execute] 🧹 Cleaning up leftover SL Algo order: ${algoId}`);
         await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId });
     } catch (e: any) {
-        console.error(`[Execute] Failed to cancel algo order ${algoId}: ${e.message}`);
+        if (e.message.includes('-2011')) {
+            console.log(`[Execute] 👍 Binance automatically cleared the SL order.`);
+        } else {
+            console.error(`[Execute] Failed to cancel algo order ${algoId}: ${e.message}`);
+        }
     }
 }
 // ─── MAIN EXECUTION ───────────────────────────────────────────────────────────
