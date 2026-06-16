@@ -192,7 +192,31 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     const pos = await getOpenPositionDetails();
 
     if (!pos.exists) {
-        if (pendingTrade) return 'tp';
+        if (pendingTrade) {
+            // Check if the current price is closer to the SL than the TP
+            const distToTP = Math.abs(pendingTrade.tpPrice - pos.currentPrice);
+            const distToSL = Math.abs(pendingTrade.slPrice - pos.currentPrice);
+
+            if (distToSL < distToTP) {
+                console.log(`[Health] 🛑 Exchange SL Triggered! Position closed near $${pos.currentPrice.toFixed(2)}`);
+                
+                // Calculate the loss using the actual SL distance
+                const slThreshold = Math.abs(pendingTrade.slPrice - pendingTrade.entryPrice);
+                const estimatedLoss = pendingTrade.size * slThreshold;
+                
+                stats.slHits++;
+                stats.slLoss += estimatedLoss;
+                stats.netProfit -= estimatedLoss;
+                
+                bankProfit(-estimatedLoss);
+                pendingTrade = null;
+                
+                return 'sl';
+            }
+
+            // If it wasn't near the SL, it was a real TP win
+            return 'tp';
+        }
         return 'none';
     }
 
