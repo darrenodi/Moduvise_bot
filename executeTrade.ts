@@ -68,6 +68,7 @@ export interface ActiveTrade {
     posVal:     number;
     leverage:   number;
     openedAt:   number;
+    slAlgoId?:  number; // 👈 ADD THIS LINE
 }
 
 let _activeTrade: ActiveTrade | null = null;
@@ -232,6 +233,14 @@ export function calcSize(balance: number, price: number): number {
     return Math.max(0.01, floored);
 }
 
+export async function cancelAlgoOrder(algoId: number): Promise<void> {
+    try {
+        console.log(`[Execute] 🧹 Cleaning up leftover SL Algo order: ${algoId}`);
+        await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId });
+    } catch (e: any) {
+        console.error(`[Execute] Failed to cancel algo order ${algoId}: ${e.message}`);
+    }
+}
 // ─── MAIN EXECUTION ───────────────────────────────────────────────────────────
 
 export async function executeBinanceTrade(
@@ -434,6 +443,7 @@ export async function executeBinanceTrade(
             tpMove: STRATEGY.TP_MOVE, slMove: STRATEGY.SL_MOVE,
             side: direction, size: filledSize, posVal: filledSize * fillPrice,
             leverage, openedAt: Date.now(),
+            slAlgoId, // 👈 ADD THIS LINE
         };
 
         console.log(`[Execute] ✅ Trade live — monitoring SL@$${slPrice.toFixed(2)} TP@$${tpPrice.toFixed(2)}`);

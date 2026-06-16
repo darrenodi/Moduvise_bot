@@ -10,6 +10,7 @@ import {
     clearActiveTrade,
     triggerStopLoss,
     calcSize,
+    cancelAlgoOrder, // 👈 ADD THIS IMPORT
 } from './executeTrade.js';
 import * as dotenv from 'dotenv';
 dotenv.config();
@@ -403,6 +404,12 @@ async function runCycle(): Promise<void> {
                 stats.tpHits++;
                 if (pendingTrade.fillTimeMs) stats.fillTimes.push(pendingTrade.fillTimeMs);
                 bankProfit(pendingTrade.netProfit);
+                // 👇 ADD THIS CLEANUP LOGIC 👇
+                const liveTrade = getActiveTrade();
+                if (liveTrade?.slAlgoId) {
+                    await cancelAlgoOrder(liveTrade.slAlgoId);
+                }
+                // 👆 ------------------------ 👆
                 clearActiveTrade();
                 pendingTrade = null;
             }
