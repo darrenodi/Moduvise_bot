@@ -264,8 +264,7 @@ async function runCycle(): Promise<void> {
         // 4. Ingest Live Data & Run Ensemble Matrix
         const liveAssets = await buildLiveMarketData(MARKET_SYMBOL);
         const signals = await generateSignals(liveAssets);
-        console.log(`[Heartbeat] Scan complete. Consensus: ${signals[0].direction.toUpperCase()} | Skipped: ${stats.skipped}`);
-        for (const signal of signals) {
+        console.log(`[Heartbeat] Matrix: ${signals[0].reasoning} | Skipped: ${stats.skipped}`);        for (const signal of signals) {
             if (signal.direction === 'neutral') { 
                 stats.skipped++; 
                 continue; 
