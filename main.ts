@@ -1,5 +1,6 @@
 import ccxt from 'ccxt';
 import * as dotenv from 'dotenv';
+import { RSI, EMA, ADX } from 'technicalindicators';
 import { generateSignals, getSession, MARKET_SYMBOL, DISPLAY_SYMBOL } from './signals.js';
 import type { MarketData, TechnicalIndicators } from './signals.js';
 import {
@@ -116,50 +117,88 @@ function bankProfit(netProfit: number, takerFeeCost = 0): void {
 
 // ─── LIVE DATA INGESTION MATRIX ───────────────────────────────────────────────
 async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
-    // 1. Fetch live Ticker and Order Book (DOM) from Binance
-    const [tickerRes, bookRes] = await Promise.all([
-        fetch(`${BASE_URL}/fapi/v1/ticker/24hr?symbol=${symbol}`).then(r => r.json() as Promise<{ lastPrice: string; highPrice: string; lowPrice: string; priceChangePercent: string; }>),
-        fetch(`${BASE_URL}/fapi/v1/depth?symbol=${symbol}&limit=20`).then(r => r.json() as Promise<{ bids: [string, string][]; asks: [string, string][]; }>)
+    interface BinanceTickerResponse {
+        lastPrice: string;
+        highPrice: string;
+        lowPrice: string;
+        priceChangePercent: string;
+    }
+
+    interface BinanceDepthResponse {
+        bids: string[][];
+        asks: string[][];
+    }
+
+    type BinanceKline = [number, string, string, string, string, string, ...unknown[]];
+
+    // 1. Fetch live Ticker, Order Book, and the last 100 5m Candles
+    const [tickerRes, bookRes, klinesRes] = await Promise.all([
+        fetch(`${BASE_URL}/fapi/v1/ticker/24hr?symbol=${symbol}`)
+            .then(r => r.json() as Promise<BinanceTickerResponse>),
+        fetch(`${BASE_URL}/fapi/v1/depth?symbol=${symbol}&limit=20`)
+            .then(r => r.json() as Promise<BinanceDepthResponse>),
+        fetch(`${BASE_URL}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=100`)
+            .then(r => r.json() as Promise<BinanceKline[]>)
     ]);
 
     const currentPrice = Number(tickerRes.lastPrice);
     
-    // 2. Calculate Live Order Book Imbalance (Top 10 levels)
+    // 2. Order Book Math
     const bids = bookRes.bids.slice(0, 10).reduce((acc: number, val: string[]) => acc + (Number(val[0]) * Number(val[1])), 0);
     const asks = bookRes.asks.slice(0, 10).reduce((acc: number, val: string[]) => acc + (Number(val[0]) * Number(val[1])), 0);
     const totalVolume = bids + asks;
-    const obImbalance = totalVolume === 0 ? 0 : (bids - asks) / totalVolume; // Range: -1.0 to 1.0
-
-    // 3. Calculate Spread
+    const obImbalance = totalVolume === 0 ? 0 : (bids - asks) / totalVolume; 
+    
     const topBid = Number(bookRes.bids[0][0]);
     const topAsk = Number(bookRes.asks[0][0]);
     const spreadUsd = topAsk - topBid;
 
-    // TODO: INJECT YOUR TA LIBRARY HERE (e.g., tulind, technicalindicators)
-    // You will pass your local OHLCV arrays into your TA library to map these values.
+    // 3. Mathematical Indicator Generation
+    // Klines array format: [OpenTime, Open, High, Low, Close, Volume, ...]
+    const highs  = klinesRes.map((c: any) => Number(c[2]));
+    const lows   = klinesRes.map((c: any) => Number(c[3]));
+    const closes = klinesRes.map((c: any) => Number(c[4]));
+
+    // Calculate RSI (14 period)
+    const rsiArray = RSI.calculate({ values: closes, period: 14 });
+    const currentRsi = rsiArray.length > 0 ? rsiArray[rsiArray.length - 1] : 50;
+
+    // Calculate EMA (50 period) for Trend detection
+    const ema50Array = EMA.calculate({ values: closes, period: 50 });
+    const currentEma50 = ema50Array.length > 0 ? ema50Array[ema50Array.length - 1] : currentPrice;
+    const emaTrend = currentPrice > currentEma50 ? 'bullish' : 'bearish';
+
+    // Calculate ADX (14 period) for Chop detection
+    const adxArray = ADX.calculate({ high: highs, low: lows, close: closes, period: 14 });
+    const currentAdx = adxArray.length > 0 ? adxArray[adxArray.length - 1].adx : 25;
+
+    // Calculate basic momentum (Price change over last candle)
+    const momentum5m = closes.length >= 2 ? closes[closes.length - 1] - closes[closes.length - 2] : 0;
+
+    // 4. Map the live math into the Matrix Payload
     const liveIndicators: TechnicalIndicators = {
-        emaTrend:             'neutral', // Replace with: currentPrice > ema50 ? 'bullish' : 'bearish'
+        emaTrend:             emaTrend, 
         ema8:                 currentPrice, 
         ema21:                currentPrice,
-        ema50:                currentPrice,
-        rsi:                  50,        // Replace with: live 5m RSI
-        momentum5m:           0,         
-        momentum30m:          0,
-        momentum1h:           0,
-        priceStructure:       'ranging', 
-        trendBias4h:          'neutral',
+        ema50:                currentEma50,
+        rsi:                  currentRsi,
+        momentum5m:           momentum5m,         
+        momentum30m:          momentum5m * 6, // Rough approximation
+        momentum1h:           momentum5m * 12,
+        priceStructure:       emaTrend === 'bullish' ? 'uptrend' : 'downtrend', 
+        trendBias4h:          emaTrend === 'bullish' ? 'bull' : 'bear',
         weeklyBias:           'neutral',
-        atr5m:                3.50,      // Replace with: live 5m ATR
+        atr5m:                3.50, // Keep fixed or calculate dynamic ATR if desired
         atrPct:               0.05,
-        volumeRatio:          1.0,       // current volume / average volume
+        volumeRatio:          1.0,  // Keep neutral or build volume calculation
         nearestResistance:    currentPrice + 5,
         nearestSupport:       currentPrice - 5,
         distanceToResistance: 5,
         distanceToSupport:    5,
         high24h:              Number(tickerRes.highPrice),
         low24h:               Number(tickerRes.lowPrice),
-        adx:                  25,        // Replace with: live ADX
-        fundingRate:          0,         // fetch from /fapi/v1/premiumIndex
+        adx:                  currentAdx,
+        fundingRate:          0,         
         spreadUsd:            spreadUsd,
         obImbalance:          obImbalance, 
         priceVsVwap:          0,
@@ -172,7 +211,7 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
         price: currentPrice,
         change_24h: Number(tickerRes.priceChangePercent),
         indicators: liveIndicators,
-        orderBook: { bidWalls: [], askWalls: [] } // Handled via obImbalance above
+        orderBook: { bidWalls: [], askWalls: [] } 
     }];
 }
 
@@ -264,14 +303,18 @@ async function runCycle(): Promise<void> {
         // 4. Ingest Live Data & Run Ensemble Matrix
         const liveAssets = await buildLiveMarketData(MARKET_SYMBOL);
         const signals = await generateSignals(liveAssets);
-        console.log(`[Heartbeat] Matrix: ${signals[0].reasoning} | Skipped: ${stats.skipped}`);        for (const signal of signals) {
+
+        // 5. Print the Heartbeat Status
+        console.log(`[Heartbeat] Matrix: ${signals[0].reasoning} | Skipped: ${stats.skipped}`);
+
+        for (const signal of signals) {
             if (signal.direction === 'neutral') { 
                 stats.skipped++; 
                 continue; 
             }
             stats.attempts++;
 
-            // 5. Deploy Single-Bullet Maker Execution
+            // 6. Deploy Single-Bullet Maker Execution
             const result = await executeBinanceTrade(signal, virtualTradingBalance);
 
             if (result.outcome === 'orders_placed') {
