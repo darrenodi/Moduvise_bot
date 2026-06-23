@@ -16,7 +16,7 @@ const STRATEGY = {
 
     // TP: resting LIMIT GTC — fills as maker (0% fee) when price comes to it.
     // If price gaps past it on fill, it becomes a taker (0.02% fee) — acceptable.
-    TP_MOVE:          0.20,   // $0.20 profit target
+    TP_MOVE:          0.30,   // $0.20 profit target
 
     // SL: 10% of margin, calculated dynamically per trade.
     // At 50x leverage: SL price distance = (0.10 × price) / leverage
