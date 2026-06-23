@@ -120,7 +120,7 @@ function printDailySummary(): void {
     const tpRate = stats.fills > 0 ? ((stats.tpHits / stats.fills) * 100).toFixed(0) : '0';
     const uptime = ((Date.now() - startTime) / 3_600_000).toFixed(1);
     console.log(`\n${'█'.repeat(70)}`);
-    console.log(`📊 DAILY SUMMARY — ${stats.date} (${uptime}h uptime)`);
+    console.log(`📊 DAILY SUMMARY— ${stats.date} (${uptime}h uptime)`);
     console.log(`Trades: ${stats.fills} | Win rate: ${tpRate}% | Skipped: ${stats.skipped}`);
     console.log(`Gross: +$${stats.grossProfit.toFixed(4)} | Net: $${stats.netProfit.toFixed(4)} | SL Loss: -$${stats.slLoss.toFixed(4)}`);
     console.log(`💼 Trading Stack:  $${tradingBalance.toFixed(4)}`);
