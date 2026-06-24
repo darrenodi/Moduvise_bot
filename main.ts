@@ -320,7 +320,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     // — 24 winning trades averaged ~$0.009 profit each ($0.217 total)
     // — 2 losing trades averaged -$0.689 each (-$1.378 total)
     // A position that drifts for 45 seconds isn't the one we wanted; cut it early.
-    const SCRATCH_MS = Number(process.env.SCRATCH_TIMEOUT_MS ?? 99999999);
+    const SCRATCH_MS = Number(process.env.SCRATCH_TIMEOUT_MS ?? 86400000);
     if (ageMs > SCRATCH_MS) {
         const profit = trade.side === 'long'
             ? pos.currentPrice - trade.entryPrice
@@ -407,6 +407,7 @@ async function runCycle(): Promise<void> {
             );
         } else {
             stats.skipped++;
+            console.log(`[Skipped] Trade rejected or failed: ${result.message}`);
         }
 
     } catch (e: any) {

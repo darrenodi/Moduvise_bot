@@ -35,7 +35,7 @@ const STRATEGY = {
     // Scratch timeout: exit at market if trade is still open after 45s without TP.
     // This is the key improvement: a non-moving position costs ~$0 to exit early.
     // Holding until the SL fires costs 7-22x more based on your historical data.
-    SCRATCH_TIMEOUT_MS: 99999999, // Cranks the timeout to days so it never triggers early
+    SCRATCH_TIMEOUT_MS: 86400000, // Cranks the timeout to days so it never triggers early
 
     GOLD_TICK:        0.01,   // XAUUSDT tick size (Binance contract spec)
     MIN_QTY:          0.001,  // minimum order quantity
