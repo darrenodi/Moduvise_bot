@@ -29,8 +29,8 @@ const STRATEGY = {
     // ATR-based SL: $3 ATR -> $4.50 SL. Still asymmetric but anchored to volatility.
     // The SCRATCH_TIMEOUT below cuts it much earlier if price just drifts.
     ATR_SL_MULT:        1.50,
-    SL_MIN:             0.5,   // never closer than $0.50 (slippage buffer)
-    SL_BACKUP_EXTRA:    0.7,   // backup stop $1.00 further than primary
+    SL_MIN:             30.0,   // never closer than $0.50 (slippage buffer)
+    SL_BACKUP_EXTRA:    31.0,   // backup stop $1.00 further than primary
 
     // Scratch timeout: exit at market if trade is still open after 45s without TP.
     // This is the key improvement: a non-moving position costs ~$0 to exit early.
