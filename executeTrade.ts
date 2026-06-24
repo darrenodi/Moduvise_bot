@@ -21,7 +21,7 @@ const STRATEGY = {
     // User asked for $0.20-$2 range — this delivers it automatically based on volatility.
     TP_ATR_MULT:        0.10,
     TP_MIN:             0.10,   // never less than $0.20
-    TP_MAX:             3.00,   // never more than $2.00
+    TP_MAX:             1.00,   // never more than $2.00
 
     // SL: DYNAMIC — placed at atr5m * ATR_SL_MULT from entry.
     // Replaces fixed "10% of margin" which at 50x = $8.60 SL on $0.20 TP.
@@ -29,8 +29,8 @@ const STRATEGY = {
     // ATR-based SL: $3 ATR -> $4.50 SL. Still asymmetric but anchored to volatility.
     // The SCRATCH_TIMEOUT below cuts it much earlier if price just drifts.
     ATR_SL_MULT:        1.50,
-    SL_MIN:             10.0,   // never closer than $0.50 (slippage buffer)
-    SL_BACKUP_EXTRA:    15.00,   // backup stop $1.00 further than primary
+    SL_MIN:             2.0,   // never closer than $0.50 (slippage buffer)
+    SL_BACKUP_EXTRA:    5.00,   // backup stop $1.00 further than primary
 
     // Scratch timeout: exit at market if trade is still open after 45s without TP.
     // This is the key improvement: a non-moving position costs ~$0 to exit early.
