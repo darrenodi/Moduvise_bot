@@ -14,7 +14,7 @@ const STRATEGY = {
     // from market in trending conditions and they never filled.
     // Long entry  = bid - ENTRY_TICK  (sits 1 tick below best bid, fills fast)
     // Short entry = ask + ENTRY_TICK  (sits 1 tick above best ask, fills fast)
-    ENTRY_TICK:         0.2,   // 1 minimum tick from bid/ask
+    ENTRY_TICK:         0.5,   // 1 minimum tick from bid/ask
 
     // TP: DYNAMIC — clamp(atr5m * TP_ATR_MULT, TP_MIN, TP_MAX)
     // Quiet market (ATR=$2): TP=$0.20. Active (ATR=$8): TP=$0.80. Volatile: up to $2.
