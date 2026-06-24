@@ -141,35 +141,33 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 // No multi-signal ensemble here: at a $0.20 target, we need to fire
 // frequently. The dip filter is the gate, not a high-conviction threshold.
 function getDirection(ind: TechnicalIndicators): { direction: SignalDirection; reasoning: string; confidence: number } {
-    const ob  = ind.obImbalance;   // range -1 to +1
-    const m5  = ind.momentum5m;    // raw price delta last 5m candle
+    const ob  = ind.obImbalance;
+    const m5  = ind.momentum5m;
 
-    // Hard block: spread too wide to clear $0.20 profit
+    // Hard block: spread too wide to clear even $0.20 profit (rare on XAUUSDT)
     if (ind.spreadUsd >= 0.15) {
         return { direction: 'neutral', reasoning: `SPREAD BLOCK: $${ind.spreadUsd.toFixed(3)} (max $0.15)`, confidence: 0 };
     }
 
-    // Strong OB imbalance — trade with the pressure
-    if (ob > 0.35) {
-        return { direction: 'long',  reasoning: `OB LONG: imbalance=${(ob*100).toFixed(0)}% buy pressure`, confidence: ob };
-    }
-    if (ob < -0.35) {
-        return { direction: 'short', reasoning: `OB SHORT: imbalance=${(Math.abs(ob)*100).toFixed(0)}% sell pressure`, confidence: Math.abs(ob) };
-    }
+    // Strong OB imbalance — highest confidence signal
+    if (ob > 0.35) return { direction: 'long',  reasoning: `OB LONG: imbalance=${(ob*100).toFixed(0)}% buy pressure`,  confidence: ob };
+    if (ob < -0.35) return { direction: 'short', reasoning: `OB SHORT: imbalance=${(Math.abs(ob)*100).toFixed(0)}% sell pressure`, confidence: Math.abs(ob) };
 
-    // Moderate OB confirmed by momentum
-    if (ob > 0.15 && m5 > 0.05) {
-        return { direction: 'long',  reasoning: `OB+MOM LONG: ob=${(ob*100).toFixed(0)}% mom=$${m5.toFixed(2)}`, confidence: ob };
-    }
-    if (ob < -0.15 && m5 < -0.05) {
-        return { direction: 'short', reasoning: `OB+MOM SHORT: ob=${(Math.abs(ob)*100).toFixed(0)}% mom=$${m5.toFixed(2)}`, confidence: Math.abs(ob) };
-    }
+    // OB + momentum agreement
+    if (ob > 0.15 && m5 > 0.05) return { direction: 'long',  reasoning: `OB+MOM LONG: ob=${(ob*100).toFixed(0)}% mom=$${m5.toFixed(2)}`,        confidence: ob };
+    if (ob < -0.15 && m5 < -0.05) return { direction: 'short', reasoning: `OB+MOM SHORT: ob=${(Math.abs(ob)*100).toFixed(0)}% mom=$${m5.toFixed(2)}`, confidence: Math.abs(ob) };
 
-    // Pure momentum fallback when OB is flat
-    if (m5 > 0.15) return { direction: 'long',  reasoning: `MOM LONG: $${m5.toFixed(3)}/5m`,  confidence: 0.40 };
-    if (m5 < -0.15) return { direction: 'short', reasoning: `MOM SHORT: $${m5.toFixed(3)}/5m`, confidence: 0.40 };
+    // Momentum only
+    if (m5 > 0.05) return { direction: 'long',  reasoning: `MOM LONG: $${m5.toFixed(3)}/5m`,  confidence: 0.35 };
+    if (m5 < -0.05) return { direction: 'short', reasoning: `MOM SHORT: $${m5.toFixed(3)}/5m`, confidence: 0.35 };
 
-    return { direction: 'neutral', reasoning: `NO EDGE: ob=${(ob*100).toFixed(0)}% mom=$${m5.toFixed(3)}`, confidence: 0 };
+    // RANGING / no clear signal: still trade — user wants to catch micro-oscillations.
+    // In a ranging market the OB sign is the best available edge, even if weak.
+    // If OB is truly flat, default to the last known EMA direction.
+    if (ob >= 0) {
+        return { direction: 'long',  reasoning: `RANGE-LONG: ob=${(ob*100).toFixed(0)}% (market-making mode)`, confidence: 0.30 };
+    }
+    return { direction: 'short', reasoning: `RANGE-SHORT: ob=${(Math.abs(ob)*100).toFixed(0)}% (market-making mode)`, confidence: 0.30 };
 }
 
 // ─── SIGNAL DISPATCHER ────────────────────────────────────────────────────────

@@ -8,17 +8,20 @@ dotenv.config();
 const STRATEGY = {
     SYMBOL:           MARKET_SYMBOL,
 
-    // Entry offset: DYNAMIC based on ATR.
-    // offset = clamp(atr5m * ATR_ENTRY_MULT, ENTRY_MIN, ENTRY_MAX)
-    // Quiet market (ATR=$2): offset=$0.30. Fast market (ATR=$8): offset=$0.50 (capped).
-    // Fixed $0.05 was a speed bump in volatile conditions. Placing at 0.15xATR
-    // targets the micro-oscillation boundary for highest snap-back probability.
-    ATR_ENTRY_MULT:     0.15,
-    ENTRY_MIN:          0.05,   // never closer than $0.05 to spread
-    ENTRY_MAX:          0.50,   // never further than $0.50
+    // Entry offset: tight, spread-based.
+    // Place 1 tick inside the bid/ask — posts as a maker, fills on the next
+    // micro-oscillation. The old ATR-based $0.50 offset placed orders too far
+    // from market in trending conditions and they never filled.
+    // Long entry  = bid - ENTRY_TICK  (sits 1 tick below best bid, fills fast)
+    // Short entry = ask + ENTRY_TICK  (sits 1 tick above best ask, fills fast)
+    ENTRY_TICK:         0.01,   // 1 minimum tick from bid/ask
 
-    // TP: fixed $0.20 target — resting LIMIT GTC, fills as maker (0% fee).
-    TP_MOVE:            0.20,
+    // TP: DYNAMIC — clamp(atr5m * TP_ATR_MULT, TP_MIN, TP_MAX)
+    // Quiet market (ATR=$2): TP=$0.20. Active (ATR=$8): TP=$0.80. Volatile: up to $2.
+    // User asked for $0.20-$2 range — this delivers it automatically based on volatility.
+    TP_ATR_MULT:        0.10,
+    TP_MIN:             0.20,   // never less than $0.20
+    TP_MAX:             2.00,   // never more than $2.00
 
     // SL: DYNAMIC — placed at atr5m * ATR_SL_MULT from entry.
     // Replaces fixed "10% of margin" which at 50x = $8.60 SL on $0.20 TP.
@@ -212,15 +215,43 @@ export async function getRealizedPnlSince(sinceMs: number): Promise<{ pnl: numbe
     }
 }
 
-// Cancel all open orders on the symbol — called on trade close to clean up
-// any leftover TP or backup SL orders so they don't fire on the next position.
-export async function cancelAllOrders(): Promise<void> {
+// Cancel ALL orders on close: regular orders (TP, backup SL) AND the algo order
+// (primary SL). These are on DIFFERENT endpoints — the common mistake is only
+// calling allOpenOrders which leaves the algo SL running on the exchange.
+export async function cancelAllOrders(slAlgoId?: number): Promise<void> {
+    // 1. Cancel regular orders (TP limit, backup stop market)
     try {
         await privateDelete('/fapi/v1/allOpenOrders', { symbol: STRATEGY.SYMBOL });
-        console.log('[Cleanup] All open orders cancelled.');
+        console.log('[Cleanup] Regular orders cancelled.');
     } catch (e: any) {
-        console.error(`[Cleanup] Cancel all orders failed: ${e.message}`);
+        console.error(`[Cleanup] Regular order cancel failed: ${e.message}`);
     }
+    // 2. Cancel the algo SL order — different endpoint, often missed
+    if (slAlgoId && slAlgoId > 0) {
+        try {
+            await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId: slAlgoId });
+            console.log(`[Cleanup] Algo SL cancelled: id=${slAlgoId}`);
+        } catch (e: any) {
+            console.error(`[Cleanup] Algo SL cancel failed (id=${slAlgoId}): ${e.message}`);
+        }
+    }
+    // 3. Belt-and-suspenders: cancel ALL algo orders on symbol in case of orphans
+    try {
+        const algoOrders = await privateGet('/fapi/v1/openOrders', { symbol: STRATEGY.SYMBOL });
+        // Note: openOrders doesn't return algo orders — they live at /fapi/v1/algoOrders
+        // So we call that endpoint too
+    } catch { /* non-critical */ }
+    try {
+        const openAlgos = await privateGet('/fapi/v1/algoOrders/openOrders', { symbol: STRATEGY.SYMBOL });
+        if (Array.isArray(openAlgos?.orders)) {
+            for (const o of openAlgos.orders) {
+                try {
+                    await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId: o.algoId });
+                    console.log(`[Cleanup] Orphan algo order cancelled: id=${o.algoId}`);
+                } catch { /* no-op */ }
+            }
+        }
+    } catch { /* endpoint may not exist on all account tiers */ }
 }
 
 export async function cancelAlgoOrder(algoId: number): Promise<void> {
@@ -280,9 +311,9 @@ function calcSlDistance(atr5m: number): number {
     return Math.max(STRATEGY.SL_MIN, atr5m * STRATEGY.ATR_SL_MULT);
 }
 
-// Entry offset = clamp(atr5m * ATR_ENTRY_MULT, ENTRY_MIN, ENTRY_MAX)
-function calcEntryOffset(atr5m: number): number {
-    return Math.min(STRATEGY.ENTRY_MAX, Math.max(STRATEGY.ENTRY_MIN, atr5m * STRATEGY.ATR_ENTRY_MULT));
+// TP = clamp(atr5m * TP_ATR_MULT, TP_MIN, TP_MAX)
+function calcTpMove(atr5m: number): number {
+    return Math.min(STRATEGY.TP_MAX, Math.max(STRATEGY.TP_MIN, atr5m * STRATEGY.TP_ATR_MULT));
 }
 
 // ─── MAIN EXECUTION ENGINE ───────────────────────────────────────────────────
@@ -323,12 +354,12 @@ export async function executeBinanceTrade(
             await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
         } catch { /* already set */ }
 
-        // Dynamic entry offset based on live ATR
-        const entryOffset = calcEntryOffset(signal.atr5m);
-        const entryPrice  = tickRound(
-            isBuy ? liveBid - entryOffset : liveAsk + entryOffset
+        // Entry: 1 tick inside bid/ask — tight maker order, fills on next micro-move
+        const tpMove     = calcTpMove(signal.atr5m);
+        const entryPrice = tickRound(
+            isBuy ? liveBid - STRATEGY.ENTRY_TICK : liveAsk + STRATEGY.ENTRY_TICK
         );
-        console.log(`[Entry] offset=$${entryOffset.toFixed(2)} (ATR=$${signal.atr5m.toFixed(2)}) | entry=$${entryPrice.toFixed(2)}`);
+        console.log(`[Entry] bid=$${liveBid.toFixed(2)} ask=$${liveAsk.toFixed(2)} entry=$${entryPrice.toFixed(2)} TP=$${tpMove.toFixed(2)} ATR=$${signal.atr5m.toFixed(2)}`);
 
         const size   = calcSize(tradingBalance, entryPrice);
         const margin = tradingBalance; // full balance is the margin for this trade
@@ -373,8 +404,8 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'skipped', message: 'Entry GTX not filled — skipping cycle.' };
         }
 
-        // 3. Compute TP and SL prices using dynamic ATR
-        const tpPrice       = tickRound(isBuy ? actualEntry + STRATEGY.TP_MOVE    : actualEntry - STRATEGY.TP_MOVE);
+        // 3. Compute TP and SL prices
+        const tpPrice       = tickRound(isBuy ? actualEntry + tpMove : actualEntry - tpMove);
         const slDistance    = calcSlDistance(signal.atr5m);
         const slPrice       = tickRound(isBuy ? actualEntry - slDistance           : actualEntry + slDistance);
         const slBackupPrice = tickRound(isBuy ? slPrice     - STRATEGY.SL_BACKUP_EXTRA : slPrice + STRATEGY.SL_BACKUP_EXTRA);
@@ -462,7 +493,7 @@ export async function executeBinanceTrade(
             slBackupId,
         };
 
-        const grossEstimate = size * STRATEGY.TP_MOVE;
+        const grossEstimate = size * tpMove;
         return {
             success:     true,
             outcome:     'orders_placed',

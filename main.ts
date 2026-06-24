@@ -295,14 +295,14 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 stats.fills++;
                 applyTradeResult(real.pnl);
 
-                // Cancel any remaining open orders from this trade
-                await cancelAllOrders();
+                // Cancel any remaining open orders — pass slAlgoId so algo SL is also cancelled
+                await cancelAllOrders(trade.slAlgoId);
                 clearActiveTrade();
                 console.log(`[Health] ${outcome.toUpperCase()} confirmed | PnL: $${real.pnl.toFixed(4)} | Fills: ${real.trades}`);
                 return outcome;
             }
             // Couldn't verify — clean up and alert
-            await cancelAllOrders();
+            await cancelAllOrders(trade.slAlgoId);
             clearActiveTrade();
             await sendAlert(`⚠️ Position closed but PnL unverifiable — stats NOT updated for this trade. Check Binance.`);
             return 'none';
@@ -326,6 +326,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
             ? pos.currentPrice - trade.entryPrice
             : trade.entryPrice - pos.currentPrice;
         console.log(`[Scratch] ⏱ Trade open ${(ageMs/1000).toFixed(0)}s — scratching at $${pos.currentPrice.toFixed(2)} (P&L: $${(profit * trade.size).toFixed(4)})`);
+        await cancelAllOrders(trade.slAlgoId);
         await triggerEmergencyClose(trade.side, trade.size, `Scratch timeout: ${(ageMs/1000).toFixed(0)}s elapsed`);
         const real = await getRealizedPnlSince(trade.openedAt - 2_000);
         const pnl  = real ? real.pnl : profit * trade.size;
