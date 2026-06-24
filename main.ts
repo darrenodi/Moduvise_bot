@@ -264,6 +264,30 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
         recentSwingLow:       swingLow,
     };
 
+    // ── Order book walls ─────────────────────────────────────────────────────
+    // A "wall" is a price level where resting notional exceeds WALL_THRESHOLD_USD.
+    // We scan all 20 levels on each side and collect qualifying levels.
+    // These are passed to getDirection() so the wall-check gate has real data.
+    const WALL_THRESHOLD_USD = 20_000; // minimum notional to count as a wall
+
+    const bidWalls = bookRes.bids
+        .map((level: string[]) => ({
+            price:       Number(level[0]),
+            notionalUsd: Number(level[0]) * Number(level[1]),
+        }))
+        .filter((w: { price: number; notionalUsd: number }) => w.notionalUsd >= WALL_THRESHOLD_USD);
+
+    const askWalls = bookRes.asks
+        .map((level: string[]) => ({
+            price:       Number(level[0]),
+            notionalUsd: Number(level[0]) * Number(level[1]),
+        }))
+        .filter((w: { price: number; notionalUsd: number }) => w.notionalUsd >= WALL_THRESHOLD_USD);
+
+    if (bidWalls.length > 0 || askWalls.length > 0) {
+        console.log(`[Book] Walls detected — bids: ${bidWalls.length} (top: $${bidWalls[0]?.price.toFixed(2)} $${(bidWalls[0]?.notionalUsd/1000).toFixed(0)}K) | asks: ${askWalls.length} (top: $${askWalls[0]?.price.toFixed(2)} $${(askWalls[0]?.notionalUsd/1000).toFixed(0)}K)`);
+    }
+
     return [{
         symbol:       DISPLAY_SYMBOL,
         price:        currentPrice,
@@ -273,7 +297,7 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
         indicators:   liveIndicators,
         regime,
         regimeReason,
-        orderBook:    { bidWalls: [], askWalls: [] },
+        orderBook:    { bidWalls, askWalls },
     }];
 }
 

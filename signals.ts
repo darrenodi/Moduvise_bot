@@ -134,40 +134,187 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 }
 
 // ─── DIRECTION SIGNAL ─────────────────────────────────────────────────────────
-// High-frequency scalping direction is determined by two fast signals:
-//   1. Order book imbalance (primary) — most predictive for sub-$1 moves
-//   2. 5m momentum (confirmation)
+// Fill-quality prediction: before asking WHICH direction, ask WHETHER this
+// market will produce a safe fill. A limit fill only profits when the market
+// retraces gently into the order and bounces. It loses when the market is
+// aggressively breaking through. Three gates guard against the latter:
 //
-// No multi-signal ensemble here: at a $0.20 target, we need to fire
-// frequently. The dip filter is the gate, not a high-conviction threshold.
-function getDirection(ind: TechnicalIndicators): { direction: SignalDirection; reasoning: string; confidence: number } {
+//   Gate 1 — ATR ceiling:     if market is moving faster than 2.5× normal
+//             candle range, we are in a trending / news-driven move. $0.05 TP
+//             is noise relative to the move size → sit out.
+//
+//   Gate 2 — Momentum trap:   a strong directional momentum5m means the market
+//             is already running. Entering against it (as a limit must) risks
+//             filling into a freight train rather than a micro-oscillation.
+//             Allow mildly adverse momentum (retracement); block strong momentum.
+//
+//   Gate 3 — Wall check:      only enter long if there is a resting bid wall
+//             within $0.50 below entry to act as a bounce cushion. Same for
+//             shorts and ask walls. If the book below (above) is thin, a fill
+//             into us has nothing to stop further adverse movement.
+//
+//   Gate 4 — Genuine neutral: if OB imbalance is weak AND momentum is weak,
+//             there is no edge. Return neutral — do NOT trade just to trade.
+//             This replaces the old always-fire ranging fallback which was the
+//             primary cause of losses in low-conviction choppy conditions.
+//
+// The dip/rip regime check in generateSignals() is the outer gate — it runs
+// before getDirection() and blocks all signals during large fast moves.
+function getDirection(
+    ind:      TechnicalIndicators,
+    orderBook: MarketData['orderBook'],
+    price:    number,
+): { direction: SignalDirection; reasoning: string; confidence: number } {
     const ob  = ind.obImbalance;
     const m5  = ind.momentum5m;
 
-    // Hard block: spread too wide to clear even $0.20 profit (rare on XAUUSDT)
+    // ── GATE 1: ATR ceiling ───────────────────────────────────────────────────
+    // When ATR > $2.50, the market is moving too fast for a $0.05-$0.20 scalp.
+    // A single candle's noise exceeds our entire TP — fills become lottery tickets.
+    const ATR_CEILING = 2.50;
+    if (ind.atr5m > ATR_CEILING) {
+        return {
+            direction: 'neutral',
+            reasoning: `TRAP MARKET: ATR=$${ind.atr5m.toFixed(2)} > $${ATR_CEILING} ceiling. Sitting out.`,
+            confidence: 0,
+        };
+    }
+
+    // ── GATE 2: Spread ────────────────────────────────────────────────────────
+    // Spread >= $0.15 means we start the trade behind by more than 75% of TP.
     if (ind.spreadUsd >= 0.15) {
-        return { direction: 'neutral', reasoning: `SPREAD BLOCK: $${ind.spreadUsd.toFixed(3)} (max $0.15)`, confidence: 0 };
+        return {
+            direction: 'neutral',
+            reasoning: `SPREAD BLOCK: $${ind.spreadUsd.toFixed(3)} (max $0.15)`,
+            confidence: 0,
+        };
     }
 
-    // Strong OB imbalance — highest confidence signal
-    if (ob > 0.35) return { direction: 'long',  reasoning: `OB LONG: imbalance=${(ob*100).toFixed(0)}% buy pressure`,  confidence: ob };
-    if (ob < -0.35) return { direction: 'short', reasoning: `OB SHORT: imbalance=${(Math.abs(ob)*100).toFixed(0)}% sell pressure`, confidence: Math.abs(ob) };
+    // ── GATE 3: Genuine neutral — no weak-signal trades ───────────────────────
+    // If neither OB nor momentum shows meaningful conviction, there is no edge.
+    // Return neutral rather than gambling on noise. This replaces the old
+    // always-fire ranging fallback which never returned neutral and was the
+    // root cause of losses in low-conviction choppy conditions.
+    const obWeak  = ob > -0.15 && ob < 0.15;
+    const momWeak = m5 > -0.10 && m5 < 0.10;
+    if (obWeak && momWeak) {
+        return {
+            direction: 'neutral',
+            reasoning: `LOW CONVICTION: ob=${(ob*100).toFixed(0)}% mom=$${m5.toFixed(2)} — no edge, skipping.`,
+            confidence: 0,
+        };
+    }
 
+    // ── DIRECTION DETERMINATION ────────────────────────────────────────────────
+    // Resolve preferred direction from OB imbalance (primary) + momentum (confirmation).
+
+    let preferredDir: SignalDirection = 'neutral';
+    let preferredConf = 0;
+    let preferredReason = '';
+
+    // Strong OB signal — fire without requiring momentum confirmation
+    if (ob > 0.35) {
+        preferredDir    = 'long';
+        preferredConf   = ob;
+        preferredReason = `OB LONG: imbalance=${(ob*100).toFixed(0)}% buy pressure`;
+    } else if (ob < -0.35) {
+        preferredDir    = 'short';
+        preferredConf   = Math.abs(ob);
+        preferredReason = `OB SHORT: imbalance=${(Math.abs(ob)*100).toFixed(0)}% sell pressure`;
     // OB + momentum agreement
-    if (ob > 0.15 && m5 > 0.05) return { direction: 'long',  reasoning: `OB+MOM LONG: ob=${(ob*100).toFixed(0)}% mom=$${m5.toFixed(2)}`,        confidence: ob };
-    if (ob < -0.15 && m5 < -0.05) return { direction: 'short', reasoning: `OB+MOM SHORT: ob=${(Math.abs(ob)*100).toFixed(0)}% mom=$${m5.toFixed(2)}`, confidence: Math.abs(ob) };
-
+    } else if (ob > 0.15 && m5 > 0.05) {
+        preferredDir    = 'long';
+        preferredConf   = ob;
+        preferredReason = `OB+MOM LONG: ob=${(ob*100).toFixed(0)}% mom=$${m5.toFixed(2)}`;
+    } else if (ob < -0.15 && m5 < -0.05) {
+        preferredDir    = 'short';
+        preferredConf   = Math.abs(ob);
+        preferredReason = `OB+MOM SHORT: ob=${(Math.abs(ob)*100).toFixed(0)}% mom=$${m5.toFixed(2)}`;
     // Momentum only
-    if (m5 > 0.05) return { direction: 'long',  reasoning: `MOM LONG: $${m5.toFixed(3)}/5m`,  confidence: 0.35 };
-    if (m5 < -0.05) return { direction: 'short', reasoning: `MOM SHORT: $${m5.toFixed(3)}/5m`, confidence: 0.35 };
-
-    // RANGING / no clear signal: still trade — user wants to catch micro-oscillations.
-    // In a ranging market the OB sign is the best available edge, even if weak.
-    // If OB is truly flat, default to the last known EMA direction.
-    if (ob >= 0) {
-        return { direction: 'long',  reasoning: `RANGE-LONG: ob=${(ob*100).toFixed(0)}% (market-making mode)`, confidence: 0.30 };
+    } else if (m5 > 0.10) {
+        preferredDir    = 'long';
+        preferredConf   = 0.30;
+        preferredReason = `MOM LONG: $${m5.toFixed(3)}/5m`;
+    } else if (m5 < -0.10) {
+        preferredDir    = 'short';
+        preferredConf   = 0.30;
+        preferredReason = `MOM SHORT: $${m5.toFixed(3)}/5m`;
+    } else {
+        // Reached here means one of OB or mom is non-weak but they disagree.
+        // Conflicting signals = no edge.
+        return {
+            direction: 'neutral',
+            reasoning: `CONFLICTING SIGNALS: ob=${(ob*100).toFixed(0)}% mom=$${m5.toFixed(2)} — disagreement, skipping.`,
+            confidence: 0,
+        };
     }
-    return { direction: 'short', reasoning: `RANGE-SHORT: ob=${(Math.abs(ob)*100).toFixed(0)}% (market-making mode)`, confidence: 0.30 };
+
+    // ── GATE 4: Momentum trap guard ───────────────────────────────────────────
+    // A limit buy fills when sellers push price DOWN to us. That's fine if the
+    // selling is mild (noise). It's dangerous if momentum is a strong downtrend —
+    // our fill would occur mid-breakdown, not mid-oscillation.
+    //
+    // Allow: mildly negative momentum for longs (retracement)
+    // Block: strongly negative momentum for longs (breakdown)
+    //
+    // Threshold: $0.50 on a 5m candle is ~1/5 of ATR at $2.50 ceiling —
+    // moderate but not extreme. Adjust via MOMENTUM_TRAP_USD if needed.
+    const MOMENTUM_TRAP_USD = 0.50;
+    if (preferredDir === 'long'  && m5 < -MOMENTUM_TRAP_USD) {
+        return {
+            direction: 'neutral',
+            reasoning: `MOMENTUM TRAP (LONG): 5m momentum=$${m5.toFixed(2)} — price breaking down, not retracing.`,
+            confidence: 0,
+        };
+    }
+    if (preferredDir === 'short' && m5 > MOMENTUM_TRAP_USD) {
+        return {
+            direction: 'neutral',
+            reasoning: `MOMENTUM TRAP (SHORT): 5m momentum=$${m5.toFixed(2)} — price spiking up, not retracing.`,
+            confidence: 0,
+        };
+    }
+
+    // ── GATE 5: Order book wall check ─────────────────────────────────────────
+    // A safe limit long fill requires a resting bid wall below us to bounce
+    // off. Without it, sellers who fill us keep selling through — no reversal.
+    // Same logic inverted for shorts and ask walls.
+    //
+    // Require at least one wall within $0.50 of current price with >= $20K notional.
+    // (Wall data is populated in main.ts buildLiveMarketData. If walls are empty
+    // this gate passes through — fail-open so a bad data cycle doesn't freeze the bot.)
+    const WALL_RANGE_USD     = 0.50;
+    const WALL_MIN_NOTIONAL  = 20_000;
+
+    if (preferredDir === 'long' && orderBook.bidWalls.length > 0) {
+        const nearWall = orderBook.bidWalls.find(
+            w => w.price >= price - WALL_RANGE_USD && w.notionalUsd >= WALL_MIN_NOTIONAL
+        );
+        if (!nearWall) {
+            return {
+                direction: 'neutral',
+                reasoning: `NO BID WALL: no wall >= $${WALL_MIN_NOTIONAL/1000}K within $${WALL_RANGE_USD} of price. Fill unprotected.`,
+                confidence: 0,
+            };
+        }
+        preferredReason += ` | bid wall @ $${nearWall.price.toFixed(2)} ($${(nearWall.notionalUsd/1000).toFixed(0)}K)`;
+    }
+
+    if (preferredDir === 'short' && orderBook.askWalls.length > 0) {
+        const nearWall = orderBook.askWalls.find(
+            w => w.price <= price + WALL_RANGE_USD && w.notionalUsd >= WALL_MIN_NOTIONAL
+        );
+        if (!nearWall) {
+            return {
+                direction: 'neutral',
+                reasoning: `NO ASK WALL: no wall >= $${WALL_MIN_NOTIONAL/1000}K within $${WALL_RANGE_USD} of price. Fill unprotected.`,
+                confidence: 0,
+            };
+        }
+        preferredReason += ` | ask wall @ $${nearWall.price.toFixed(2)} ($${(nearWall.notionalUsd/1000).toFixed(0)}K)`;
+    }
+
+    return { direction: preferredDir, reasoning: preferredReason, confidence: preferredConf };
 }
 
 // ─── SIGNAL DISPATCHER ────────────────────────────────────────────────────────
@@ -196,7 +343,7 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
             continue;
         }
 
-        const sig = getDirection(ind);
+        const sig = getDirection(ind, asset.orderBook, price);
         const leverage = Number(process.env.BOT_LEVERAGE ?? 100);
 
         if (sig.direction !== 'neutral') {
