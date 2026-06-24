@@ -15,6 +15,7 @@ import {
     getRealizedPnlSince,
     sendAlert,
     calcSize,
+    placeReduceOnlyLimit,
 } from './executeTrade.js';
 
 dotenv.config();
@@ -303,8 +304,14 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
 
 // ─── POSITION HEALTH CHECK ────────────────────────────────────────────────────
 // Uses Binance's actual realizedPnl from userTrades — not guessing from
-// current price vs stored TP/SL values (which was the bug in the original code
-// that could silently misclassify a loss as a win).
+// current price vs stored TP/SL values.
+//
+// TWO-STAGE EXIT:
+//   Phase 1 — TP1 (full target, 90s window): placed immediately after fill.
+//   Phase 2 — TP2 (rescue limit $0.10 from entry, 30s window): placed when
+//             TP1 times out. Maker order — no fee if it fills.
+//   Phase 3 — Scratch (market exit): if TP2 also times out, exit at market.
+//             Fee ~$0.008 at current sizes. Hard cap: 120s total.
 async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     const pos   = await getOpenPositionDetails();
     const trade = getActiveTrade();
@@ -318,14 +325,11 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 else                  stats.slHits++;
                 stats.fills++;
                 applyTradeResult(real.pnl);
-
-                // Cancel any remaining open orders — pass slAlgoId so algo SL is also cancelled
                 await cancelAllOrders(trade.slAlgoId);
                 clearActiveTrade();
                 console.log(`[Health] ${outcome.toUpperCase()} confirmed | PnL: $${real.pnl.toFixed(4)} | Fills: ${real.trades}`);
                 return outcome;
             }
-            // Couldn't verify — clean up and alert
             await cancelAllOrders(trade.slAlgoId);
             clearActiveTrade();
             await sendAlert(`⚠️ Position closed but PnL unverifiable — stats NOT updated for this trade. Check Binance.`);
@@ -334,27 +338,94 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         return 'none';
     }
 
-    if (!trade) return 'open'; // manual position outside bot
+    if (!trade) return 'open';
 
-    const ageMs = Date.now() - trade.openedAt;
+    const ageMs     = Date.now() - trade.openedAt;
+    const isBuy     = trade.side === 'long';
+    const closeSide = isBuy ? 'SELL' : 'BUY';
 
-    // SCRATCH TIMEOUT: if the position hasn't hit TP in SCRATCH_TIMEOUT_MS (45s),
-    // exit at market for near-zero cost rather than holding until the SL fires.
-    // This is the most impactful change based on the historical data:
-    // — 24 winning trades averaged ~$0.009 profit each ($0.217 total)
-    // — 2 losing trades averaged -$0.689 each (-$1.378 total)
-    // A position that drifts for 45 seconds isn't the one we wanted; cut it early.
-    const SCRATCH_MS = Number(process.env.SCRATCH_TIMEOUT_MS ?? 86400000);
-    if (ageMs > SCRATCH_MS) {
-        const profit = trade.side === 'long'
+    // ── PHASE 2: already in TP2 rescue window ────────────────────────────────
+    if (trade.tp2Phase) {
+        const tp2Age = Date.now() - (trade.tp2StartedAt ?? Date.now());
+        const TP2_MS = Number(process.env.TP2_TIMEOUT_MS ?? 30_000);
+        if (tp2Age < TP2_MS) return 'open'; // still waiting for TP2 to fill
+
+        // TP2 timed out — scratch at market
+        const profit = isBuy
             ? pos.currentPrice - trade.entryPrice
             : trade.entryPrice - pos.currentPrice;
-        console.log(`[Scratch] ⏱ Trade open ${(ageMs/1000).toFixed(0)}s — scratching at $${pos.currentPrice.toFixed(2)} (P&L: $${(profit * trade.size).toFixed(4)})`);
+        console.log(
+            `[Scratch] ⏱ TP2 timed out (${(tp2Age/1000).toFixed(0)}s) — ` +
+            `market exit @ $${pos.currentPrice.toFixed(2)} ` +
+            `(est P&L: $${(profit * trade.size).toFixed(4)})`
+        );
         await cancelAllOrders(trade.slAlgoId);
-        await triggerEmergencyClose(trade.side, trade.size, `Scratch timeout: ${(ageMs/1000).toFixed(0)}s elapsed`);
+        await triggerEmergencyClose(trade.side, trade.size, `TP2 timeout ${(tp2Age/1000).toFixed(0)}s`);
         const real = await getRealizedPnlSince(trade.openedAt - 2_000);
         const pnl  = real ? real.pnl : profit * trade.size;
-        if (pnl >= 0) { stats.tpHits++; } else { stats.slHits++; }
+        if (pnl >= 0) stats.tpHits++; else stats.slHits++;
+        stats.fills++;
+        applyTradeResult(pnl);
+        clearActiveTrade();
+        await sendAlert(`⏱ Scratched (TP2 timeout) | ${trade.side.toUpperCase()} | PnL: $${pnl.toFixed(4)}`);
+        return pnl >= 0 ? 'tp' : 'sl';
+    }
+
+    // ── PHASE 1 → 2 transition: TP1 timed out ────────────────────────────────
+    const TP1_MS = Number(process.env.TP1_TIMEOUT_MS ?? 90_000);
+    if (ageMs >= TP1_MS) {
+        // Cancel TP1
+        if (trade.tpOrderId && trade.tpOrderId > 0) {
+            try { await cancelAlgoOrder(trade.tpOrderId); } catch { /* may be gone */ }
+        }
+        try { await cancelAllOrders(); } catch { /* belt-and-suspenders */ }
+
+        // Place TP2 rescue limit — maker, $0.10 from entry
+        const TP2_OFFSET = Number(process.env.TP2_OFFSET ?? 0.10);
+        const tp2Price   = Math.round((isBuy
+            ? trade.entryPrice + TP2_OFFSET
+            : trade.entryPrice - TP2_OFFSET) * 100) / 100;
+
+        let tp2OrderId = 0;
+        try {
+            tp2OrderId = await placeReduceOnlyLimit(closeSide, tp2Price, trade.size);
+            console.log(
+                `[TP2] 🔄 TP1 timeout (${(ageMs/1000).toFixed(0)}s) — ` +
+                `rescue limit @ $${tp2Price.toFixed(2)} | entry $${trade.entryPrice.toFixed(2)} | id=${tp2OrderId}`
+            );
+            await sendAlert(`⏳ TP1 timeout | Rescue TP2 @ $${tp2Price.toFixed(2)} | ${trade.side.toUpperCase()}`);
+        } catch (e: any) {
+            // TP2 placement failed — go straight to scratch
+            console.error(`[TP2] Placement failed: ${e.message} — scratching immediately`);
+            await triggerEmergencyClose(trade.side, trade.size, 'TP2 placement failed');
+            const profit = isBuy ? pos.currentPrice - trade.entryPrice : trade.entryPrice - pos.currentPrice;
+            const real   = await getRealizedPnlSince(trade.openedAt - 2_000);
+            const pnl    = real ? real.pnl : profit * trade.size;
+            if (pnl >= 0) stats.tpHits++; else stats.slHits++;
+            stats.fills++;
+            applyTradeResult(pnl);
+            clearActiveTrade();
+            return pnl >= 0 ? 'tp' : 'sl';
+        }
+
+        // Advance state to TP2 phase
+        (trade as any).tp2Phase     = true;
+        (trade as any).tp2StartedAt = Date.now();
+        (trade as any).tp2OrderId   = tp2OrderId;
+        (trade as any).tp2Price     = tp2Price;
+        return 'open';
+    }
+
+    // ── HARD BACKSTOP ─────────────────────────────────────────────────────────
+    const SCRATCH_MS = Number(process.env.SCRATCH_TIMEOUT_MS ?? 130_000);
+    if (ageMs > SCRATCH_MS) {
+        const profit = isBuy ? pos.currentPrice - trade.entryPrice : trade.entryPrice - pos.currentPrice;
+        console.log(`[Scratch] ⏱ Hard backstop at ${(ageMs/1000).toFixed(0)}s — market exit @ $${pos.currentPrice.toFixed(2)}`);
+        await cancelAllOrders(trade.slAlgoId);
+        await triggerEmergencyClose(trade.side, trade.size, `Hard backstop: ${(ageMs/1000).toFixed(0)}s`);
+        const real = await getRealizedPnlSince(trade.openedAt - 2_000);
+        const pnl  = real ? real.pnl : profit * trade.size;
+        if (pnl >= 0) stats.tpHits++; else stats.slHits++;
         stats.fills++;
         applyTradeResult(pnl);
         clearActiveTrade();

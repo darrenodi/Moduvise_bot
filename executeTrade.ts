@@ -33,10 +33,28 @@ const STRATEGY = {
     SL_MIN:             0.50,   // never closer than $0.50 (slippage buffer — was incorrectly $30)
     SL_BACKUP_EXTRA:    1.2,   // backup stop $1.00 further than primary
 
-    // Scratch timeout: exit at market if trade is still open after 45s without TP.
-    // This is the key improvement: a non-moving position costs ~$0 to exit early.
-    // Holding until the SL fires costs 7-22x more based on your historical data.
-    SCRATCH_TIMEOUT_MS: 86400000, // Cranks the timeout to days so it never triggers early
+    // ── Two-stage exit ────────────────────────────────────────────────────────
+    // Stage 1 (TP1): Full target resting limit. Stays live for TP1_TIMEOUT_MS.
+    //
+    // Stage 2 (TP2): If TP1 hasn't filled after TP1_TIMEOUT_MS (90s), cancel TP1
+    //   and replace with a tighter limit at entry + TP2_OFFSET from actual entry.
+    //   This sits close to current price — if the market is hovering near entry,
+    //   it fills as a maker at near-breakeven instead of holding for a big move
+    //   that isn't coming.
+    //   Give TP2 TP2_TIMEOUT_MS (30s) to fill.
+    //
+    // Stage 3 (Scratch): If TP2 also hasn't filled after TP2_TIMEOUT_MS, the
+    //   market is moving against us and neither limit will fill. Cancel TP2 and
+    //   exit at market (taker). Taker fee at this size is ~$0.008 — cheap
+    //   compared to letting the SL fire at $0.50–$3.00 adverse.
+    //
+    // Total max trade duration: 90s + 30s = 120s before guaranteed exit.
+    TP1_TIMEOUT_MS:   90_000,  // 90s — how long to wait for full TP
+    TP2_OFFSET:       0.10,    // TP2 sits $0.10 from entry (near-breakeven capture)
+    TP2_TIMEOUT_MS:   30_000,  // 30s — how long to wait for the rescue limit
+
+    // Hard backstop: market exit if both TP stages somehow still open
+    SCRATCH_TIMEOUT_MS: 130_000, // 130s = 90 + 30 + 10s buffer
 
     GOLD_TICK:        0.01,   // XAUUSDT tick size (Binance contract spec)
     MIN_QTY:          0.001,  // minimum order quantity
@@ -74,19 +92,24 @@ export interface TradeResult {
 }
 
 export interface ActiveTrade {
-    entryPrice:   number;
-    tpPrice:      number;
-    slPrice:      number;
+    entryPrice:    number;
+    tpPrice:       number;
+    slPrice:       number;
     slBackupPrice: number;
-    side:         'long' | 'short';
-    size:         number;
-    margin:       number;     // margin used for this trade (for SL % calc)
-    posVal:       number;
-    leverage:     number;
-    openedAt:     number;
-    tpOrderId?:   number;
-    slAlgoId?:    number;
-    slBackupId?:  number;
+    side:          'long' | 'short';
+    size:          number;
+    margin:        number;      // margin used for this trade (for SL % calc)
+    posVal:        number;
+    leverage:      number;
+    openedAt:      number;
+    tpOrderId?:    number;
+    slAlgoId?:     number;
+    slBackupId?:   number;
+    // Two-stage exit tracking
+    tp2Phase:      boolean;     // true once we have switched to TP2 rescue limit
+    tp2StartedAt?: number;      // when TP2 was placed (for TP2 timeout)
+    tp2OrderId?:   number;      // order id of the rescue limit
+    tp2Price?:     number;      // price of the rescue limit (for logging)
 }
 
 let _activeTrade: ActiveTrade | null = null;
@@ -290,7 +313,27 @@ function qtyFloor(qty: number): number {
     return Math.max(STRATEGY.MIN_QTY, steps * STRATEGY.QTY_STEP);
 }
 
-// ─── POSITION SIZING ──────────────────────────────────────────────────────────
+// ─── TP2 RESCUE LIMIT HELPER ─────────────────────────────────────────────────
+// Called by checkPositionHealth() in main.ts when TP1 times out.
+// Places a resting GTC limit reduceOnly order and returns the orderId.
+// Keeps API signing logic in one place instead of duplicating in main.ts.
+export async function placeReduceOnlyLimit(
+    side:     string,
+    price:    number,
+    quantity: number,
+): Promise<number> {
+    const res = await privatePost('/fapi/v1/order', {
+        symbol:      STRATEGY.SYMBOL,
+        side,
+        type:        'LIMIT',
+        timeInForce: 'GTC',
+        price:       price.toFixed(2),
+        quantity:    quantity.toFixed(3),
+        reduceOnly:  'true',
+    });
+    if (!res?.orderId) throw new Error(`TP2 order rejected: ${JSON.stringify(res)}`);
+    return res.orderId as number;
+}
 // Uses full trading balance × leverage, floored to minimum notional.
 // "we want to use all of that" — so 100% of balance per trade.
 export function calcSize(tradingBalance: number, price: number): number {
@@ -492,6 +535,7 @@ export async function executeBinanceTrade(
             tpOrderId,
             slAlgoId,
             slBackupId,
+            tp2Phase:      false,   // will be set true by checkPositionHealth when TP1 times out
         };
 
         const grossEstimate = size * tpMove;
