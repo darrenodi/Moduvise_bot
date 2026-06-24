@@ -171,7 +171,7 @@ function getDirection(
     // ── GATE 1: ATR ceiling ───────────────────────────────────────────────────
     // When ATR > $2.50, the market is moving too fast for a $0.05-$0.20 scalp.
     // A single candle's noise exceeds our entire TP — fills become lottery tickets.
-    const ATR_CEILING = 2.50;
+    const ATR_CEILING = 7.30;
     if (ind.atr5m > ATR_CEILING) {
         return {
             direction: 'neutral',
