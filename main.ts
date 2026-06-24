@@ -462,7 +462,7 @@ process.on('SIGTERM', async () => {
 
 // ─── STARTUP ─────────────────────────────────────────────────────────────────
 loadState();
-const leverage = Number(process.env.BOT_LEVERAGE ?? 50);
+const leverage = Number(process.env.BOT_LEVERAGE ?? 100);
 console.log(`\n${'═'.repeat(70)}`);
 console.log(`  MODUVISE XAUUSDT SCALPER — LIVE BINANCE`);
 console.log(`  ENVIRONMENT : ${ENVIRONMENT}`);

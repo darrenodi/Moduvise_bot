@@ -197,7 +197,7 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
         }
 
         const sig = getDirection(ind);
-        const leverage = Number(process.env.BOT_LEVERAGE ?? 50);
+        const leverage = Number(process.env.BOT_LEVERAGE ?? 100);
 
         if (sig.direction !== 'neutral') {
             console.log(`[Signal] 🎯 ${sig.direction.toUpperCase()} | ${sig.reasoning} | ADX=${ind.adx.toFixed(1)} ATR=$${ind.atr5m.toFixed(2)}`);

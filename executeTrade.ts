@@ -14,14 +14,14 @@ const STRATEGY = {
     // from market in trending conditions and they never filled.
     // Long entry  = bid - ENTRY_TICK  (sits 1 tick below best bid, fills fast)
     // Short entry = ask + ENTRY_TICK  (sits 1 tick above best ask, fills fast)
-    ENTRY_TICK:         0.01,   // 1 minimum tick from bid/ask
+    ENTRY_TICK:         0.2,   // 1 minimum tick from bid/ask
 
     // TP: DYNAMIC — clamp(atr5m * TP_ATR_MULT, TP_MIN, TP_MAX)
     // Quiet market (ATR=$2): TP=$0.20. Active (ATR=$8): TP=$0.80. Volatile: up to $2.
     // User asked for $0.20-$2 range — this delivers it automatically based on volatility.
     TP_ATR_MULT:        0.10,
-    TP_MIN:             0.20,   // never less than $0.20
-    TP_MAX:             2.00,   // never more than $2.00
+    TP_MIN:             0.10,   // never less than $0.20
+    TP_MAX:             0.30,   // never more than $2.00
 
     // SL: DYNAMIC — placed at atr5m * ATR_SL_MULT from entry.
     // Replaces fixed "10% of margin" which at 50x = $8.60 SL on $0.20 TP.
@@ -45,7 +45,7 @@ const STRATEGY = {
     // Set BOT_LEVERAGE in .env — live XAUUSDT supports up to 50x.
     // They asked for high leverage; default 50. Bump to 100 only if Binance
     // confirms your account tier allows it for XAUUSDT at your position size.
-    LEVERAGE:         Number(process.env.BOT_LEVERAGE ?? 50),
+    LEVERAGE:         Number(process.env.BOT_LEVERAGE ?? 100),
 
     // Maker fee: user claims 0.00%. If your TradFi Perps promo has expired,
     // set MAKER_FEE_PCT=0.0002 in .env (standard 0.02% regular tier).
