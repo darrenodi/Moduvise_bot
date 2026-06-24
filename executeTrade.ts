@@ -20,8 +20,8 @@ const STRATEGY = {
     // Quiet market (ATR=$2): TP=$0.20. Active (ATR=$8): TP=$0.80. Volatile: up to $2.
     // User asked for $0.20-$2 range — this delivers it automatically based on volatility.
     TP_ATR_MULT:        0.10,
-    TP_MIN:             0.10,   // never less than $0.20
-    TP_MAX:             0.10,   // never more than $2.00
+    TP_MIN:             0.05,   // never less than $0.20
+    TP_MAX:             0.05,   // never more than $2.00
 
     // SL: DYNAMIC — placed at atr5m * ATR_SL_MULT from entry.
     // Replaces fixed "10% of margin" which at 50x = $8.60 SL on $0.20 TP.
