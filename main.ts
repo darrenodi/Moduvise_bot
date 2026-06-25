@@ -3,6 +3,7 @@ import * as fs    from 'fs';
 import { RSI, EMA, ADX, ATR } from 'technicalindicators';
 import { generateSignals, getSession, detectRegime, MARKET_SYMBOL, DISPLAY_SYMBOL } from './signals.js';
 import type { MarketData, TechnicalIndicators, GeneratedSignal } from './signals.js';
+import { startVelocityMonitor, getVelocityState } from './velocityMonitor.js';
 import {
     executeBinanceTrade,
     getAvailableBalance,
@@ -452,6 +453,7 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
         regime,
         regimeReason,
         orderBook:   { bidWalls, askWalls },
+        klines:      klinesRes,
     }];
 }
 
@@ -671,7 +673,8 @@ async function runCycle(): Promise<void> {
         }
 
         const assets  = await buildLiveMarketData(MARKET_SYMBOL);
-        const signals = await generateSignals(assets);
+        const velocity = getVelocityState();
+        const signals  = await generateSignals(assets, velocity);
         const signal  = signals[0];
         const asset   = assets[0];
 
@@ -780,4 +783,5 @@ sendAlert(
     `stack=$${tradingBalance.toFixed(4)} | banked=$${bankedBalance.toFixed(4)}`
 );
 
+startVelocityMonitor();
 runCycle().then(scheduleNext);
