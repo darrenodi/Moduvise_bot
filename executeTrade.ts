@@ -6,89 +6,59 @@ dotenv.config();
 
 // ─── STRATEGY PARAMETERS ──────────────────────────────────────────────────────
 const STRATEGY = {
-    SYMBOL:           MARKET_SYMBOL,
+    SYMBOL:     MARKET_SYMBOL,
 
-    // Entry offset: tight, spread-based.
-    // Place 1 tick inside the bid/ask — posts as a maker, fills on the next
-    // micro-oscillation. The old ATR-based $0.50 offset placed orders too far
-    // from market in trending conditions and they never filled.
-    // Long entry  = bid - ENTRY_TICK  (sits 1 tick below best bid, fills fast)
-    // Short entry = ask + ENTRY_TICK  (sits 1 tick above best ask, fills fast)
-    ENTRY_TICK:         0.5,   // 1 minimum tick from bid/ask
+    // Entry: 1 tick inside bid/ask — posts as maker, fills on next micro-oscillation.
+    ENTRY_TICK: 0.05,
 
-    // TP: DYNAMIC — clamp(atr5m * TP_ATR_MULT, TP_MIN, TP_MAX)
-    // Quiet market (ATR=$2): TP=$0.20. Active (ATR=$5): TP=$0.50. Cap at $1.00.
-    // Both TP_MIN and TP_MAX were previously set to $0.05, which made the ATR
-    // multiplier meaningless — TP was always $0.05 regardless of volatility.
-    TP_ATR_MULT:        0.10,
-    TP_MIN:             0.05,   // floor: never less than $0.05 (minimum viable scalp)
-    TP_MAX:             1.00,   // ceiling: cap at $1.00 (avoid greed in fast markets)
+    // TP: dynamic — clamp(atr5m * TP_ATR_MULT, TP_MIN, TP_MAX)
+    TP_ATR_MULT:  0.10,
+    TP_MIN:       0.05,   // floor: never less than $0.05
+    TP_MAX:       1.00,   // ceiling: never more than $1.00
 
-    // SL: DYNAMIC — placed at atr5m * ATR_SL_MULT from entry.
-    // Replaces fixed "10% of margin" which at 50x = $8.60 SL on $0.20 TP.
-    // Your real statement showed that ratio guaranteed net loss at any realistic WR.
-    // ATR-based SL: $3 ATR -> $4.50 SL. Still asymmetric but anchored to volatility.
-    // The SCRATCH_TIMEOUT below cuts it much earlier if price just drifts.
-    ATR_SL_MULT:        1.50,
-    SL_MIN:             0.50,   // never closer than $0.50 (slippage buffer — was incorrectly $30)
-    SL_BACKUP_EXTRA:    1.2,   // backup stop $1.00 further than primary
+    // SL: dynamic — clamp(atr5m * ATR_SL_MULT, SL_MIN, no ceiling)
+    ATR_SL_MULT:      1.50,
+    SL_MIN:           0.50,  // never closer than $0.50
+    SL_BACKUP_EXTRA:  1.20,  // backup stop $1.20 past primary
 
     // ── Two-stage exit ────────────────────────────────────────────────────────
-    // Stage 1 (TP1): Full target resting limit. Stays live for TP1_TIMEOUT_MS.
-    //
-    // Stage 2 (TP2): If TP1 hasn't filled after TP1_TIMEOUT_MS (90s), cancel TP1
-    //   and replace with a tighter limit at entry + TP2_OFFSET from actual entry.
-    //   This sits close to current price — if the market is hovering near entry,
-    //   it fills as a maker at near-breakeven instead of holding for a big move
-    //   that isn't coming.
-    //   Give TP2 TP2_TIMEOUT_MS (30s) to fill.
-    //
-    // Stage 3 (Scratch): If TP2 also hasn't filled after TP2_TIMEOUT_MS, the
-    //   market is moving against us and neither limit will fill. Cancel TP2 and
-    //   exit at market (taker). Taker fee at this size is ~$0.008 — cheap
-    //   compared to letting the SL fire at $0.50–$3.00 adverse.
-    //
-    // Total max trade duration: 90s + 30s = 120s before guaranteed exit.
-    TP1_TIMEOUT_MS:   90_000,  // 90s — how long to wait for full TP
-    TP2_OFFSET:       0.10,    // TP2 sits $0.10 from entry (near-breakeven capture)
-    TP2_TIMEOUT_MS:   30_000,  // 30s — how long to wait for the rescue limit
+    // Phase 1 — TP1: full target resting limit, lives for TP1_TIMEOUT_MS (90s).
+    // Phase 2 — TP2: if TP1 times out, cancel it and place a rescue limit at
+    //           entry ± TP2_OFFSET ($0.10). Maker order, near-breakeven capture.
+    //           Lives for TP2_TIMEOUT_MS (30s).
+    // Phase 3 — Scratch: if TP2 also times out, market exit. Fee ~$0.008 at
+    //           current sizes. Hard cap: 120s total trade lifetime.
+    TP1_TIMEOUT_MS:   90_000,
+    TP2_OFFSET:       0.10,
+    TP2_TIMEOUT_MS:   30_000,
+    SCRATCH_TIMEOUT_MS: 130_000,  // hard backstop — 90 + 30 + 10s buffer
 
-    // Hard backstop: market exit if both TP stages somehow still open
-    SCRATCH_TIMEOUT_MS: 130_000, // 130s = 90 + 30 + 10s buffer
+    GOLD_TICK:    0.01,
+    MIN_QTY:      0.001,
+    QTY_STEP:     0.001,
+    MIN_NOTIONAL: 5.0,
 
-    GOLD_TICK:        0.01,   // XAUUSDT tick size (Binance contract spec)
-    MIN_QTY:          0.001,  // minimum order quantity
-    QTY_STEP:         0.001,  // quantity step size
-    MIN_NOTIONAL:     5.0,    // Binance USDⓈ-M minimum notional (5 USDT)
-
-    // Set BOT_LEVERAGE in .env — live XAUUSDT supports up to 50x.
-    // They asked for high leverage; default 50. Bump to 100 only if Binance
-    // confirms your account tier allows it for XAUUSDT at your position size.
-    LEVERAGE:         Number(process.env.BOT_LEVERAGE ?? 100),
-
-    // Maker fee: user claims 0.00%. If your TradFi Perps promo has expired,
-    // set MAKER_FEE_PCT=0.0002 in .env (standard 0.02% regular tier).
-    MAKER_FEE:        Number(process.env.MAKER_FEE_PCT ?? 0.0),
-    TAKER_FEE:        0.0002, // 0.02% for market/SL exits
-
-    FILL_TIMEOUT:     60_000, // 60s — tighter than before; fast market, fast decisions
-    MAX_SIGNAL_DRIFT: 2.00,   // skip if price moved >$2 since signal (wider for volatility)
+    LEVERAGE:      Number(process.env.BOT_LEVERAGE ?? 100),
+    MAKER_FEE:     Number(process.env.MAKER_FEE_PCT ?? 0.0),
+    TAKER_FEE:     0.0002,
+    FILL_TIMEOUT:  60_000,
+    MAX_SIGNAL_DRIFT: 2.00,
 } as const;
 
 // ─── INTERFACES ───────────────────────────────────────────────────────────────
 export type TradeOutcome = 'orders_placed' | 'tp_confirmed' | 'sl_triggered' | 'skipped' | 'error';
 
 export interface TradeResult {
-    success:       boolean;
-    outcome:       TradeOutcome;
-    entryPrice?:   number;
-    tpPrice?:      number;
-    slPrice?:      number;
-    grossProfit?:  number;
-    netProfit?:    number;
-    fees?:         number;
-    message?:      string;
-    fillTimeMs?:   number;
+    success:      boolean;
+    outcome:      TradeOutcome;
+    entryPrice?:  number;
+    tpPrice?:     number;
+    slPrice?:     number;
+    grossProfit?: number;
+    netProfit?:   number;
+    fees?:        number;
+    message?:     string;
+    fillTimeMs?:  number;
 }
 
 export interface ActiveTrade {
@@ -98,7 +68,7 @@ export interface ActiveTrade {
     slBackupPrice: number;
     side:          'long' | 'short';
     size:          number;
-    margin:        number;      // margin used for this trade (for SL % calc)
+    margin:        number;
     posVal:        number;
     leverage:      number;
     openedAt:      number;
@@ -106,10 +76,10 @@ export interface ActiveTrade {
     slAlgoId?:     number;
     slBackupId?:   number;
     // Two-stage exit tracking
-    tp2Phase:      boolean;     // true once we have switched to TP2 rescue limit
-    tp2StartedAt?: number;      // when TP2 was placed (for TP2 timeout)
-    tp2OrderId?:   number;      // order id of the rescue limit
-    tp2Price?:     number;      // price of the rescue limit (for logging)
+    tp2Phase:      boolean;    // true once we switched to TP2 rescue limit
+    tp2StartedAt?: number;     // when TP2 was placed
+    tp2OrderId?:   number;     // order id of the rescue limit
+    tp2Price?:     number;     // price of the rescue limit
 }
 
 let _activeTrade: ActiveTrade | null = null;
@@ -135,13 +105,12 @@ export async function sendAlert(message: string): Promise<void> {
     }
 }
 
-// ─── API INFRASTRUCTURE ────────────────────────────────────────────────────────
+// ─── API INFRASTRUCTURE ───────────────────────────────────────────────────────
 const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
 const BASE_URL    = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
-
-const API_KEY    = IS_TESTNET ? (process.env.BINANCE_BOT_API    ?? '') : (process.env.BINANCE_API_KEY    ?? '');
-const API_SECRET = IS_TESTNET ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.env.BINANCE_API_SECRET ?? '');
+const API_KEY     = IS_TESTNET ? (process.env.BINANCE_BOT_API    ?? '') : (process.env.BINANCE_API_KEY    ?? '');
+const API_SECRET  = IS_TESTNET ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.env.BINANCE_API_SECRET ?? '');
 
 function signedUrl(path: string, params: Record<string, string | number> = {}): string {
     const ts      = Date.now();
@@ -239,18 +208,13 @@ export async function getRealizedPnlSince(sinceMs: number): Promise<{ pnl: numbe
     }
 }
 
-// Cancel ALL orders on close: regular orders (TP, backup SL) AND the algo order
-// (primary SL). These are on DIFFERENT endpoints — the common mistake is only
-// calling allOpenOrders which leaves the algo SL running on the exchange.
 export async function cancelAllOrders(slAlgoId?: number): Promise<void> {
-    // 1. Cancel regular orders (TP limit, backup stop market)
     try {
         await privateDelete('/fapi/v1/allOpenOrders', { symbol: STRATEGY.SYMBOL });
         console.log('[Cleanup] Regular orders cancelled.');
     } catch (e: any) {
         console.error(`[Cleanup] Regular order cancel failed: ${e.message}`);
     }
-    // 2. Cancel the algo SL order — different endpoint, often missed
     if (slAlgoId && slAlgoId > 0) {
         try {
             await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId: slAlgoId });
@@ -259,12 +223,6 @@ export async function cancelAllOrders(slAlgoId?: number): Promise<void> {
             console.error(`[Cleanup] Algo SL cancel failed (id=${slAlgoId}): ${e.message}`);
         }
     }
-    // 3. Belt-and-suspenders: cancel ALL algo orders on symbol in case of orphans
-    try {
-        const algoOrders = await privateGet('/fapi/v1/openOrders', { symbol: STRATEGY.SYMBOL });
-        // Note: openOrders doesn't return algo orders — they live at /fapi/v1/algoOrders
-        // So we call that endpoint too
-    } catch { /* non-critical */ }
     try {
         const openAlgos = await privateGet('/fapi/v1/algoOrders/openOrders', { symbol: STRATEGY.SYMBOL });
         if (Array.isArray(openAlgos?.orders)) {
@@ -275,7 +233,7 @@ export async function cancelAllOrders(slAlgoId?: number): Promise<void> {
                 } catch { /* no-op */ }
             }
         }
-    } catch { /* endpoint may not exist on all account tiers */ }
+    } catch { /* non-critical */ }
 }
 
 export async function cancelAlgoOrder(algoId: number): Promise<void> {
@@ -284,7 +242,6 @@ export async function cancelAlgoOrder(algoId: number): Promise<void> {
     } catch { /* no-op if already gone */ }
 }
 
-// Emergency market close — last resort if SL orders fail
 export async function triggerEmergencyClose(side: 'long' | 'short', size: number, reason: string): Promise<void> {
     const closeSide = side === 'long' ? 'SELL' : 'BUY';
     console.log(`[EMERGENCY] 🛑 Market ${closeSide} ${size} XAU | ${reason}`);
@@ -304,19 +261,9 @@ export async function triggerEmergencyClose(side: 'long' | 'short', size: number
     }
 }
 
-function tickRound(price: number): number {
-    return Math.round(price / STRATEGY.GOLD_TICK) * STRATEGY.GOLD_TICK;
-}
-
-function qtyFloor(qty: number): number {
-    const steps = Math.floor(qty / STRATEGY.QTY_STEP);
-    return Math.max(STRATEGY.MIN_QTY, steps * STRATEGY.QTY_STEP);
-}
-
-// ─── TP2 RESCUE LIMIT HELPER ─────────────────────────────────────────────────
+// ─── TP2 RESCUE LIMIT ─────────────────────────────────────────────────────────
 // Called by checkPositionHealth() in main.ts when TP1 times out.
-// Places a resting GTC limit reduceOnly order and returns the orderId.
-// Keeps API signing logic in one place instead of duplicating in main.ts.
+// Resting GTC limit, reduceOnly. Returns orderId.
 export async function placeReduceOnlyLimit(
     side:     string,
     price:    number,
@@ -334,35 +281,38 @@ export async function placeReduceOnlyLimit(
     if (!res?.orderId) throw new Error(`TP2 order rejected: ${JSON.stringify(res)}`);
     return res.orderId as number;
 }
-// Uses full trading balance × leverage, floored to minimum notional.
-// "we want to use all of that" — so 100% of balance per trade.
+
+// ─── SIZING + PRICING ─────────────────────────────────────────────────────────
+function tickRound(price: number): number {
+    return Math.round(price / STRATEGY.GOLD_TICK) * STRATEGY.GOLD_TICK;
+}
+
+function qtyFloor(qty: number): number {
+    const steps = Math.floor(qty / STRATEGY.QTY_STEP);
+    return Math.max(STRATEGY.MIN_QTY, steps * STRATEGY.QTY_STEP);
+}
+
 export function calcSize(tradingBalance: number, price: number): number {
     const notional = tradingBalance * STRATEGY.LEVERAGE;
     const raw      = notional / price;
     let   size     = qtyFloor(raw);
-
-    // Enforce min notional ($5 USDT per Binance's rules)
     while (size * price < STRATEGY.MIN_NOTIONAL) {
         size = Math.round((size + STRATEGY.QTY_STEP) * 1000) / 1000;
     }
-
     return size;
 }
 
-// SL distance = clamp(atr5m * ATR_SL_MULT, SL_MIN, no ceiling)
-// Much tighter than the old "10% of margin" which was $8.60+ at 50x.
 function calcSlDistance(atr5m: number): number {
     return Math.max(STRATEGY.SL_MIN, atr5m * STRATEGY.ATR_SL_MULT);
 }
 
-// TP = clamp(atr5m * TP_ATR_MULT, TP_MIN, TP_MAX)
 function calcTpMove(atr5m: number): number {
     return Math.min(STRATEGY.TP_MAX, Math.max(STRATEGY.TP_MIN, atr5m * STRATEGY.TP_ATR_MULT));
 }
 
-// ─── MAIN EXECUTION ENGINE ───────────────────────────────────────────────────
+// ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
 export async function executeBinanceTrade(
-    signal: GeneratedSignal,
+    signal:         GeneratedSignal,
     tradingBalance: number,
 ): Promise<TradeResult> {
     if (signal.direction === 'neutral') return { success: false, outcome: 'skipped' };
@@ -379,8 +329,6 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'skipped', message: 'Position already open.' };
         }
 
-        // Fetch live book prices — use bid/ask directly for entry
-        // rather than last-price to ensure GTX doesn't cross the spread
         const livePrice = signal.market_price;
         const liveBid   = signal.bid;
         const liveAsk   = signal.ask;
@@ -390,7 +338,7 @@ export async function executeBinanceTrade(
         }
 
         if (tradingBalance <= 0) {
-            return { success: false, outcome: 'skipped', message: 'Trading balance is zero — balance exhausted.' };
+            return { success: false, outcome: 'skipped', message: 'Trading balance is zero.' };
         }
 
         // Set leverage
@@ -398,7 +346,6 @@ export async function executeBinanceTrade(
             await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
         } catch { /* already set */ }
 
-        // Entry: 1 tick inside bid/ask — tight maker order, fills on next micro-move
         const tpMove     = calcTpMove(signal.atr5m);
         const entryPrice = tickRound(
             isBuy ? liveBid - STRATEGY.ENTRY_TICK : liveAsk + STRATEGY.ENTRY_TICK
@@ -406,9 +353,9 @@ export async function executeBinanceTrade(
         console.log(`[Entry] bid=$${liveBid.toFixed(2)} ask=$${liveAsk.toFixed(2)} entry=$${entryPrice.toFixed(2)} TP=$${tpMove.toFixed(2)} ATR=$${signal.atr5m.toFixed(2)}`);
 
         const size   = calcSize(tradingBalance, entryPrice);
-        const margin = tradingBalance; // full balance is the margin for this trade
+        const margin = tradingBalance;
 
-        // 1. GTX maker entry order (0% fee if filled as maker)
+        // 1. GTX maker entry order
         const entryOrder = await privatePost('/fapi/v1/order', {
             symbol:      STRATEGY.SYMBOL,
             side,
@@ -422,12 +369,12 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'error', message: `GTX order rejected: ${JSON.stringify(entryOrder)}` };
         }
 
-        // 2. Poll for fill (tight timeout — if it doesn't fill fast, price moved)
+        // 2. Poll for fill
         const fillStart = Date.now();
         let   filled    = false;
         let   actualEntry = entryPrice;
         while (Date.now() - fillStart < STRATEGY.FILL_TIMEOUT) {
-            await new Promise(r => setTimeout(r, 1_000)); // 1s poll — was 300ms, cuts weight usage by 70% at no meaningful cost
+            await new Promise(r => setTimeout(r, 1_000));
             const check = await privateGet('/fapi/v1/order', {
                 symbol:  STRATEGY.SYMBOL,
                 orderId: entryOrder.orderId,
@@ -448,16 +395,16 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'skipped', message: 'Entry GTX not filled — skipping cycle.' };
         }
 
-        // 3. Compute TP and SL prices
+        // 3. Compute TP / SL prices
         const tpPrice       = tickRound(isBuy ? actualEntry + tpMove : actualEntry - tpMove);
         const slDistance    = calcSlDistance(signal.atr5m);
         const slPrice       = tickRound(isBuy ? actualEntry - slDistance           : actualEntry + slDistance);
         const slBackupPrice = tickRound(isBuy ? slPrice     - STRATEGY.SL_BACKUP_EXTRA : slPrice + STRATEGY.SL_BACKUP_EXTRA);
 
         console.log(`[Execution] ✅ ${direction.toUpperCase()} filled @ $${actualEntry.toFixed(2)} | Size: ${size} XAU`);
-        console.log(`[Execution] 🎯 TP: $${tpPrice.toFixed(2)} | 🛑 SL: $${slPrice.toFixed(2)} (${(slDistance).toFixed(2)} from entry) | Backup SL: $${slBackupPrice.toFixed(2)}`);
+        console.log(`[Execution] 🎯 TP: $${tpPrice.toFixed(2)} | 🛑 SL: $${slPrice.toFixed(2)} | Backup: $${slBackupPrice.toFixed(2)}`);
 
-        // 4. Resting TP limit order (LIMIT GTC — always posts, fills as maker)
+        // 4. TP1 resting limit
         let tpOrderId = 0;
         try {
             const tpOrder = await privatePost('/fapi/v1/order', {
@@ -472,10 +419,9 @@ export async function executeBinanceTrade(
             tpOrderId = tpOrder.orderId ?? 0;
         } catch (e: any) {
             console.error(`[TP] TP order failed: ${e.message}`);
-            // TP failure is not fatal — SL still protects us
         }
 
-        // 5. Primary SL — exchange-side conditional STOP_MARKET on mark price
+        // 5. Primary SL — algo conditional stop on mark price
         let slAlgoId = 0;
         try {
             const slOrder = await privatePost('/fapi/v1/algoOrder', {
@@ -489,30 +435,29 @@ export async function executeBinanceTrade(
                 reduceOnly:   'true',
             });
             slAlgoId = slOrder.algoId ?? 0;
-            console.log(`[SL] Primary SL established: algo id=${slAlgoId}`);
+            console.log(`[SL] Primary SL: algo id=${slAlgoId}`);
         } catch (e: any) {
             console.error(`[SL] Primary SL failed: ${e.message}`);
         }
 
-        // 6. Backup SL — regular STOP_MARKET $1 past primary, in case of gap
+        // 6. Backup SL — regular stop market past primary
         let slBackupId = 0;
         try {
             const backupOrder = await privatePost('/fapi/v1/order', {
-                symbol:     STRATEGY.SYMBOL,
-                side:       closeSide,
-                type:       'STOP_MARKET',
-                stopPrice:  slBackupPrice.toFixed(2),
-                quantity:   size.toFixed(3),
+                symbol:      STRATEGY.SYMBOL,
+                side:        closeSide,
+                type:        'STOP_MARKET',
+                stopPrice:   slBackupPrice.toFixed(2),
+                quantity:    size.toFixed(3),
                 workingType: 'MARK_PRICE',
-                reduceOnly: 'true',
+                reduceOnly:  'true',
             });
             slBackupId = backupOrder.orderId ?? 0;
-            console.log(`[SL] Backup SL established: order id=${slBackupId}`);
+            console.log(`[SL] Backup SL: order id=${slBackupId}`);
         } catch (e: any) {
             console.error(`[SL] Backup SL failed: ${e.message}`);
         }
 
-        // If NEITHER stop was placed and TP also failed — emergency close
         if (!slAlgoId && !slBackupId) {
             console.error('[SL] Both SL orders failed — emergency closing immediately.');
             await sendAlert(`🚨 Both SL orders failed on ${STRATEGY.SYMBOL} ${direction}. Emergency closing.`);
@@ -520,7 +465,7 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'error', message: 'SL placement failed, emergency closed.' };
         }
 
-        // Lock state
+        // Lock active trade state
         _activeTrade = {
             entryPrice:    actualEntry,
             tpPrice,
@@ -535,7 +480,7 @@ export async function executeBinanceTrade(
             tpOrderId,
             slAlgoId,
             slBackupId,
-            tp2Phase:      false,   // will be set true by checkPositionHealth when TP1 times out
+            tp2Phase:      false,
         };
 
         const grossEstimate = size * tpMove;
@@ -546,7 +491,7 @@ export async function executeBinanceTrade(
             tpPrice,
             slPrice,
             grossProfit: grossEstimate,
-            netProfit:   grossEstimate,  // maker fee = 0%
+            netProfit:   grossEstimate,
             fees:        0,
             fillTimeMs:  Date.now() - fillStart,
         };

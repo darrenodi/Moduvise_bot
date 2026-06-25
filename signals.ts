@@ -42,8 +42,8 @@ export interface TechnicalIndicators {
 export interface MarketData {
     symbol:      string;
     price:       number;
-    bid:         number;   // live best bid — used for entry offset instead of last price
-    ask:         number;   // live best ask
+    bid:         number;
+    ask:         number;
     change_24h:  number;
     indicators:  TechnicalIndicators;
     regime:      MarketRegime;
@@ -60,7 +60,7 @@ export interface GeneratedSignal {
     market_price:       number;
     bid:                number;
     ask:                number;
-    atr5m:              number;   // live ATR — used for dynamic entry offset and SL distance
+    atr5m:              number;
     target_move:        number;
     confidence:         number;
     reasoning:          string;
@@ -70,7 +70,6 @@ export interface GeneratedSignal {
 }
 
 // ─── SESSION MANAGEMENT ───────────────────────────────────────────────────────
-// Tighter cycles for high-frequency scalping
 export function getSession(): {
     name:       string;
     quality:    'PEAK' | 'HIGH' | 'LOW';
@@ -87,27 +86,21 @@ export function getSession(): {
 }
 
 // ─── DIP / RIP REGIME DETECTION ───────────────────────────────────────────────
-// "The only time we are not going to trade is when gold is taking huge dips."
-// We also pause on parabolic rips — entering long into a spike is equally
-// dangerous on a $0.20 target with fast reversal risk.
-//
-// Detection: if price moved more than DIP_ATR_MULT × ATR over the last
-// DIP_CANDLES 5-minute candles, we consider it a regime event and pause.
-const DIP_ATR_MULT  = 2.5;             // 2.5× ATR drop in 3 candles = huge dip
-const RIP_ATR_MULT  = 2.0;             // 2.0× ATR rip = pause entering longs
-const DIP_CANDLES   = 3;               // look back 3 × 5m = 15 minutes
-const DIP_PAUSE_MS  = 10 * 60 * 1000; // sit out 10 minutes after detection
+const DIP_ATR_MULT  = 2.5;
+const RIP_ATR_MULT  = 2.0;
+const DIP_CANDLES   = 3;
+const DIP_PAUSE_MS  = 10 * 60 * 1000;
 
 let _dipPauseUntil = 0;
 
 export function detectRegime(closes: number[], atr5m: number): { regime: MarketRegime; reason: string } {
     if (closes.length < DIP_CANDLES + 1) return { regime: 'normal', reason: 'Insufficient history' };
 
-    const window = closes.slice(-(DIP_CANDLES + 1));
+    const window     = closes.slice(-(DIP_CANDLES + 1));
     const startPrice = window[0];
     const endPrice   = window[window.length - 1];
     const move       = endPrice - startPrice;
-    const threshold  = atr5m; // ATR is already per candle
+    const threshold  = atr5m;
 
     if (move < -(DIP_ATR_MULT * threshold)) {
         _dipPauseUntil = Date.now() + DIP_PAUSE_MS;
@@ -118,7 +111,7 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
     }
 
     if (move > (RIP_ATR_MULT * threshold)) {
-        _dipPauseUntil = Date.now() + (DIP_PAUSE_MS / 2); // 5 min pause on rip
+        _dipPauseUntil = Date.now() + (DIP_PAUSE_MS / 2);
         return {
             regime: 'rip',
             reason: `PARABOLIC RIP: +$${move.toFixed(2)} in ${DIP_CANDLES} candles (${(move/threshold).toFixed(1)}× ATR). Pausing 5 min.`
@@ -134,44 +127,26 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 }
 
 // ─── DIRECTION SIGNAL ─────────────────────────────────────────────────────────
-// Fill-quality prediction: before asking WHICH direction, ask WHETHER this
-// market will produce a safe fill. A limit fill only profits when the market
-// retraces gently into the order and bounces. It loses when the market is
-// aggressively breaking through. Three gates guard against the latter:
+// Five gates before any signal fires:
 //
-//   Gate 1 — ATR ceiling:     if market is moving faster than 2.5× normal
-//             candle range, we are in a trending / news-driven move. $0.05 TP
-//             is noise relative to the move size → sit out.
+//  Gate 1 — ATR ceiling ($2.50): market moving too fast for micro-scalp, sit out.
+//  Gate 2 — Spread block ($0.15): can't clear TP if spread eats it.
+//  Gate 3 — Genuine neutral: both OB and momentum weak = no edge, don't trade.
+//  Gate 4 — Momentum trap: strong momentum AGAINST direction = filling into freight train.
+//  Gate 5 — Wall check: require a resting order book wall within $0.50 as bounce cushion.
 //
-//   Gate 2 — Momentum trap:   a strong directional momentum5m means the market
-//             is already running. Entering against it (as a limit must) risks
-//             filling into a freight train rather than a micro-oscillation.
-//             Allow mildly adverse momentum (retracement); block strong momentum.
-//
-//   Gate 3 — Wall check:      only enter long if there is a resting bid wall
-//             within $0.50 below entry to act as a bounce cushion. Same for
-//             shorts and ask walls. If the book below (above) is thin, a fill
-//             into us has nothing to stop further adverse movement.
-//
-//   Gate 4 — Genuine neutral: if OB imbalance is weak AND momentum is weak,
-//             there is no edge. Return neutral — do NOT trade just to trade.
-//             This replaces the old always-fire ranging fallback which was the
-//             primary cause of losses in low-conviction choppy conditions.
-//
-// The dip/rip regime check in generateSignals() is the outer gate — it runs
-// before getDirection() and blocks all signals during large fast moves.
+// The old code NEVER returned neutral in normal regime — it always fired a signal.
+// That was the root cause of every large loser. These gates fix that.
 function getDirection(
-    ind:      TechnicalIndicators,
+    ind:       TechnicalIndicators,
     orderBook: MarketData['orderBook'],
-    price:    number,
+    price:     number,
 ): { direction: SignalDirection; reasoning: string; confidence: number } {
-    const ob  = ind.obImbalance;
-    const m5  = ind.momentum5m;
+    const ob = ind.obImbalance;
+    const m5 = ind.momentum5m;
 
-    // ── GATE 1: ATR ceiling ───────────────────────────────────────────────────
-    // When ATR > $2.50, the market is moving too fast for a $0.05-$0.20 scalp.
-    // A single candle's noise exceeds our entire TP — fills become lottery tickets.
-    const ATR_CEILING = 7.30;
+    // ── Gate 1: ATR ceiling ───────────────────────────────────────────────────
+    const ATR_CEILING = 2.50;
     if (ind.atr5m > ATR_CEILING) {
         return {
             direction: 'neutral',
@@ -180,8 +155,7 @@ function getDirection(
         };
     }
 
-    // ── GATE 2: Spread ────────────────────────────────────────────────────────
-    // Spread >= $0.15 means we start the trade behind by more than 75% of TP.
+    // ── Gate 2: Spread ────────────────────────────────────────────────────────
     if (ind.spreadUsd >= 0.15) {
         return {
             direction: 'neutral',
@@ -190,11 +164,7 @@ function getDirection(
         };
     }
 
-    // ── GATE 3: Genuine neutral — no weak-signal trades ───────────────────────
-    // If neither OB nor momentum shows meaningful conviction, there is no edge.
-    // Return neutral rather than gambling on noise. This replaces the old
-    // always-fire ranging fallback which never returned neutral and was the
-    // root cause of losses in low-conviction choppy conditions.
+    // ── Gate 3: Genuine neutral ───────────────────────────────────────────────
     const obWeak  = ob > -0.15 && ob < 0.15;
     const momWeak = m5 > -0.10 && m5 < 0.10;
     if (obWeak && momWeak) {
@@ -205,14 +175,11 @@ function getDirection(
         };
     }
 
-    // ── DIRECTION DETERMINATION ────────────────────────────────────────────────
-    // Resolve preferred direction from OB imbalance (primary) + momentum (confirmation).
-
+    // ── Direction determination ───────────────────────────────────────────────
     let preferredDir: SignalDirection = 'neutral';
     let preferredConf = 0;
     let preferredReason = '';
 
-    // Strong OB signal — fire without requiring momentum confirmation
     if (ob > 0.35) {
         preferredDir    = 'long';
         preferredConf   = ob;
@@ -221,7 +188,6 @@ function getDirection(
         preferredDir    = 'short';
         preferredConf   = Math.abs(ob);
         preferredReason = `OB SHORT: imbalance=${(Math.abs(ob)*100).toFixed(0)}% sell pressure`;
-    // OB + momentum agreement
     } else if (ob > 0.15 && m5 > 0.05) {
         preferredDir    = 'long';
         preferredConf   = ob;
@@ -230,7 +196,6 @@ function getDirection(
         preferredDir    = 'short';
         preferredConf   = Math.abs(ob);
         preferredReason = `OB+MOM SHORT: ob=${(Math.abs(ob)*100).toFixed(0)}% mom=$${m5.toFixed(2)}`;
-    // Momentum only
     } else if (m5 > 0.10) {
         preferredDir    = 'long';
         preferredConf   = 0.30;
@@ -240,8 +205,6 @@ function getDirection(
         preferredConf   = 0.30;
         preferredReason = `MOM SHORT: $${m5.toFixed(3)}/5m`;
     } else {
-        // Reached here means one of OB or mom is non-weak but they disagree.
-        // Conflicting signals = no edge.
         return {
             direction: 'neutral',
             reasoning: `CONFLICTING SIGNALS: ob=${(ob*100).toFixed(0)}% mom=$${m5.toFixed(2)} — disagreement, skipping.`,
@@ -249,42 +212,30 @@ function getDirection(
         };
     }
 
-    // ── GATE 4: Momentum trap guard ───────────────────────────────────────────
-    // A limit buy fills when sellers push price DOWN to us. That's fine if the
-    // selling is mild (noise). It's dangerous if momentum is a strong downtrend —
-    // our fill would occur mid-breakdown, not mid-oscillation.
-    //
-    // Allow: mildly negative momentum for longs (retracement)
-    // Block: strongly negative momentum for longs (breakdown)
-    //
-    // Threshold: $0.50 on a 5m candle is ~1/5 of ATR at $2.50 ceiling —
-    // moderate but not extreme. Adjust via MOMENTUM_TRAP_USD if needed.
+    // ── Gate 4: Momentum trap guard ───────────────────────────────────────────
+    // Limit buy fills when sellers push price down to us — fine if mild (oscillation),
+    // dangerous if momentum is strongly against us (breakdown).
     const MOMENTUM_TRAP_USD = 0.50;
     if (preferredDir === 'long'  && m5 < -MOMENTUM_TRAP_USD) {
         return {
             direction: 'neutral',
-            reasoning: `MOMENTUM TRAP (LONG): 5m momentum=$${m5.toFixed(2)} — price breaking down, not retracing.`,
+            reasoning: `MOMENTUM TRAP (LONG): 5m mom=$${m5.toFixed(2)} — price breaking down, not retracing.`,
             confidence: 0,
         };
     }
     if (preferredDir === 'short' && m5 > MOMENTUM_TRAP_USD) {
         return {
             direction: 'neutral',
-            reasoning: `MOMENTUM TRAP (SHORT): 5m momentum=$${m5.toFixed(2)} — price spiking up, not retracing.`,
+            reasoning: `MOMENTUM TRAP (SHORT): 5m mom=$${m5.toFixed(2)} — price spiking up, not retracing.`,
             confidence: 0,
         };
     }
 
-    // ── GATE 5: Order book wall check ─────────────────────────────────────────
-    // A safe limit long fill requires a resting bid wall below us to bounce
-    // off. Without it, sellers who fill us keep selling through — no reversal.
-    // Same logic inverted for shorts and ask walls.
-    //
-    // Require at least one wall within $0.50 of current price with >= $20K notional.
-    // (Wall data is populated in main.ts buildLiveMarketData. If walls are empty
-    // this gate passes through — fail-open so a bad data cycle doesn't freeze the bot.)
-    const WALL_RANGE_USD     = 0.50;
-    const WALL_MIN_NOTIONAL  = 20_000;
+    // ── Gate 5: Order book wall check ─────────────────────────────────────────
+    // Require a resting wall within $0.50 of price on the protective side.
+    // Fail-open if walls array is empty (bad data cycle shouldn't freeze the bot).
+    const WALL_RANGE_USD    = 0.50;
+    const WALL_MIN_NOTIONAL = 20_000;
 
     if (preferredDir === 'long' && orderBook.bidWalls.length > 0) {
         const nearWall = orderBook.bidWalls.find(
@@ -293,7 +244,7 @@ function getDirection(
         if (!nearWall) {
             return {
                 direction: 'neutral',
-                reasoning: `NO BID WALL: no wall >= $${WALL_MIN_NOTIONAL/1000}K within $${WALL_RANGE_USD} of price. Fill unprotected.`,
+                reasoning: `NO BID WALL: no wall >=$${WALL_MIN_NOTIONAL/1000}K within $${WALL_RANGE_USD} of price. Fill unprotected.`,
                 confidence: 0,
             };
         }
@@ -307,7 +258,7 @@ function getDirection(
         if (!nearWall) {
             return {
                 direction: 'neutral',
-                reasoning: `NO ASK WALL: no wall >= $${WALL_MIN_NOTIONAL/1000}K within $${WALL_RANGE_USD} of price. Fill unprotected.`,
+                reasoning: `NO ASK WALL: no wall >=$${WALL_MIN_NOTIONAL/1000}K within $${WALL_RANGE_USD} of price. Fill unprotected.`,
                 confidence: 0,
             };
         }
@@ -337,13 +288,13 @@ export async function generateSignals(assets: MarketData[]): Promise<GeneratedSi
                 confidence:         0,
                 reasoning:          regimeReason,
                 suggested_tp:       0.20,
-                suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 50),
+                suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 100),
                 session_size_pct:   1.00,
             });
             continue;
         }
 
-        const sig = getDirection(ind, asset.orderBook, price);
+        const sig      = getDirection(ind, asset.orderBook, price);
         const leverage = Number(process.env.BOT_LEVERAGE ?? 100);
 
         if (sig.direction !== 'neutral') {
