@@ -146,7 +146,7 @@ function getDirection(
     const m5 = ind.momentum5m;
 
     // ── Gate 1: ATR ceiling ───────────────────────────────────────────────────
-    const ATR_CEILING = 2.50;
+    const ATR_CEILING = 7.50;
     if (ind.atr5m > ATR_CEILING) {
         return {
             direction: 'neutral',
