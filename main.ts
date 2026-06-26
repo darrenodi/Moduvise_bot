@@ -4,6 +4,7 @@ import { RSI, EMA, ADX, ATR } from 'technicalindicators';
 import { generateSignals, getSession, detectRegime, MARKET_SYMBOL, DISPLAY_SYMBOL } from './signals.js';
 import type { MarketData, TechnicalIndicators, GeneratedSignal } from './signals.js';
 import { startVelocityMonitor, getVelocityState } from './velocityMonitor.js';
+import { checkKillSwitch, analyseFailedTrade } from './geminiAdvisor.js';
 import {
     executeBinanceTrade,
     getAvailableBalance,
@@ -495,6 +496,16 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 }
                 clearActiveTrade();
                 console.log(`[Health] ${outcome.toUpperCase()} confirmed | PnL: $${real.pnl.toFixed(4)} | fills: ${real.trades}`);
+                const killed = await checkKillSwitch(real.pnl, sendAlert);
+                if (killed) { process.exit(0); }
+                if (outcome === 'sl' && _currentTradeId) {
+                    const fs2 = require('fs');
+                    try {
+                        const lines = fs2.readFileSync(process.env.TRADE_LOG_FILE ?? './tradeLog.jsonl', 'utf-8').split('\n').filter((l: string) => l.trim() && l.includes(_currentTradeId!));
+                        const logEntry = lines.length ? JSON.parse(lines[lines.length - 1]) : {};
+                        analyseFailedTrade(logEntry, sendAlert).catch((e: any) => console.error(`[Gemini] Post-mortem: ${e.message}`));
+                    } catch { /* non-critical */ }
+                }
                 return outcome;
             }
             await cancelAllOrders(trade.slAlgoId);
@@ -685,7 +696,7 @@ async function runCycle(): Promise<void> {
             return;
         }
 
-        const result = await executeBinanceTrade(signal, tradingBalance);
+        const result = await executeBinanceTrade(signal, 0); // sizing uses fixed $50 margin internally
 
         if (result.outcome === 'orders_placed' && result.entryPrice) {
             // Generate a unique trade ID and log full entry context
@@ -773,8 +784,8 @@ console.log(`  TP2      : $0.10 rescue limit after 90s`);
 console.log(`  SCRATCH  : market exit after 120s`);
 console.log(`  ATR GATE : $2.50 max — sits out trap markets`);
 console.log(`  BANK     : ${(BANK_SPLIT*100).toFixed(0)}% banked / ${((1-BANK_SPLIT)*100).toFixed(0)}% compounded`);
-console.log(`  STACK    : $${tradingBalance.toFixed(4)}`);
-console.log(`  BANKED   : $${bankedBalance.toFixed(4)}`);
+console.log(`  ACCOUNT  : ${process.env.ENVIRONMENT === "live" ? "LIVE 🟢" : "DEMO 🟡"} | MARGIN $50/trade | LEVERAGE ${process.env.ENVIRONMENT === "live" ? "100x" : "50x"}`);
+console.log(`  KILL     : $1000 cumulative loss -> Gemini auto-shutdown`);
 console.log(`  LOG      : ${TRADE_LOG_FILE}`);
 console.log(`${'═'.repeat(70)}\n`);
 
