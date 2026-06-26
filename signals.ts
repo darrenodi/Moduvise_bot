@@ -149,8 +149,8 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 // cycle doesn't freeze the bot.
 
 const OSCILLATION_LOOKBACK = 4;     // check last 4 completed candles (20 minutes)
-const BODY_RATIO_MAX       = 0.40;  // max body/range ratio per candle
-const NET_MOVE_MAX         = 1.50;  // max |close-open| per candle in USD
+const BODY_RATIO_MAX       = 0.60;  // raised from 0.40 — gold ATR $4-6 means larger bodies are normal
+const NET_MOVE_MAX         = 4.00;  // raised from $1.50 — matches current ATR regime
 const OVERLAP_MIN_FRACTION = 0.67;  // at least 2/3 of consecutive pairs must overlap
 
 export function isSafeOscillation(klines: any[]): { safe: boolean; reason: string } {
@@ -253,10 +253,13 @@ function getDirection(
     }
 
     // ── Gate 2: Spread ────────────────────────────────────────────────────────
-    if (ind.spreadUsd >= 0.15) {
+    // Demo spreads are artificially wide ($0.30-$0.50) vs live ($0.03-$0.08).
+    // Use a relaxed limit on demo so the gate doesn't block everything.
+    const SPREAD_MAX = process.env.ENVIRONMENT !== 'live' ? 0.50 : 0.15;
+    if (ind.spreadUsd >= SPREAD_MAX) {
         return {
             direction:  'neutral',
-            reasoning:  `SPREAD BLOCK: $${ind.spreadUsd.toFixed(3)} (max $0.15)`,
+            reasoning:  `SPREAD BLOCK: $${ind.spreadUsd.toFixed(3)} (max $${SPREAD_MAX})`,
             confidence: 0,
         };
     }
