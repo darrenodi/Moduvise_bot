@@ -253,13 +253,12 @@ function getDirection(
     }
 
     // ── Gate 2: Spread ────────────────────────────────────────────────────────
-    // Demo spreads are artificially wide ($0.30-$0.50) vs live ($0.03-$0.08).
-    // Use a relaxed limit on demo so the gate doesn't block everything.
-    const SPREAD_MAX = process.env.ENVIRONMENT !== 'live' ? 0.50 : 0.15;
-    if (ind.spreadUsd >= SPREAD_MAX) {
+    // Demo spreads are $0.50-$1.50 — completely artificial, not real market.
+    // Skip this gate on demo entirely. On live, $0.15 max is enforced.
+    if (process.env.ENVIRONMENT === 'live' && ind.spreadUsd >= 0.15) {
         return {
             direction:  'neutral',
-            reasoning:  `SPREAD BLOCK: $${ind.spreadUsd.toFixed(3)} (max $${SPREAD_MAX})`,
+            reasoning:  `SPREAD BLOCK: $${ind.spreadUsd.toFixed(3)} (max $0.15)`,
             confidence: 0,
         };
     }
