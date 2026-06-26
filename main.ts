@@ -499,9 +499,8 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 const killed = await checkKillSwitch(real.pnl, sendAlert);
                 if (killed) { process.exit(0); }
                 if (outcome === 'sl' && _currentTradeId) {
-                    const fs2 = require('fs');
                     try {
-                        const lines = fs2.readFileSync(process.env.TRADE_LOG_FILE ?? './tradeLog.jsonl', 'utf-8').split('\n').filter((l: string) => l.trim() && l.includes(_currentTradeId!));
+                        const lines = fs.readFileSync(process.env.TRADE_LOG_FILE ?? './tradeLog.jsonl', 'utf-8').split('\n').filter((l: string) => l.trim() && l.includes(_currentTradeId!));
                         const logEntry = lines.length ? JSON.parse(lines[lines.length - 1]) : {};
                         analyseFailedTrade(logEntry, sendAlert).catch((e: any) => console.error(`[Gemini] Post-mortem: ${e.message}`));
                     } catch { /* non-critical */ }

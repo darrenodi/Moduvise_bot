@@ -81,18 +81,19 @@ export function getVelocityState(): VelocityState {
 }
 
 // ─── WEBSOCKET CONNECTION ─────────────────────────────────────────────────────
-function connect(): void {
+async function connect(): Promise<void> {
     const url = `${WS_BASE}/stream?streams=${SYMBOL_LOWER}@aggTrade`;
     console.log(`[VelocityMonitor] Connecting: ${url}`);
 
     // Use the built-in Node.js WebSocket (Node 22+) or ws package
     let ws: any;
     try {
-        // Node 22 has WebSocket built-in
+        // Node 22+ has WebSocket built-in globally
         ws = new (globalThis as any).WebSocket(url);
+        if (!ws) throw new Error('no global WebSocket');
     } catch {
-        // Fallback: dynamic require ws
-        const { WebSocket: WS } = require('ws');
+        // Fallback: dynamic import of ws package (ESM-safe)
+        const { default: WS } = await import('ws');
         ws = new WS(url);
     }
 
@@ -127,7 +128,7 @@ function connect(): void {
     ws.onclose = () => {
         _wsReady = false;
         console.warn('[VelocityMonitor] ⚠️ WebSocket closed — reconnecting in 3s...');
-        _wsReconnectTimer = setTimeout(connect, 3_000);
+        _wsReconnectTimer = setTimeout(() => connect().catch(console.error), 3_000);
     };
 }
 
@@ -137,7 +138,7 @@ let _started = false;
 export function startVelocityMonitor(): void {
     if (_started) return;
     _started = true;
-    connect();
+    connect().catch(console.error);
     // Heartbeat: log state every 30s so you can see it's alive in pm2 logs
     setInterval(() => {
         const s = getVelocityState();
