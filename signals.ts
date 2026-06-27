@@ -149,8 +149,8 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 // cycle doesn't freeze the bot.
 
 const OSCILLATION_LOOKBACK = 4;     // check last 4 completed candles (20 minutes)
-const BODY_RATIO_MAX       = 0.60;  // raised from 0.40 — gold ATR $4-6 means larger bodies are normal
-const NET_MOVE_MAX         = 4.00;  // raised from $1.50 — matches current ATR regime
+const BODY_RATIO_MAX       = 0.75;  // block only pure marubozu candles (95-100% body)
+const NET_MOVE_MAX         = 4.00;  // matches current ATR regime
 const OVERLAP_MIN_FRACTION = 0.67;  // at least 2/3 of consecutive pairs must overlap
 
 export function isSafeOscillation(klines: any[]): { safe: boolean; reason: string } {
@@ -208,8 +208,8 @@ export function isSafeOscillation(klines: any[]): { safe: boolean; reason: strin
         };
     }
 
-    if (failedCandles.length > 1) {
-        // Allow 1 bad candle (noise) — block if 2+ candles show directional bias
+    if (failedCandles.length > 2) {
+        // Allow up to 2 borderline candles — block only if 3+ show clear directional bias
         return {
             safe:   false,
             reason: `DIRECTIONAL CANDLES: ${failedCandles.join(', ')} — not safe oscillation`,
@@ -321,7 +321,8 @@ function getDirection(
     }
 
     // ── Gate 5: Order book wall check ─────────────────────────────────────────
-    const WALL_RANGE_USD    = 0.50;
+    // Demo has wider spreads so walls sit further from price — use $2.00 range on demo.
+    const WALL_RANGE_USD    = process.env.ENVIRONMENT === 'live' ? 0.50 : 2.00;
     const WALL_MIN_NOTIONAL = 20_000;
 
     if (preferredDir === 'long' && orderBook.bidWalls.length > 0) {
