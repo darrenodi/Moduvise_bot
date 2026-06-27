@@ -255,8 +255,53 @@ export async function cancelAlgoOrder(algoId: number): Promise<void> {
 
 export async function triggerEmergencyClose(side: 'long' | 'short', size: number, reason: string): Promise<void> {
     const closeSide = side === 'long' ? 'SELL' : 'BUY';
-    console.log(`[EMERGENCY] 🛑 Market ${closeSide} ${size} XAU | ${reason}`);
+    console.log(`[EMERGENCY] 🛑 Closing ${closeSide} ${size} XAU | ${reason}`);
     await cancelAllOrders();
+
+    // Attempt 1: tight limit order at current bid/ask — maker fee (free), no spread cost.
+    // Give it 5 seconds. If it doesn't fill, fall back to market.
+    try {
+        const ticker = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`)
+            .then(r => r.json()) as any;
+        const limitPrice = closeSide === 'SELL'
+            ? Number(ticker.bidPrice)   // sell at best bid — fills immediately as taker but avoids wide spread
+            : Number(ticker.askPrice);  // buy at best ask
+
+        const limitOrder = await privatePost('/fapi/v1/order', {
+            symbol:      STRATEGY.SYMBOL,
+            side:        closeSide,
+            type:        'LIMIT',
+            timeInForce: 'GTC',
+            price:       limitPrice.toFixed(2),
+            quantity:    size.toFixed(3),
+            reduceOnly:  'true',
+        });
+
+        if (limitOrder?.orderId) {
+            // Poll 5s for fill
+            const start = Date.now();
+            while (Date.now() - start < 5_000) {
+                await new Promise(r => setTimeout(r, 500));
+                const check = await privateGet('/fapi/v1/order', {
+                    symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId,
+                });
+                if (check.status === 'FILLED') {
+                    console.log(`[EMERGENCY] ✅ Limit close filled @ $${limitPrice.toFixed(2)} (maker — no taker fee)`);
+                    clearActiveTrade();
+                    return;
+                }
+            }
+            // Didn't fill in 5s — cancel and fall through to market
+            await privateDelete('/fapi/v1/order', {
+                symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId,
+            }).catch(() => {});
+            console.log(`[EMERGENCY] Limit close timed out — falling back to market order`);
+        }
+    } catch (e: any) {
+        console.error(`[EMERGENCY] Limit close attempt failed: ${e.message} — falling back to market`);
+    }
+
+    // Attempt 2: market order — guaranteed fill, pays taker fee (~$1.00 at $5000 notional)
     try {
         await privatePost('/fapi/v1/order', {
             symbol:     STRATEGY.SYMBOL,
@@ -265,9 +310,10 @@ export async function triggerEmergencyClose(side: 'long' | 'short', size: number
             quantity:   size,
             reduceOnly: 'true',
         });
+        console.log(`[EMERGENCY] ✅ Market close executed (taker fee applies)`);
         clearActiveTrade();
     } catch (e: any) {
-        console.error(`[EMERGENCY] Close FAILED: ${e.message}`);
+        console.error(`[EMERGENCY] Market close FAILED: ${e.message}`);
         await sendAlert(`🚨 EMERGENCY CLOSE FAILED on ${STRATEGY.SYMBOL} ${size} XAU. CHECK NOW. ${e.message}`);
     }
 }
