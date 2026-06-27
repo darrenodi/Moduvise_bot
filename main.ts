@@ -473,6 +473,14 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
 let _currentTradeId: string | null = null;
 let _priceAtTp1Timeout: number | undefined;
 
+// ─── LOSS COOLDOWN ────────────────────────────────────────────────────────────
+// After a loss, pause trading for LOSS_COOLDOWN_MS before the next entry.
+// This prevents the bot flipping long→short→long in a choppy ranging market,
+// which was causing the pattern of alternating small losses every 2 minutes.
+// The market that just stopped you out hasn't changed — wait for it to settle.
+const LOSS_COOLDOWN_MS = Number(process.env.LOSS_COOLDOWN_MS ?? 120_000); // 2 minutes
+let   _lastLossAt      = 0;
+
 async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     const pos   = await getOpenPositionDetails();
     const trade = getActiveTrade();
@@ -500,6 +508,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 console.log(`[Health] ${outcome.toUpperCase()} confirmed | PnL: $${real.pnl.toFixed(4)} | fills: ${real.trades}`);
                 const killed = await checkKillSwitch(real.pnl, sendAlert);
                 if (killed) { process.exit(0); }
+                if (outcome === 'sl') { _lastLossAt = Date.now(); }
                 if (outcome === 'sl' && _currentTradeId) {
                     try {
                         const lines = fs.readFileSync(process.env.TRADE_LOG_FILE ?? './tradeLog.jsonl', 'utf-8').split('\n').filter((l: string) => l.trim() && l.includes(_currentTradeId!));
@@ -648,6 +657,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         stats.slHits++;
         stats.fills++;
         applyTradeResult(loss);
+        _lastLossAt = Date.now();
         if (_currentTradeId) {
             logTradeClose(_currentTradeId, 'sl', pos.currentPrice, loss, 'failsafe', false, false);
             _currentTradeId = null;
@@ -682,6 +692,13 @@ async function runCycle(): Promise<void> {
                 console.log('[Init] No available balance. Waiting...');
                 return;
             }
+        }
+
+        // Loss cooldown — don't re-enter immediately after a loss
+        const cooldownRemaining = (_lastLossAt + LOSS_COOLDOWN_MS) - Date.now();
+        if (cooldownRemaining > 0) {
+            console.log(`[Cooldown] ⏸ ${Math.ceil(cooldownRemaining/1000)}s remaining after last loss — sitting out`);
+            return;
         }
 
         const assets  = await buildLiveMarketData(MARKET_SYMBOL);

@@ -46,9 +46,9 @@ const SYMBOLS: SymbolConfig[] = [
         wsSymbol:       'ethusdt',
         leverage:       100,
         marginPerTrade: 1,
-        tpAtrMult:      0.10,
-        tpMin:          0.05,
-        tpMax:          1.00,
+        tpAtrMult:      0.20,   // ETH ATR ~$3-8, 20% gives $0.60-1.60 TP — clears fees
+        tpMin:          0.50,   // minimum $0.50 TP on ETH — fees eat anything smaller
+        tpMax:          5.00,   // allow up to $5 TP in volatile sessions
     },
     {
         marketSymbol:   'DOGEUSDT',
@@ -56,9 +56,9 @@ const SYMBOLS: SymbolConfig[] = [
         wsSymbol:       'dogeusdt',
         leverage:       100,
         marginPerTrade: 1,
-        tpAtrMult:      0.10,
-        tpMin:          0.05,
-        tpMax:          1.00,
+        tpAtrMult:      0.20,
+        tpMin:          0.0005, // DOGE ticks at $0.0001
+        tpMax:          0.01,
     },
 ];
 
@@ -96,6 +96,8 @@ function spawnSymbol(entry: ManagedProcess): void {
         TP_ATR_MULT:      String(cfg.tpAtrMult),
         TP_MIN:           String(cfg.tpMin),
         TP_MAX:           String(cfg.tpMax),
+        // Loss cooldown per symbol — independent timers
+        LOSS_COOLDOWN_MS: '120000',
         // Isolated state & logs
         STATE_FILE:       `./bot-state-${cfg.marketSymbol}.json`,
         TRADE_LOG_FILE:   `./tradeLog-${cfg.marketSymbol}.jsonl`,

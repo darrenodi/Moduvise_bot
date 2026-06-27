@@ -24,15 +24,16 @@ const IS_TESTNET  = ENVIRONMENT !== 'live';
 
 const WS_BASE = IS_TESTNET
     ? 'wss://dstream.binancefuture.com'
-    : 'wss://fstream.binance.com';
+    : process.env.WS_BASE ?? 'wss://fstream.binance.com';
 
 // Read from env — injected per-symbol by multiSymbol.ts orchestrator.
 // Falls back to 'xauusdt' for backwards compatibility with single-symbol runs.
 const SYMBOL_LOWER = (process.env.WS_SYMBOL ?? 'xauusdt').toLowerCase();
 
 const WINDOW_MS   = 5_000;   // 5-second rolling window
-const FLUSH_RATIO = 3.0;     // sellVol > buyVol × 3.0 = flush detected
-const SPIKE_RATIO = 3.0;     // buyVol  > sellVol × 3.0 = spike detected
+const FLUSH_RATIO = 2.0;     // lowered from 3.0 — triggers on 2:1 sell/buy imbalance
+const SPIKE_RATIO = 2.0;     // lowered from 3.0 — triggers on 2:1 buy/sell imbalance
+const MIN_VOL     = 0.0001;  // lowered from 0.001 — catches small XAU trades
 
 // ─── ROLLING TRADE BUFFER ────────────────────────────────────────────────────
 interface AggTick {
