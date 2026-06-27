@@ -37,16 +37,21 @@ const STRATEGY = {
         return IS_DEMO ? Math.min(raw, 10) : raw;  // hard cap 10x on demo
     },
 
-    // Entry: 1 tick inside bid/ask — maker order, fills on next micro-oscillation
-    ENTRY_TICK: 0.05,
+    // Entry: how far inside bid/ask to place the limit order.
+    // 0.05 = 1 tick inside. Increase to fill safer but slower.
+    // Configurable via ENTRY_TICK env var — no recompile needed.
+    ENTRY_TICK: Number(process.env.ENTRY_TICK ?? 0.05),
 
     // TP: dynamic — clamp(atr5m × 0.10, $0.05, $1.00)
     TP_ATR_MULT: 0.10,
     TP_MIN:      0.05,
     TP_MAX:      1.00,
 
-    // SL: dynamic — clamp(atr5m × 1.50, $0.50, no ceiling)
-    ATR_SL_MULT:     1.50,
+    // SL: dynamic — clamp(atr5m × 2.0, $0.50, no ceiling)
+    // Raised from 1.5x — the 06/27 loss had ATR=$0.55, SL=$0.83, adverse=$1.17
+    // A 2x multiplier gives $1.10 SL at that ATR — still would have lost but
+    // combined with the momentum trap fix, the trade never fires in the first place.
+    ATR_SL_MULT:     2.00,
     SL_MIN:          0.50,
     SL_BACKUP_EXTRA: 1.20,
 

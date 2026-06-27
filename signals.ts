@@ -312,7 +312,9 @@ function getDirection(
     }
 
     // ── Gate 4: Momentum trap ─────────────────────────────────────────────────
-    const MOMENTUM_TRAP_USD = 0.50;
+    // Tightened from $0.50 to $0.30 — the $0.48 loss on 06/27 slipped through
+    // at $0.50. wasAgainstMomentum=true confirmed this was the gate that failed.
+    const MOMENTUM_TRAP_USD = 0.30;
     if (preferredDir === 'long'  && m5 < -MOMENTUM_TRAP_USD) {
         return { direction: 'neutral', reasoning: `MOMENTUM TRAP (LONG): mom=$${m5.toFixed(2)} breaking down.`, confidence: 0 };
     }
@@ -320,7 +322,39 @@ function getDirection(
         return { direction: 'neutral', reasoning: `MOMENTUM TRAP (SHORT): mom=$${m5.toFixed(2)} spiking up.`, confidence: 0 };
     }
 
-    // ── Gate 5: Order book wall check ─────────────────────────────────────────
+    // ── Gate 4b: Last candle body check ──────────────────────────────────────
+    // If the most recently completed 5m candle is a full marubozu in the
+    // OPPOSITE direction to our signal, the market just made a decisive move
+    // against us. Block entry — we'd be buying into a bear candle or selling
+    // into a bull candle. The 06/27 loss had bodyPct=1.0 bear before a long entry.
+    if (klines.length >= 2) {
+        const lastCandle  = klines[klines.length - 2]; // -1 is still forming
+        const lcOpen      = Number(lastCandle[1]);
+        const lcClose     = Number(lastCandle[4]);
+        const lcHigh      = Number(lastCandle[2]);
+        const lcLow       = Number(lastCandle[3]);
+        const lcRange     = lcHigh - lcLow;
+        const lcBody      = Math.abs(lcClose - lcOpen);
+        const lcBodyPct   = lcRange > 0 ? lcBody / lcRange : 0;
+        const lcIsBear    = lcClose < lcOpen;
+        const lcIsBull    = lcClose > lcOpen;
+        const MARUBOZU    = 0.80; // 80%+ body = strong directional candle
+
+        if (preferredDir === 'long' && lcIsBear && lcBodyPct >= MARUBOZU) {
+            return {
+                direction:  'neutral',
+                reasoning:  `LAST CANDLE BLOCK (LONG): previous candle was ${(lcBodyPct*100).toFixed(0)}% bear body — entering long into sell candle.`,
+                confidence: 0,
+            };
+        }
+        if (preferredDir === 'short' && lcIsBull && lcBodyPct >= MARUBOZU) {
+            return {
+                direction:  'neutral',
+                reasoning:  `LAST CANDLE BLOCK (SHORT): previous candle was ${(lcBodyPct*100).toFixed(0)}% bull body — entering short into buy candle.`,
+                confidence: 0,
+            };
+        }
+    }
     // Demo has wider spreads so walls sit further from price — use $2.00 range on demo.
     const WALL_RANGE_USD    = process.env.ENVIRONMENT === 'live' ? 0.50 : 2.00;
     const WALL_MIN_NOTIONAL = 20_000;
