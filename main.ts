@@ -774,16 +774,19 @@ process.on('SIGTERM', async () => {
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
 loadState();
 const leverage = Number(process.env.BOT_LEVERAGE ?? 100);
+const _sym     = process.env.MARKET_SYMBOL ?? 'XAUUSDT';
+const _margin  = process.env.MARGIN_PER_TRADE ?? '50';
 console.log(`\n${'═'.repeat(70)}`);
-console.log(`  XAUUSDT SCALPER`);
+console.log(`  ${_sym} SCALPER`);
 console.log(`  ENV      : ${ENVIRONMENT}`);
 console.log(`  LEVERAGE : ${leverage}x`);
+console.log(`  MARGIN   : $${_margin}/trade`);
 console.log(`  TP1      : ATR×0.10 (min $0.05, max $1.00)`);
-console.log(`  TP2      : $0.10 rescue limit after 90s`);
+console.log(`  TP2      : rescue limit after 90s`);
 console.log(`  SCRATCH  : market exit after 120s`);
-console.log(`  ATR GATE : $2.50 max — sits out trap markets`);
+console.log(`  ATR GATE : $6.00 max — sits out trap markets`);
 console.log(`  BANK     : ${(BANK_SPLIT*100).toFixed(0)}% banked / ${((1-BANK_SPLIT)*100).toFixed(0)}% compounded`);
-console.log(`  ACCOUNT  : ${process.env.ENVIRONMENT === "live" ? "LIVE 🟢" : "DEMO 🟡"} | MARGIN $50/trade | LEVERAGE ${process.env.ENVIRONMENT === "live" ? "100x" : "50x"}`);
+console.log(`  ACCOUNT  : ${process.env.ENVIRONMENT === "live" ? "LIVE 🟢" : "DEMO 🟡"} | MARGIN $${_margin}/trade | LEVERAGE ${leverage}x`);
 console.log(`  KILL     : $1000 cumulative loss -> Gemini auto-shutdown`);
 console.log(`  LOG      : ${TRADE_LOG_FILE}`);
 console.log(`${'═'.repeat(70)}\n`);

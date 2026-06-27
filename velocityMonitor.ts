@@ -15,23 +15,29 @@ dotenv.config();
 //   is a seller hitting the bid). So:
 //     m=true  → taker SOLD  → sellVolume++
 //     m=false → taker BOUGHT → buyVolume++
+//
+// Multi-symbol: SYMBOL_LOWER and WS_SYMBOL are read from env vars so each
+// child process spawned by multiSymbol.ts monitors its own symbol independently.
 
 const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
 
-const WS_BASE     = IS_TESTNET
+const WS_BASE = IS_TESTNET
     ? 'wss://dstream.binancefuture.com'
     : 'wss://fstream.binance.com';
 
-const SYMBOL_LOWER = 'xauusdt';
-const WINDOW_MS    = 5_000;   // 5-second rolling window
-const FLUSH_RATIO  = 3.0;     // sellVol > buyVol × 3.0 = flush detected
-const SPIKE_RATIO  = 3.0;     // buyVol  > sellVol × 3.0 = spike detected
+// Read from env — injected per-symbol by multiSymbol.ts orchestrator.
+// Falls back to 'xauusdt' for backwards compatibility with single-symbol runs.
+const SYMBOL_LOWER = (process.env.WS_SYMBOL ?? 'xauusdt').toLowerCase();
+
+const WINDOW_MS   = 5_000;   // 5-second rolling window
+const FLUSH_RATIO = 3.0;     // sellVol > buyVol × 3.0 = flush detected
+const SPIKE_RATIO = 3.0;     // buyVol  > sellVol × 3.0 = spike detected
 
 // ─── ROLLING TRADE BUFFER ────────────────────────────────────────────────────
 interface AggTick {
     ts:     number;   // timestamp ms
-    qty:    number;   // XAU quantity
+    qty:    number;   // quantity
     isSell: boolean;  // true = taker sold (hit bid)
 }
 
@@ -42,8 +48,8 @@ let   _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Compact rolling state exposed to the main cycle
 export interface VelocityState {
-    buyVol5s:       number;   // XAU bought (taker) in last 5s
-    sellVol5s:      number;   // XAU sold  (taker) in last 5s
+    buyVol5s:       number;   // quantity bought (taker) in last 5s
+    sellVol5s:      number;   // quantity sold  (taker) in last 5s
     isBuyFlush:     boolean;  // spike: buyers aggressively hitting asks
     isSellFlush:    boolean;  // flush: sellers aggressively hitting bids
     ratio:          number;   // sellVol / buyVol (>1 = more selling)
@@ -82,23 +88,21 @@ export function getVelocityState(): VelocityState {
 
 // ─── WEBSOCKET CONNECTION ─────────────────────────────────────────────────────
 async function connect(): Promise<void> {
-    const url = `${WS_BASE}/stream?streams=${SYMBOL_LOWER}@aggTrade`;
-    console.log(`[VelocityMonitor] Connecting: ${url}`);
+    const url = `${WS_BASE}/ws/${SYMBOL_LOWER}@aggTrade`;
+    console.log(`[VelocityMonitor:${SYMBOL_LOWER.toUpperCase()}] Connecting: ${url}`);
 
     // Use the built-in Node.js WebSocket (Node 22+) or ws package
     let ws: any;
     try {
-        // Node 22+ has WebSocket built-in globally
         ws = new (globalThis as any).WebSocket(url);
         if (!ws) throw new Error('no global WebSocket');
     } catch {
-        // Fallback: dynamic import of ws package (ESM-safe)
         const { default: WS } = await import('ws');
         ws = new WS(url);
     }
 
     ws.onopen = () => {
-        console.log('[VelocityMonitor] ✅ WebSocket connected — streaming aggTrades');
+        console.log(`[VelocityMonitor:${SYMBOL_LOWER.toUpperCase()}] ✅ Connected — streaming aggTrades`);
         _wsReady = true;
         if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
     };
@@ -122,12 +126,12 @@ async function connect(): Promise<void> {
     };
 
     ws.onerror = (err: any) => {
-        console.error(`[VelocityMonitor] WebSocket error: ${err?.message ?? err}`);
+        console.error(`[VelocityMonitor:${SYMBOL_LOWER.toUpperCase()}] WebSocket error: ${err?.message ?? err}`);
     };
 
     ws.onclose = () => {
         _wsReady = false;
-        console.warn('[VelocityMonitor] ⚠️ WebSocket closed — reconnecting in 3s...');
+        console.warn(`[VelocityMonitor:${SYMBOL_LOWER.toUpperCase()}] ⚠️ WebSocket closed — reconnecting in 3s...`);
         _wsReconnectTimer = setTimeout(() => connect().catch(console.error), 3_000);
     };
 }
@@ -139,14 +143,15 @@ export function startVelocityMonitor(): void {
     if (_started) return;
     _started = true;
     connect().catch(console.error);
-    // Heartbeat: log state every 30s so you can see it's alive in pm2 logs
+    // Heartbeat: log state every 30s
     setInterval(() => {
         const s = getVelocityState();
+        const tag = `[VelocityMonitor:${SYMBOL_LOWER.toUpperCase()}]`;
         if (!s.wsReady) {
-            console.warn(`[VelocityMonitor] ⚠️ Not ready — stale ${s.staleSecs}s`);
+            console.warn(`${tag} ⚠️ Not ready — stale ${s.staleSecs}s`);
             return;
         }
         const arrow = s.isSellFlush ? '🔴 SELL FLUSH' : s.isBuyFlush ? '🟢 BUY SPIKE' : '⚪ calm';
-        console.log(`[VelocityMonitor] ${arrow} | buy=${s.buyVol5s} sell=${s.sellVol5s} ratio=${s.ratio}x`);
+        console.log(`${tag} ${arrow} | buy=${s.buyVol5s} sell=${s.sellVol5s} ratio=${s.ratio}x`);
     }, 30_000);
 }

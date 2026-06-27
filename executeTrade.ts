@@ -22,54 +22,62 @@ const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.e
 //
 // Live: $50 margin × 100x = $5000 notional. Same margin amount, double leverage.
 // Switching live→demo or back: change ENVIRONMENT only.
+// ─── PER-SYMBOL PRECISION ─────────────────────────────────────────────────────
+// Different symbols require different tick sizes and quantity precision.
+// Injected by multiSymbol.ts via env; falls back to XAUUSDT defaults for
+// single-symbol runs.
+//
+//  XAUUSDT : tick=0.01  qtyStep=0.001  minQty=0.001  slMin=0.50
+//  ETHUSDT : tick=0.01  qtyStep=0.001  minQty=0.001  slMin=1.00
+//  DOGEUSDT: tick=0.0001 qtyStep=1     minQty=1      slMin=0.002
+function getSymbolPrecision(symbol: string): {
+    tick: number; qtyStep: number; minQty: number; slMin: number;
+    tp2Offset: number; slBackupExtra: number;
+} {
+    const s = symbol.toUpperCase();
+    if (s === 'DOGEUSDT') return { tick: 0.00001, qtyStep: 1,     minQty: 1,     slMin: 0.002, tp2Offset: 0.0002, slBackupExtra: 0.001  };
+    if (s === 'ETHUSDT')  return { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 1.00,  tp2Offset: 0.10,   slBackupExtra: 0.50   };
+    // Default: XAUUSDT
+    return                       { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 0.50,  tp2Offset: 0.10,   slBackupExtra: 1.20   };
+}
+
+const _precision = getSymbolPrecision(MARKET_SYMBOL);
+
 const STRATEGY = {
     SYMBOL: MARKET_SYMBOL,
 
-    // Fixed margin per trade: $50 regardless of account balance.
-    // This keeps risk constant and predictable — no compounding on demo.
+    // Margin per trade — overridden per-symbol by multiSymbol.ts via MARGIN_PER_TRADE env.
+    // Single-symbol runs fall back to $50.
     MARGIN_PER_TRADE: Number(process.env.MARGIN_PER_TRADE ?? 50),
 
     // Leverage: 10x demo / 100x live
-    // Demo is capped at 10x so $50 margin = $500 notional — safely within demo limits.
-    // Live uses 100x. Change BOT_LEVERAGE in .env to override if needed.
     get LEVERAGE() {
         const raw = Number(process.env.BOT_LEVERAGE ?? (IS_DEMO ? 10 : 100));
-        return IS_DEMO ? Math.min(raw, 10) : raw;  // hard cap 10x on demo
+        return IS_DEMO ? Math.min(raw, 10) : raw;
     },
 
-    // Entry: how far inside bid/ask to place the limit order.
-    // 0.05 = 1 tick inside. Increase to fill safer but slower.
-    // Configurable via ENTRY_TICK env var — no recompile needed.
-    ENTRY_TICK: Number(process.env.ENTRY_TICK ?? 0.05),
+    ENTRY_TICK: Number(process.env.ENTRY_TICK ?? _precision.tick),
 
-    // TP: dynamic — clamp(atr5m × 0.10, $0.05, $1.00)
-    TP_ATR_MULT: 0.10,
-    TP_MIN:      0.05,
-    TP_MAX:      1.00,
+    // TP: dynamic — clamp(atr5m × TP_ATR_MULT, TP_MIN, TP_MAX)
+    TP_ATR_MULT: Number(process.env.TP_ATR_MULT ?? 0.10),
+    TP_MIN:      Number(process.env.TP_MIN      ?? _precision.tick * 5),
+    TP_MAX:      Number(process.env.TP_MAX      ?? 1.00),
 
-    // SL: dynamic — clamp(atr5m × 2.0, $0.50, no ceiling)
-    // Raised from 1.5x — the 06/27 loss had ATR=$0.55, SL=$0.83, adverse=$1.17
-    // A 2x multiplier gives $1.10 SL at that ATR — still would have lost but
-    // combined with the momentum trap fix, the trade never fires in the first place.
     ATR_SL_MULT:     2.00,
-    SL_MIN:          0.50,
-    SL_BACKUP_EXTRA: 1.20,
+    SL_MIN:          _precision.slMin,
+    SL_BACKUP_EXTRA: _precision.slBackupExtra,
 
-    // Two-stage exit:
-    // TP1: full target, 90s window
-    // TP2: rescue limit $0.10 from entry, 30s window
-    // Scratch: market exit if TP2 also times out
     TP1_TIMEOUT_MS:    90_000,
-    TP2_OFFSET:        0.10,
+    TP2_OFFSET:        _precision.tp2Offset,
     TP2_TIMEOUT_MS:    30_000,
     SCRATCH_TIMEOUT_MS: 130_000,
 
-    GOLD_TICK:        0.01,
-    MIN_QTY:          0.001,
-    QTY_STEP:         0.001,
-    MIN_NOTIONAL:     5.0,
-    TAKER_FEE:        0.0002,
-    FILL_TIMEOUT:     60_000,
+    PRICE_TICK:   _precision.tick,
+    MIN_QTY:      _precision.minQty,
+    QTY_STEP:     _precision.qtyStep,
+    MIN_NOTIONAL: 5.0,
+    TAKER_FEE:    0.0002,
+    FILL_TIMEOUT: 60_000,
     MAX_SIGNAL_DRIFT: 2.00,
 } as const;
 
@@ -260,7 +268,7 @@ export async function cancelAlgoOrder(algoId: number): Promise<void> {
 
 export async function triggerEmergencyClose(side: 'long' | 'short', size: number, reason: string): Promise<void> {
     const closeSide = side === 'long' ? 'SELL' : 'BUY';
-    console.log(`[EMERGENCY] 🛑 Closing ${closeSide} ${size} XAU | ${reason}`);
+    console.log(`[EMERGENCY] 🛑 Closing ${closeSide} ${size} ${STRATEGY.SYMBOL} | ${reason}`);
     await cancelAllOrders();
 
     // Attempt 1: tight limit order at current bid/ask — maker fee (free), no spread cost.
@@ -325,13 +333,15 @@ export async function triggerEmergencyClose(side: 'long' | 'short', size: number
 
 // ─── TP2 RESCUE LIMIT ─────────────────────────────────────────────────────────
 export async function placeReduceOnlyLimit(side: string, price: number, quantity: number): Promise<number> {
+    const priceDp = STRATEGY.PRICE_TICK < 0.01 ? 5 : 2;
+    const qtyDp   = STRATEGY.QTY_STEP   < 1    ? 3 : 0;
     const res = await privatePost('/fapi/v1/order', {
         symbol:      STRATEGY.SYMBOL,
         side,
         type:        'LIMIT',
         timeInForce: 'GTC',
-        price:       price.toFixed(2),
-        quantity:    quantity.toFixed(3),
+        price:       price.toFixed(priceDp),
+        quantity:    quantity.toFixed(qtyDp),
         reduceOnly:  'true',
     });
     if (!res?.orderId) throw new Error(`TP2 order rejected: ${JSON.stringify(res)}`);
@@ -344,7 +354,8 @@ export async function placeReduceOnlyLimit(side: string, price: number, quantity
 // Live:  $50 × 100 = $5000 notional. At $4000/XAU → 1.25 XAU.
 // Max position check: notional never exceeds $5000 (demo exchange limit).
 function tickRound(price: number): number {
-    return Math.round(price / STRATEGY.GOLD_TICK) * STRATEGY.GOLD_TICK;
+    const tick = STRATEGY.PRICE_TICK;
+    return Math.round(price / tick) * tick;
 }
 
 function qtyFloor(qty: number): number {
@@ -363,7 +374,7 @@ export function calcSize(price: number): number {
     while (size * price < STRATEGY.MIN_NOTIONAL) {
         size = Math.round((size + STRATEGY.QTY_STEP) * 1000) / 1000;
     }
-    console.log(`[Size] ${IS_DEMO ? 'DEMO' : 'LIVE'} | margin=$${margin} leverage=${leverage}x notional=$${(size*price).toFixed(0)} size=${size} XAU`);
+    console.log(`[Size] ${IS_DEMO ? 'DEMO' : 'LIVE'} | ${STRATEGY.SYMBOL} | margin=$${margin} leverage=${leverage}x notional=$${(size*price).toFixed(2)} size=${size}`);
     return size;
 }
 
@@ -407,7 +418,10 @@ export async function executeBinanceTrade(
         );
         const size = calcSize(entryPrice);
 
-        console.log(`[Entry] ${IS_DEMO ? '🟡 DEMO' : '🟢 LIVE'} | bid=$${liveBid.toFixed(2)} ask=$${liveAsk.toFixed(2)} entry=$${entryPrice.toFixed(2)} TP=$${tpMove.toFixed(2)} ATR=$${signal.atr5m.toFixed(2)}`);
+        const priceDp = STRATEGY.PRICE_TICK < 0.01 ? 5 : 2;
+        const qtyDp   = STRATEGY.QTY_STEP   < 1    ? 3 : 0;
+
+        console.log(`[Entry] ${IS_DEMO ? '🟡 DEMO' : '🟢 LIVE'} | bid=$${liveBid.toFixed(priceDp)} ask=$${liveAsk.toFixed(priceDp)} entry=$${entryPrice.toFixed(priceDp)} TP=$${tpMove.toFixed(priceDp)} ATR=$${signal.atr5m.toFixed(priceDp)}`);
 
         // GTX maker entry
         const entryOrder = await privatePost('/fapi/v1/order', {
@@ -415,8 +429,8 @@ export async function executeBinanceTrade(
             side,
             type:        'LIMIT',
             timeInForce: 'GTX',
-            price:       entryPrice.toFixed(2),
-            quantity:    size.toFixed(3),
+            price:       entryPrice.toFixed(priceDp),
+            quantity:    size.toFixed(qtyDp),
         });
 
         if (!entryOrder?.orderId) {
@@ -452,15 +466,15 @@ export async function executeBinanceTrade(
         const slPrice       = tickRound(isBuy ? actualEntry - slDistance           : actualEntry + slDistance);
         const slBackupPrice = tickRound(isBuy ? slPrice     - STRATEGY.SL_BACKUP_EXTRA : slPrice + STRATEGY.SL_BACKUP_EXTRA);
 
-        console.log(`[Execution] ✅ ${direction.toUpperCase()} filled @ $${actualEntry.toFixed(2)} | ${size} XAU | TP:$${tpPrice.toFixed(2)} SL:$${slPrice.toFixed(2)}`);
+        console.log(`[Execution] ✅ ${direction.toUpperCase()} filled @ $${actualEntry.toFixed(priceDp)} | ${size} ${STRATEGY.SYMBOL} | TP:$${tpPrice.toFixed(priceDp)} SL:$${slPrice.toFixed(priceDp)}`);
 
         // TP1 resting limit
         let tpOrderId = 0;
         try {
             const tpOrder = await privatePost('/fapi/v1/order', {
                 symbol: STRATEGY.SYMBOL, side: closeSide, type: 'LIMIT',
-                timeInForce: 'GTC', price: tpPrice.toFixed(2),
-                quantity: size.toFixed(3), reduceOnly: 'true',
+                timeInForce: 'GTC', price: tpPrice.toFixed(priceDp),
+                quantity: size.toFixed(qtyDp), reduceOnly: 'true',
             });
             tpOrderId = tpOrder.orderId ?? 0;
         } catch (e: any) { console.error(`[TP] Failed: ${e.message}`); }
@@ -470,8 +484,8 @@ export async function executeBinanceTrade(
         try {
             const slOrder = await privatePost('/fapi/v1/algoOrder', {
                 symbol: STRATEGY.SYMBOL, side: closeSide, algoType: 'CONDITIONAL',
-                type: 'STOP_MARKET', quantity: size.toFixed(3),
-                triggerPrice: slPrice.toFixed(2), workingType: 'MARK_PRICE', reduceOnly: 'true',
+                type: 'STOP_MARKET', quantity: size.toFixed(qtyDp),
+                triggerPrice: slPrice.toFixed(priceDp), workingType: 'MARK_PRICE', reduceOnly: 'true',
             });
             slAlgoId = slOrder.algoId ?? 0;
         } catch (e: any) { console.error(`[SL] Primary failed: ${e.message}`); }
@@ -481,7 +495,7 @@ export async function executeBinanceTrade(
         try {
             const backupOrder = await privatePost('/fapi/v1/order', {
                 symbol: STRATEGY.SYMBOL, side: closeSide, type: 'STOP_MARKET',
-                stopPrice: slBackupPrice.toFixed(2), quantity: size.toFixed(3),
+                stopPrice: slBackupPrice.toFixed(priceDp), quantity: size.toFixed(qtyDp),
                 workingType: 'MARK_PRICE', reduceOnly: 'true',
             });
             slBackupId = backupOrder.orderId ?? 0;
