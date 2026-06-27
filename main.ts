@@ -441,7 +441,9 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
         .filter(w => w.notionalUsd >= WALL_THRESHOLD);
 
     if (bidWalls.length > 0 || askWalls.length > 0) {
-        console.log(`[Book] Walls — bids: ${bidWalls.length} top@$${bidWalls[0]?.price.toFixed(2)} $${(bidWalls[0]?.notionalUsd/1000).toFixed(0)}K | asks: ${askWalls.length} top@$${askWalls[0]?.price.toFixed(2)} $${(askWalls[0]?.notionalUsd/1000).toFixed(0)}K`);
+        const bidTop = bidWalls[0] ? `top@$${bidWalls[0].price.toFixed(2)} $${(bidWalls[0].notionalUsd/1000).toFixed(0)}K` : 'none';
+        const askTop = askWalls[0] ? `top@$${askWalls[0].price.toFixed(2)} $${(askWalls[0].notionalUsd/1000).toFixed(0)}K` : 'none';
+        console.log(`[Book] Walls — bids: ${bidWalls.length} ${bidTop} | asks: ${askWalls.length} ${askTop}`);
     }
 
     return [{
