@@ -344,39 +344,29 @@ function getDirection(
         preferredReason += ` | ask wall@$${nearWall.price.toFixed(2)} ($${(nearWall.notionalUsd/1000).toFixed(0)}K)`;
     }
 
-    // ── Gate 6a: Oscillation gate (multi-candle chop check) ───────────────────
-    // Confirms the last 4 completed 5m candles are choppy, not trending.
-    // A single doji is noise — we need the whole recent structure to be tight.
-    const osc = isSafeOscillation(klines);
-    if (!osc.safe) {
-        return { direction: 'neutral', reasoning: `OSC BLOCK: ${osc.reason}`, confidence: 0 };
-    }
+    // Oscillation gate removed — 5m candle body ratios reflect macro trend,
+    // not tick-level oscillation. At $0.05-$0.20 TP targets, the relevant
+    // timeframe is seconds, not 5m candles. The velocity monitor (Gate 6)
+    // handles real-time directional flush detection instead.
 
-    // ── Gate 6b: 5-second velocity guard (WebSocket aggTrade) ─────────────────
-    // If the velocity monitor is live and detects a flush IN THE DIRECTION WE
-    // WANT TO FADE, block entry. We don't block on the matching direction —
-    // if we want to go long and buyers are spiking, that's momentum confirmation,
-    // not a danger sign.
-    //
-    // Fail-open if WebSocket isn't ready yet (first few seconds after bot start).
+    // ── Gate 6: 5-second velocity guard (WebSocket aggTrade) ─────────────────
     if (velocityState?.wsReady) {
-        if (preferredDir === 'long'  && velocityState.isSellFlush) {
+        if (preferredDir === 'long' && velocityState.isSellFlush) {
             return {
                 direction:  'neutral',
-                reasoning:  `VELOCITY BLOCK (LONG): sell flush detected — buy=${velocityState.buyVol5s} sell=${velocityState.sellVol5s} ratio=${velocityState.ratio}x. Sellers hitting bids aggressively.`,
+                reasoning:  `VELOCITY BLOCK (LONG): sell flush — buy=${velocityState.buyVol5s} sell=${velocityState.sellVol5s} ratio=${velocityState.ratio}x`,
                 confidence: 0,
             };
         }
         if (preferredDir === 'short' && velocityState.isBuyFlush) {
             return {
                 direction:  'neutral',
-                reasoning:  `VELOCITY BLOCK (SHORT): buy spike detected — buy=${velocityState.buyVol5s} sell=${velocityState.sellVol5s} ratio=${velocityState.ratio}x. Buyers hitting asks aggressively.`,
+                reasoning:  `VELOCITY BLOCK (SHORT): buy spike — buy=${velocityState.buyVol5s} sell=${velocityState.sellVol5s} ratio=${velocityState.ratio}x`,
                 confidence: 0,
             };
         }
     }
 
-    preferredReason += ` | osc:✓ ${osc.reason.split(':')[1]?.trim() ?? ''}`;
     return { direction: preferredDir, reasoning: preferredReason, confidence: preferredConf };
 }
 
