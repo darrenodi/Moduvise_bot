@@ -197,7 +197,7 @@ function getDirection(
     const m5 = ind.momentum5m;
 
     // ── Gate 1: ATR ceiling ───────────────────────────────────────────────────
-    const ATR_CEILING = 6.00;
+    const ATR_CEILING = Number(process.env.ATR_CEILING ?? 6.00);
     if (ind.atr5m > ATR_CEILING) {
         return {
             direction:  'neutral',
@@ -264,7 +264,7 @@ function getDirection(
     }
 
     // ── Gate 4: Momentum trap ─────────────────────────────────────────────────
-    const MOMENTUM_TRAP_USD = 0.30;
+    const MOMENTUM_TRAP_USD = Number(process.env.MOMENTUM_TRAP ?? 0.30);
     if (preferredDir === 'long'  && m5 < -MOMENTUM_TRAP_USD) {
         return { direction: 'neutral', reasoning: `MOMENTUM TRAP (LONG): mom=$${m5.toFixed(2)} breaking down.`, confidence: 0 };
     }
