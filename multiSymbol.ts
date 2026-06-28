@@ -2,7 +2,7 @@ import * as dotenv from 'dotenv';
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs   from 'fs';
-import { loadBankroll, saveBankroll, bankrollSummary } from './symbolBankroll.js';
+import { loadBankroll, saveBankroll, bankrollSummary, getCurrentMargin } from './symbolBankroll.js';
 import { sendAlert } from './executeTrade.js';
 dotenv.config();
 
