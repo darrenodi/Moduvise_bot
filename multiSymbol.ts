@@ -41,39 +41,39 @@ interface SymbolConfig {
     momentumTrap:   number;
     // Loss cooldown ms after any SL hit
     lossCooldownMs: number;
+    atrSlMult:      number;   // ATR multiplier for SL distance
 }
 
 const SYMBOLS: SymbolConfig[] = [
     {
-        // GOLD: tight scalper, small TP, very low ATR ceiling
         marketSymbol:   'XAUUSDT',
         displaySymbol:  'XAU/USDT',
         wsSymbol:       'xauusdt',
         leverage:       100,
         initialMargin:  1,
         tpAtrMult:      0.15,
-        tpMin:          0.10,   // minimum $0.10 TP on gold
+        tpMin:          0.10,
         tpMax:          1.00,
         atrCeiling:     6.00,
         momentumTrap:   0.30,
         lossCooldownMs: 120_000,
+        atrSlMult:      2.00,
     },
     {
-        // ETH: bigger ATR, bigger TP — signals are excellent, let them run
         marketSymbol:   'ETHUSDT',
         displaySymbol:  'ETH/USDT',
         wsSymbol:       'ethusdt',
         leverage:       100,
         initialMargin:  1,
-        tpAtrMult:      0.50,   // ETH ATR ~$3-8 → TP $1.50-4.00
-        tpMin:          1.00,   // minimum $1 TP — clears fees, captures real moves
-        tpMax:          10.00,  // allow up to $10 TP on big ATR sessions
-        atrCeiling:     30.00,  // ETH can move $20+ — much higher ceiling
-        momentumTrap:   2.00,   // ETH momentum in $2 units
+        tpAtrMult:      0.50,
+        tpMin:          1.00,
+        tpMax:          10.00,
+        atrCeiling:     30.00,
+        momentumTrap:   2.00,
         lossCooldownMs: 180_000,
+        atrSlMult:      1.50,
     },
     {
-        // DOGE: very small prices, large qty — max leverage 75x on Binance
         marketSymbol:   'DOGEUSDT',
         displaySymbol:  'DOGE/USDT',
         wsSymbol:       'dogeusdt',
@@ -85,20 +85,21 @@ const SYMBOLS: SymbolConfig[] = [
         atrCeiling:     0.005,
         momentumTrap:   0.001,
         lossCooldownMs: 120_000,
+        atrSlMult:      2.00,
     },
     {
-        // BTC: highest ATR, biggest TP, wider SL
         marketSymbol:   'BTCUSDT',
         displaySymbol:  'BTC/USDT',
         wsSymbol:       'btcusdt',
         leverage:       100,
         initialMargin:  1,
-        tpAtrMult:      0.40,   // BTC ATR ~$50-200 → TP $20-80
-        tpMin:          5.00,   // minimum $5 TP on BTC
+        tpAtrMult:      0.40,
+        tpMin:          5.00,
         tpMax:          100.00,
-        atrCeiling:     500.00, // BTC can move $300+ legitimately
-        momentumTrap:   10.00,  // BTC momentum in $10 units
+        atrCeiling:     500.00,
+        momentumTrap:   10.00,
         lossCooldownMs: 180_000,
+        atrSlMult:      0.50,  // BTC ATR ~$60 → SL $30 — tight enough to limit loss
     },
 ];
 
@@ -151,6 +152,7 @@ function spawnSymbol(entry: ManagedProcess): void {
         ATR_CEILING:      String(cfg.atrCeiling),
         MOMENTUM_TRAP:    String(cfg.momentumTrap),
         LOSS_COOLDOWN_MS: String(cfg.lossCooldownMs),
+        ATR_SL_MULT:      String(cfg.atrSlMult),
         // Isolated state & logs
         STATE_FILE:       `./bot-state-${cfg.marketSymbol}.json`,
         TRADE_LOG_FILE:   `./tradeLog-${cfg.marketSymbol}.jsonl`,

@@ -37,7 +37,7 @@ function getSymbolPrecision(symbol: string): {
     const s = symbol.toUpperCase();
     if (s === 'DOGEUSDT') return { tick: 0.00001, qtyStep: 1,     minQty: 1,     slMin: 0.002, tp2Offset: 0.0002, slBackupExtra: 0.001,  maxLeverage: 75  };
     if (s === 'ETHUSDT')  return { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 1.00,  tp2Offset: 0.10,   slBackupExtra: 0.50,   maxLeverage: 100 };
-    if (s === 'BTCUSDT')  return { tick: 0.10,    qtyStep: 0.001, minQty: 0.001, slMin: 5.00,  tp2Offset: 1.00,   slBackupExtra: 2.00,   maxLeverage: 100 };
+    if (s === 'BTCUSDT')  return { tick: 0.10,    qtyStep: 0.001, minQty: 0.001, slMin: 10.00, tp2Offset: 1.00,   slBackupExtra: 5.00,   maxLeverage: 100 };
     // Default: XAUUSDT
     return                       { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 0.50,  tp2Offset: 0.10,   slBackupExtra: 1.20,   maxLeverage: 100 };
 }
@@ -65,7 +65,7 @@ const STRATEGY = {
     TP_MIN:      Number(process.env.TP_MIN      ?? _precision.tick * 5),
     TP_MAX:      Number(process.env.TP_MAX      ?? 1.00),
 
-    ATR_SL_MULT:     2.00,
+    ATR_SL_MULT:     Number(process.env.ATR_SL_MULT ?? 2.00),
     SL_MIN:          _precision.slMin,
     SL_BACKUP_EXTRA: _precision.slBackupExtra,
 
