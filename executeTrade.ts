@@ -32,13 +32,14 @@ const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.e
 //  DOGEUSDT: tick=0.0001 qtyStep=1     minQty=1      slMin=0.002
 function getSymbolPrecision(symbol: string): {
     tick: number; qtyStep: number; minQty: number; slMin: number;
-    tp2Offset: number; slBackupExtra: number;
+    tp2Offset: number; slBackupExtra: number; maxLeverage: number;
 } {
     const s = symbol.toUpperCase();
-    if (s === 'DOGEUSDT') return { tick: 0.00001, qtyStep: 1,     minQty: 1,     slMin: 0.002, tp2Offset: 0.0002, slBackupExtra: 0.001  };
-    if (s === 'ETHUSDT')  return { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 1.00,  tp2Offset: 0.10,   slBackupExtra: 0.50   };
+    if (s === 'DOGEUSDT') return { tick: 0.00001, qtyStep: 1,     minQty: 1,     slMin: 0.002, tp2Offset: 0.0002, slBackupExtra: 0.001,  maxLeverage: 75  };
+    if (s === 'ETHUSDT')  return { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 1.00,  tp2Offset: 0.10,   slBackupExtra: 0.50,   maxLeverage: 100 };
+    if (s === 'BTCUSDT')  return { tick: 0.10,    qtyStep: 0.001, minQty: 0.001, slMin: 5.00,  tp2Offset: 1.00,   slBackupExtra: 2.00,   maxLeverage: 100 };
     // Default: XAUUSDT
-    return                       { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 0.50,  tp2Offset: 0.10,   slBackupExtra: 1.20   };
+    return                       { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 0.50,  tp2Offset: 0.10,   slBackupExtra: 1.20,   maxLeverage: 100 };
 }
 
 const _precision = getSymbolPrecision(MARKET_SYMBOL);
@@ -50,10 +51,11 @@ const STRATEGY = {
     // Single-symbol runs fall back to $50.
     MARGIN_PER_TRADE: Number(process.env.MARGIN_PER_TRADE ?? 50),
 
-    // Leverage: 10x demo / 100x live
+    // Leverage — capped by symbol's exchange limit
     get LEVERAGE() {
         const raw = Number(process.env.BOT_LEVERAGE ?? (IS_DEMO ? 10 : 100));
-        return IS_DEMO ? Math.min(raw, 10) : raw;
+        const cap = _precision.maxLeverage;
+        return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
     ENTRY_TICK: Number(process.env.ENTRY_TICK ?? _precision.tick),

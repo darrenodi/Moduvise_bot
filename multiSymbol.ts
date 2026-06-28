@@ -73,11 +73,11 @@ const SYMBOLS: SymbolConfig[] = [
         lossCooldownMs: 180_000,
     },
     {
-        // DOGE: very small prices, large qty, moderate TP
+        // DOGE: very small prices, large qty — max leverage 75x on Binance
         marketSymbol:   'DOGEUSDT',
         displaySymbol:  'DOGE/USDT',
         wsSymbol:       'dogeusdt',
-        leverage:       100,
+        leverage:       75,
         initialMargin:  1,
         tpAtrMult:      0.30,
         tpMin:          0.0005,

@@ -28,15 +28,15 @@ const IS_TESTNET  = ENVIRONMENT !== 'live';
 const BASE_URL    = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
 
 // ─── PER-SYMBOL BANKROLL ─────────────────────────────────────────────────────
-// Each symbol has its own $1 starting bankroll tracked in symbolBankroll.ts.
-// This main.ts instance manages one symbol (set via MARKET_SYMBOL env).
 const _symbol    = process.env.MARKET_SYMBOL ?? 'XAUUSDT';
 const startTime  = Date.now();
 let   _bankroll  = loadBankroll(_symbol, Number(process.env.INITIAL_MARGIN ?? 1));
 
-// Legacy aliases for compatibility with existing log/summary code
+// Legacy variables — kept for log/summary compatibility, synced from bankroll
 let tradingBalance = _bankroll.tradingStack;
 let bankedBalance  = _bankroll.bankedProfit;
+const BANK_SPLIT   = 0.50;  // mirrors symbolBankroll.ts constant
+const initialBalance = { value: _bankroll.totalDeposited, set: true };
 
 // ─── DAILY STATS ──────────────────────────────────────────────────────────────
 interface DayStats {
@@ -65,7 +65,7 @@ const STATE_FILE = process.env.STATE_FILE ?? './bot-state.json';
 function saveState(): void {
     try {
         fs.writeFileSync(STATE_FILE, JSON.stringify({
-            tradingBalance, bankedBalance, initialBalance, stats,
+            tradingBalance, bankedBalance, stats,
             savedAt: new Date().toISOString(),
         }, null, 2));
     } catch (e: any) {
@@ -77,12 +77,10 @@ function loadState(): void {
     try {
         if (!fs.existsSync(STATE_FILE)) return;
         const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
-        tradingBalance = raw.tradingBalance ?? 0;
-        bankedBalance  = raw.bankedBalance  ?? 0;
-        if (raw.initialBalance) Object.assign(initialBalance, raw.initialBalance);
+        // State file only stores daily stats — bankroll is in bankroll-{SYMBOL}.json
         const today = new Date().toISOString().slice(0, 10);
         if (raw.stats?.date === today) stats = raw.stats;
-        console.log(`[State] Restored — trading: $${tradingBalance.toFixed(4)} | banked: $${bankedBalance.toFixed(4)} | saved: ${raw.savedAt}`);
+        console.log(`[State] Daily stats restored | saved: ${raw.savedAt}`);
     } catch (e: any) {
         console.error(`[State] Load failed, starting fresh: ${e.message}`);
     }
@@ -664,19 +662,14 @@ async function runCycle(): Promise<void> {
         if (health === 'tp' || health === 'sl') { saveState(); return; }
         if (health === 'open') return;
 
-        // Sync balance on startup or after reset
-        const realBalance = await getAvailableBalance();
+        // Verify exchange has balance (don't overwrite bankroll)
         if (tradingBalance <= 0) {
-            if (realBalance > 0) {
-                tradingBalance       = realBalance;
-                initialBalance.value = realBalance;
-                initialBalance.set   = true;
-                console.log(`[Init] Capital base locked: $${tradingBalance.toFixed(4)}`);
-                saveState();
-            } else {
-                console.log('[Init] No available balance. Waiting...');
+            const realBalance = await getAvailableBalance();
+            if (realBalance <= 0) {
+                console.log('[Init] No available balance on exchange. Waiting...');
                 return;
             }
+            console.log(`[Init] Exchange balance confirmed: $${realBalance.toFixed(4)}`);
         }
 
         // Reload bankroll state (may have been updated by watchdog)
