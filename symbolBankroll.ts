@@ -1,6 +1,5 @@
 import * as fs   from 'fs';
 import * as path from 'path';
-import { sendAlert } from './executeTrade.js';
 
 // ─── PER-SYMBOL BANKROLL TRACKER ─────────────────────────────────────────────
 // Each symbol gets its own $1 starting bankroll tracked independently.
@@ -84,8 +83,9 @@ export function getCurrentMargin(b: SymbolBankroll): number {
 
 // Apply a trade result — win or loss
 export async function applyResult(
-    b:           SymbolBankroll,
+    b:          SymbolBankroll,
     realizedPnl: number,
+    sendAlert:   (msg: string) => Promise<void>,
 ): Promise<void> {
     b.trades++;
     if (realizedPnl > 0) {

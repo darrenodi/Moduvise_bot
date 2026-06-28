@@ -125,7 +125,7 @@ function printDailySummary(): void {
 
 // ─── BANKING ENGINE ──────────────────────────────────────────────────────────
 async function applyTradeResult(realizedPnl: number): Promise<void> {
-    await applyResult(_bankroll, realizedPnl);
+    await applyResult(_bankroll, realizedPnl, sendAlert);
     // Sync legacy aliases
     tradingBalance = _bankroll.tradingStack;
     bankedBalance  = _bankroll.bankedProfit;

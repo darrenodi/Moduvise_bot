@@ -132,7 +132,6 @@ function spawnSymbol(entry: ManagedProcess): void {
     }
 
     // Dynamic margin from current bankroll tier
-    const { getCurrentMargin } = require('./symbolBankroll.js');
     const margin = getCurrentMargin(bankroll);
 
     const env: NodeJS.ProcessEnv = {
