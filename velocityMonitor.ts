@@ -22,17 +22,20 @@ dotenv.config();
 const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
 
-const WS_BASE = IS_TESTNET
-    ? 'wss://dstream.binancefuture.com'
-    : 'wss://fstream.binance.com';
+// Binance migrated aggTrade to /market/ws after 2026-04-23.
+// Old: wss://fstream.binance.com/ws/{symbol}@aggTrade  → NO DATA (deprecated)
+// New: wss://fstream.binance.com/market/ws/{symbol}@aggTrade → works
+const WS_BASE   = IS_TESTNET ? 'wss://dstream.binancefuture.com' : 'wss://fstream.binance.com';
+const WS_PREFIX = IS_TESTNET ? '/ws' : '/market/ws';
 
 // Read from env — injected per-symbol by multiSymbol.ts orchestrator.
 // Falls back to 'xauusdt' for backwards compatibility with single-symbol runs.
 const SYMBOL_LOWER = (process.env.WS_SYMBOL ?? 'xauusdt').toLowerCase();
 
 const WINDOW_MS   = 5_000;   // 5-second rolling window
-const FLUSH_RATIO = 3.0;     // sellVol > buyVol × 3.0 = flush detected
-const SPIKE_RATIO = 3.0;     // buyVol  > sellVol × 3.0 = spike detected
+const FLUSH_RATIO = 2.0;     // lowered: 2:1 sell/buy triggers flush
+const SPIKE_RATIO = 2.0;     // lowered: 2:1 buy/sell triggers spike
+const MIN_VOL     = 0.0001;  // minimum volume to count a flush (avoid false positives on zero)
 
 // ─── ROLLING TRADE BUFFER ────────────────────────────────────────────────────
 interface AggTick {
@@ -71,8 +74,8 @@ export function getVelocityState(): VelocityState {
     }
 
     const ratio       = buyVol > 0 ? sellVol / buyVol : (sellVol > 0 ? 99 : 1);
-    const isSellFlush = sellVol > buyVol  * FLUSH_RATIO && sellVol > 0.001;
-    const isBuyFlush  = buyVol  > sellVol * SPIKE_RATIO  && buyVol  > 0.001;
+    const isSellFlush = sellVol > buyVol  * FLUSH_RATIO && sellVol > MIN_VOL;
+    const isBuyFlush  = buyVol  > sellVol * SPIKE_RATIO  && buyVol  > MIN_VOL;
     const staleSecs   = _lastTs > 0 ? Math.floor((Date.now() - _lastTs) / 1000) : 999;
 
     return {
@@ -88,7 +91,7 @@ export function getVelocityState(): VelocityState {
 
 // ─── WEBSOCKET CONNECTION ─────────────────────────────────────────────────────
 async function connect(): Promise<void> {
-    const url = `${WS_BASE}/ws/${SYMBOL_LOWER}@aggTrade`;
+    const url = `${WS_BASE}${WS_PREFIX}/${SYMBOL_LOWER}@aggTrade`;
     console.log(`[VelocityMonitor:${SYMBOL_LOWER.toUpperCase()}] Connecting: ${url}`);
 
     // Use the built-in Node.js WebSocket (Node 22+) or ws package
