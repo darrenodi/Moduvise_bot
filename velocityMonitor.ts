@@ -31,9 +31,8 @@ const WS_BASE = IS_TESTNET
 const SYMBOL_LOWER = (process.env.WS_SYMBOL ?? 'xauusdt').toLowerCase();
 
 const WINDOW_MS   = 5_000;   // 5-second rolling window
-const FLUSH_RATIO = 2.0;     // lowered from 3.0 — triggers on 2:1 sell/buy imbalance
-const SPIKE_RATIO = 2.0;     // lowered from 3.0 — triggers on 2:1 buy/sell imbalance
-const MIN_VOL     = 0.0001;  // lowered from 0.001 — catches small XAU trades
+const FLUSH_RATIO = 3.0;     // sellVol > buyVol × 3.0 = flush detected
+const SPIKE_RATIO = 3.0;     // buyVol  > sellVol × 3.0 = spike detected
 
 // ─── ROLLING TRADE BUFFER ────────────────────────────────────────────────────
 interface AggTick {

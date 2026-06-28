@@ -59,8 +59,8 @@ const STRATEGY = {
     ENTRY_TICK: Number(process.env.ENTRY_TICK ?? _precision.tick),
 
     // TP: dynamic — clamp(atr5m × TP_ATR_MULT, TP_MIN, TP_MAX)
-    TP_ATR_MULT: Number(process.env.TP_ATR_MULT ?? 0.20),  // raised from 0.10 — TP must clear fees
-    TP_MIN:      Number(process.env.TP_MIN      ?? 0.20),  // raised — must be > fee cost
+    TP_ATR_MULT: Number(process.env.TP_ATR_MULT ?? 0.10),
+    TP_MIN:      Number(process.env.TP_MIN      ?? _precision.tick * 5),
     TP_MAX:      Number(process.env.TP_MAX      ?? 1.00),
 
     ATR_SL_MULT:     2.00,

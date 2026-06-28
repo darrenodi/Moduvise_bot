@@ -5,6 +5,7 @@ import { generateSignals, getSession, detectRegime, MARKET_SYMBOL, DISPLAY_SYMBO
 import type { MarketData, TechnicalIndicators, GeneratedSignal } from './signals.js';
 import { startVelocityMonitor, getVelocityState } from './velocityMonitor.js';
 import { checkKillSwitch, analyseFailedTrade } from './geminiAdvisor.js';
+import { loadBankroll, applyResult, getCurrentMargin, saveBankroll } from './symbolBankroll.js';
 import {
     executeBinanceTrade,
     getAvailableBalance,
@@ -26,15 +27,16 @@ const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
 const BASE_URL    = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
 
-// ─── BANKING SYSTEM ───────────────────────────────────────────────────────────
-// Each winning trade: split profit BANK_SPLIT (50%) to protected banked ledger,
-// rest compounds into trading balance. Losses only deduct from tradingBalance.
-const BANK_SPLIT = Number(process.env.BANK_SPLIT ?? 0.50);
+// ─── PER-SYMBOL BANKROLL ─────────────────────────────────────────────────────
+// Each symbol has its own $1 starting bankroll tracked in symbolBankroll.ts.
+// This main.ts instance manages one symbol (set via MARKET_SYMBOL env).
+const _symbol    = process.env.MARKET_SYMBOL ?? 'XAUUSDT';
+const startTime  = Date.now();
+let   _bankroll  = loadBankroll(_symbol, Number(process.env.INITIAL_MARGIN ?? 1));
 
-let tradingBalance   = 0;
-let bankedBalance    = 0;
-const startTime      = Date.now();
-const initialBalance = { value: 0, set: false };
+// Legacy aliases for compatibility with existing log/summary code
+let tradingBalance = _bankroll.tradingStack;
+let bankedBalance  = _bankroll.bankedProfit;
 
 // ─── DAILY STATS ──────────────────────────────────────────────────────────────
 interface DayStats {
@@ -121,27 +123,19 @@ function printDailySummary(): void {
     console.log(`${'█'.repeat(70)}\n`);
 }
 
-// ─── BANKING ENGINE ───────────────────────────────────────────────────────────
-function applyTradeResult(realizedPnl: number): void {
-    if (realizedPnl <= 0) {
-        tradingBalance = Math.max(0, tradingBalance + realizedPnl);
+// ─── BANKING ENGINE ──────────────────────────────────────────────────────────
+async function applyTradeResult(realizedPnl: number): Promise<void> {
+    await applyResult(_bankroll, realizedPnl);
+    // Sync legacy aliases
+    tradingBalance = _bankroll.tradingStack;
+    bankedBalance  = _bankroll.bankedProfit;
+    if (realizedPnl > 0) {
+        stats.grossProfit += realizedPnl;
+        stats.netProfit   += realizedPnl;
+    } else {
         stats.netProfit += realizedPnl;
         stats.slLoss    += Math.abs(realizedPnl);
-        console.log(`[Bank] 🔴 Loss: $${realizedPnl.toFixed(4)} | Trading: $${tradingBalance.toFixed(4)} | Banked: $${bankedBalance.toFixed(4)}`);
-        return;
     }
-    const toBank     = realizedPnl * BANK_SPLIT;
-    const toCompound = realizedPnl * (1 - BANK_SPLIT);
-    bankedBalance  += toBank;
-    tradingBalance += toCompound;
-    stats.grossProfit += realizedPnl;
-    stats.netProfit   += realizedPnl;
-    console.log(
-        `[Bank] 🟢 Profit: +$${realizedPnl.toFixed(4)} | ` +
-        `Compounded: +$${toCompound.toFixed(4)} | ` +
-        `Banked: +$${toBank.toFixed(4)} | ` +
-        `Stack: $${tradingBalance.toFixed(4)} | Total Banked: $${bankedBalance.toFixed(4)}`
-    );
 }
 
 // ─── TRADE LOGGER ─────────────────────────────────────────────────────────────
@@ -472,14 +466,7 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
 // Total guaranteed max trade lifetime: 120s (+ 10s buffer = 130s backstop).
 let _currentTradeId: string | null = null;
 let _priceAtTp1Timeout: number | undefined;
-
-// ─── LOSS COOLDOWN ────────────────────────────────────────────────────────────
-// After a loss, pause trading for LOSS_COOLDOWN_MS before the next entry.
-// This prevents the bot flipping long→short→long in a choppy ranging market,
-// which was causing the pattern of alternating small losses every 2 minutes.
-// The market that just stopped you out hasn't changed — wait for it to settle.
-const LOSS_COOLDOWN_MS = Number(process.env.LOSS_COOLDOWN_MS ?? 120_000); // 2 minutes
-let   _lastLossAt      = 0;
+let _lastLossAt = 0;
 
 async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     const pos   = await getOpenPositionDetails();
@@ -493,7 +480,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 const outcome = real.pnl >= 0 ? 'tp' : 'sl';
                 if (outcome === 'tp') stats.tpHits++; else stats.slHits++;
                 stats.fills++;
-                applyTradeResult(real.pnl);
+                await applyTradeResult(real.pnl);
                 await cancelAllOrders(trade.slAlgoId);
                 if (_currentTradeId) {
                     logTradeClose(
@@ -508,7 +495,6 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 console.log(`[Health] ${outcome.toUpperCase()} confirmed | PnL: $${real.pnl.toFixed(4)} | fills: ${real.trades}`);
                 const killed = await checkKillSwitch(real.pnl, sendAlert);
                 if (killed) { process.exit(0); }
-                if (outcome === 'sl') { _lastLossAt = Date.now(); }
                 if (outcome === 'sl' && _currentTradeId) {
                     try {
                         const lines = fs.readFileSync(process.env.TRADE_LOG_FILE ?? './tradeLog.jsonl', 'utf-8').split('\n').filter((l: string) => l.trim() && l.includes(_currentTradeId!));
@@ -555,7 +541,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         const pnl  = real ? real.pnl : profit * trade.size;
         if (pnl >= 0) stats.tpHits++; else stats.slHits++;
         stats.fills++;
-        applyTradeResult(pnl);
+        await applyTradeResult(pnl);
 
         if (_currentTradeId) {
             logTradeClose(
@@ -604,7 +590,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
             const pnl  = real ? real.pnl : profit * trade.size;
             if (pnl >= 0) stats.tpHits++; else stats.slHits++;
             stats.fills++;
-            applyTradeResult(pnl);
+            await applyTradeResult(pnl);
             if (_currentTradeId) {
                 logTradeClose(_currentTradeId, pnl >= 0 ? 'tp' : 'sl', pos.currentPrice, pnl, 'scratch', true, true, _priceAtTp1Timeout);
                 _currentTradeId    = null;
@@ -633,7 +619,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         const pnl  = real ? real.pnl : profit * trade.size;
         if (pnl >= 0) stats.tpHits++; else stats.slHits++;
         stats.fills++;
-        applyTradeResult(pnl);
+        await applyTradeResult(pnl);
         if (_currentTradeId) {
             logTradeClose(_currentTradeId, pnl >= 0 ? 'tp' : 'sl', pos.currentPrice, pnl, 'scratch', false, true, _priceAtTp1Timeout);
             _currentTradeId    = null;
@@ -656,8 +642,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         const loss = real ? real.pnl : -(trade.size * adverseMove);
         stats.slHits++;
         stats.fills++;
-        applyTradeResult(loss);
-        _lastLossAt = Date.now();
+        await applyTradeResult(loss);
         if (_currentTradeId) {
             logTradeClose(_currentTradeId, 'sl', pos.currentPrice, loss, 'failsafe', false, false);
             _currentTradeId = null;
@@ -694,10 +679,22 @@ async function runCycle(): Promise<void> {
             }
         }
 
-        // Loss cooldown — don't re-enter immediately after a loss
-        const cooldownRemaining = (_lastLossAt + LOSS_COOLDOWN_MS) - Date.now();
-        if (cooldownRemaining > 0) {
-            console.log(`[Cooldown] ⏸ ${Math.ceil(cooldownRemaining/1000)}s remaining after last loss — sitting out`);
+        // Reload bankroll state (may have been updated by watchdog)
+        _bankroll = loadBankroll(_symbol, Number(process.env.INITIAL_MARGIN ?? 1));
+        tradingBalance = _bankroll.tradingStack;
+        bankedBalance  = _bankroll.bankedProfit;
+
+        // Pause check — bankroll exhausted
+        if (_bankroll.paused) {
+            console.log(`[${_symbol}] ⛔ Bankroll paused — ${_bankroll.pausedReason}`);
+            return;
+        }
+
+        // Loss cooldown
+        const LOSS_COOLDOWN_MS = Number(process.env.LOSS_COOLDOWN_MS ?? 120_000);
+        const cooldownLeft = (_lastLossAt + LOSS_COOLDOWN_MS) - Date.now();
+        if (cooldownLeft > 0) {
+            console.log(`[Cooldown] ⏸ ${Math.ceil(cooldownLeft/1000)}s after last loss`);
             return;
         }
 
@@ -714,7 +711,10 @@ async function runCycle(): Promise<void> {
             return;
         }
 
-        const result = await executeBinanceTrade(signal, 0); // sizing uses fixed $50 margin internally
+        // Dynamic margin from bankroll tier
+        const margin = getCurrentMargin(_bankroll);
+        process.env.MARGIN_PER_TRADE = String(margin);
+        const result = await executeBinanceTrade(signal, 0);
 
         if (result.outcome === 'orders_placed' && result.entryPrice) {
             // Generate a unique trade ID and log full entry context
