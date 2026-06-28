@@ -774,15 +774,15 @@ console.log(`  TP1      : ATR×0.10 (min $0.05, max $1.00)`);
 console.log(`  TP2      : rescue limit after 90s`);
 console.log(`  SCRATCH  : market exit after 120s`);
 console.log(`  ATR GATE : $6.00 max — sits out trap markets`);
-console.log(`  BANK     : ${(BANK_SPLIT*100).toFixed(0)}% banked / ${((1-BANK_SPLIT)*100).toFixed(0)}% compounded`);
+console.log(`  BANK     : 50% banked / 50% compounded per symbol`);
 console.log(`  ACCOUNT  : ${process.env.ENVIRONMENT === "live" ? "LIVE 🟢" : "DEMO 🟡"} | MARGIN $${_margin}/trade | LEVERAGE ${leverage}x`);
 console.log(`  KILL     : $1000 cumulative loss -> Gemini auto-shutdown`);
 console.log(`  LOG      : ${TRADE_LOG_FILE}`);
 console.log(`${'═'.repeat(70)}\n`);
 
 sendAlert(
-    `✅ Bot started | ENV=${ENVIRONMENT} | ${leverage}x | ` +
-    `stack=$${tradingBalance.toFixed(4)} | banked=$${bankedBalance.toFixed(4)}`
+    `✅ ${_symbol} started | ENV=${ENVIRONMENT} | ${leverage}x | ` +
+    `stack=$${getStack().toFixed(4)} | banked=$${getBanked().toFixed(4)}`
 );
 
 startVelocityMonitor();
