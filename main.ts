@@ -4,8 +4,8 @@ import { RSI, EMA, ADX, ATR } from 'technicalindicators';
 import { generateSignals, getSession, detectRegime, MARKET_SYMBOL, DISPLAY_SYMBOL } from './signals.js';
 import type { MarketData, TechnicalIndicators, GeneratedSignal } from './signals.js';
 import { startVelocityMonitor, getVelocityState } from './velocityMonitor.js';
+import { loadBankroll, saveBankroll, applyTradeResult as bankrollApply, getCurrentMargin, bankrollSummary, type SymbolBankroll } from './symbolBankroll.js';
 import { checkKillSwitch, analyseFailedTrade } from './geminiAdvisor.js';
-import { loadBankroll, applyResult, getCurrentMargin, saveBankroll } from './symbolBankroll.js';
 import {
     executeBinanceTrade,
     getAvailableBalance,
@@ -27,16 +27,12 @@ const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
 const BASE_URL    = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
 
-// ─── PER-SYMBOL BANKROLL ─────────────────────────────────────────────────────
-const _symbol    = process.env.MARKET_SYMBOL ?? 'XAUUSDT';
-const startTime  = Date.now();
-let   _bankroll  = loadBankroll(_symbol, Number(process.env.INITIAL_MARGIN ?? 1));
-
-// Legacy variables — kept for log/summary compatibility, synced from bankroll
-let tradingBalance = _bankroll.tradingStack;
-let bankedBalance  = _bankroll.bankedProfit;
-const BANK_SPLIT   = 0.50;  // mirrors symbolBankroll.ts constant
-const initialBalance = { value: _bankroll.totalDeposited, set: true };
+// ─── BANKING SYSTEM ───────────────────────────────────────────────────────────
+const _symbol   = process.env.MARKET_SYMBOL ?? 'XAUUSDT';
+const startTime = Date.now();
+let _bankroll: SymbolBankroll | null = null;
+function getStack():  number { return _bankroll?.stack  ?? 0; }
+function getBanked(): number { return _bankroll?.banked ?? 0; }
 
 // ─── DAILY STATS ──────────────────────────────────────────────────────────────
 interface DayStats {
@@ -64,26 +60,31 @@ const STATE_FILE = process.env.STATE_FILE ?? './bot-state.json';
 
 function saveState(): void {
     try {
-        fs.writeFileSync(STATE_FILE, JSON.stringify({
-            tradingBalance, bankedBalance, stats,
-            savedAt: new Date().toISOString(),
-        }, null, 2));
-    } catch (e: any) {
-        console.error(`[State] Save failed: ${e.message}`);
-    }
+        if (_bankroll) saveBankroll(_bankroll);
+        const sf = process.env.STATS_FILE ?? `./stats-${_symbol}.json`;
+        fs.writeFileSync(sf, JSON.stringify({ stats, savedAt: new Date().toISOString() }, null, 2));
+    } catch (e: any) { console.error(`[State] Save failed: ${e.message}`); }
 }
 
 function loadState(): void {
-    try {
-        if (!fs.existsSync(STATE_FILE)) return;
-        const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
-        // State file only stores daily stats — bankroll is in bankroll-{SYMBOL}.json
-        const today = new Date().toISOString().slice(0, 10);
-        if (raw.stats?.date === today) stats = raw.stats;
-        console.log(`[State] Daily stats restored | saved: ${raw.savedAt}`);
-    } catch (e: any) {
-        console.error(`[State] Load failed, starting fresh: ${e.message}`);
+    _bankroll = loadBankroll(_symbol);
+    if (!_bankroll) {
+        console.error(`[${_symbol}] ❌ No bankroll found — start with multiSymbol.ts`);
+        process.exit(1);
     }
+    if (_bankroll.paused) {
+        console.log(`[${_symbol}] ⛔ Paused: ${_bankroll.pausedReason}`);
+        process.exit(0);
+    }
+    console.log(`[${_symbol}] Bankroll: stack=$${_bankroll.stack.toFixed(4)} banked=$${_bankroll.banked.toFixed(4)}`);
+    try {
+        const sf = process.env.STATS_FILE ?? `./stats-${_symbol}.json`;
+        if (fs.existsSync(sf)) {
+            const raw = JSON.parse(fs.readFileSync(sf, 'utf-8'));
+            const today = new Date().toISOString().slice(0, 10);
+            if (raw.stats?.date === today) stats = raw.stats;
+        }
+    } catch { /* start fresh stats */ }
 }
 
 // ─── DAY ROLLOVER ─────────────────────────────────────────────────────────────
@@ -91,11 +92,7 @@ function checkReset(): void {
     const today = new Date().toISOString().slice(0, 10);
     if (stats.date && stats.date !== today) {
         printDailySummary();
-        sendAlert(
-            `📊 Day ${stats.date}: ${stats.fills} trades | ` +
-            `${stats.tpHits}TP / ${stats.slHits}SL | ` +
-            `net $${stats.netProfit.toFixed(4)} | ` +
-            `trading $${tradingBalance.toFixed(4)} | banked $${bankedBalance.toFixed(4)}`
+        sendAlert(`📊 ${_symbol} Day ${stats.date}: ${stats.fills} trades | ${stats.tpHits}TP/${stats.slHits}SL | net $${stats.netProfit.toFixed(4)} | ${_bankroll ? bankrollSummary(_bankroll) : ''}`
         );
         stats = freshStats();
         stats.date = today;
@@ -110,29 +107,19 @@ function printDailySummary(): void {
     console.log(`📊 DAILY SUMMARY — ${stats.date} (${uptime}h uptime)`);
     console.log(`Trades: ${stats.fills} | Win rate: ${tpRate}% | Skipped: ${stats.skipped}`);
     console.log(`Gross: +$${stats.grossProfit.toFixed(4)} | Net: $${stats.netProfit.toFixed(4)} | SL Loss: -$${stats.slLoss.toFixed(4)}`);
-    console.log(`💼 Trading Stack:   $${tradingBalance.toFixed(4)}`);
-    console.log(`🏦 Banked Profit:   $${bankedBalance.toFixed(4)}`);
-    console.log(`📦 Total in Wallet: $${(tradingBalance + bankedBalance).toFixed(4)}`);
-    if (initialBalance.set) {
-        const total = tradingBalance + bankedBalance;
-        const ret   = ((total - initialBalance.value) / initialBalance.value * 100).toFixed(2);
-        console.log(`📈 Return on $${initialBalance.value.toFixed(2)}: ${ret}%`);
-    }
+    if (_bankroll) console.log(bankrollSummary(_bankroll));
     console.log(`${'█'.repeat(70)}\n`);
 }
 
-// ─── BANKING ENGINE ──────────────────────────────────────────────────────────
+// ─── BANKING ENGINE ───────────────────────────────────────────────────────────
 async function applyTradeResult(realizedPnl: number): Promise<void> {
-    await applyResult(_bankroll, realizedPnl, sendAlert);
-    // Sync legacy aliases
-    tradingBalance = _bankroll.tradingStack;
-    bankedBalance  = _bankroll.bankedProfit;
-    if (realizedPnl > 0) {
-        stats.grossProfit += realizedPnl;
-        stats.netProfit   += realizedPnl;
-    } else {
-        stats.netProfit += realizedPnl;
-        stats.slLoss    += Math.abs(realizedPnl);
+    if (!_bankroll) return;
+    const { updated, shouldPause } = bankrollApply(_bankroll, realizedPnl);
+    _bankroll = updated;
+    if (realizedPnl > 0) { stats.grossProfit += realizedPnl; stats.netProfit += realizedPnl; }
+    else { stats.netProfit += realizedPnl; stats.slLoss += Math.abs(realizedPnl); }
+    if (shouldPause) {
+        await sendAlert(`⛔ ${_symbol} PAUSED — stack $${_bankroll.stack.toFixed(4)} < $0.60. Banked (safe): $${_bankroll.banked.toFixed(4)}`);
     }
 }
 
@@ -662,32 +649,18 @@ async function runCycle(): Promise<void> {
         if (health === 'tp' || health === 'sl') { saveState(); return; }
         if (health === 'open') return;
 
-        // Verify exchange has balance (don't overwrite bankroll)
-        if (tradingBalance <= 0) {
-            const realBalance = await getAvailableBalance();
-            if (realBalance <= 0) {
-                console.log('[Init] No available balance on exchange. Waiting...');
-                return;
-            }
-            console.log(`[Init] Exchange balance confirmed: $${realBalance.toFixed(4)}`);
-        }
+        // Margin already set from bankroll tier in cycle reload above
 
-        // Reload bankroll state (may have been updated by watchdog)
-        _bankroll = loadBankroll(_symbol, Number(process.env.INITIAL_MARGIN ?? 1));
-        tradingBalance = _bankroll.tradingStack;
-        bankedBalance  = _bankroll.bankedProfit;
+        // Reload bankroll from disk each cycle
+        _bankroll = loadBankroll(_symbol);
+        if (!_bankroll || _bankroll.paused) { return; }
+        // Set margin dynamically based on current stack tier
+        process.env.MARGIN_PER_TRADE = String(getCurrentMargin(_bankroll));
 
-        // Pause check — bankroll exhausted
-        if (_bankroll.paused) {
-            console.log(`[${_symbol}] ⛔ Bankroll paused — ${_bankroll.pausedReason}`);
-            return;
-        }
-
-        // Loss cooldown
-        const LOSS_COOLDOWN_MS = Number(process.env.LOSS_COOLDOWN_MS ?? 120_000);
-        const cooldownLeft = (_lastLossAt + LOSS_COOLDOWN_MS) - Date.now();
-        if (cooldownLeft > 0) {
-            console.log(`[Cooldown] ⏸ ${Math.ceil(cooldownLeft/1000)}s after last loss`);
+        // Loss cooldown — don't re-enter immediately after a loss in a ranging market
+        const LOSS_CD_MS = Number(process.env.LOSS_COOLDOWN_MS ?? 120_000);
+        if (Date.now() - _lastLossAt < LOSS_CD_MS) {
+            console.log(`[${_symbol}] ⏸ Cooldown: ${Math.ceil((LOSS_CD_MS-(Date.now()-_lastLossAt))/1000)}s`);
             return;
         }
 
@@ -697,17 +670,14 @@ async function runCycle(): Promise<void> {
         const signal  = signals[0];
         const asset   = assets[0];
 
-        console.log(`[Heartbeat] ${signal.reasoning} | Stack: $${tradingBalance.toFixed(4)} | Banked: $${bankedBalance.toFixed(4)}`);
+        console.log(`[Heartbeat] ${signal.reasoning} | Stack: $${getStack().toFixed(4)} | Banked: $${getBanked().toFixed(4)}`);
 
         if (signal.direction === 'neutral') {
             stats.skipped++;
             return;
         }
 
-        // Dynamic margin from bankroll tier
-        const margin = getCurrentMargin(_bankroll);
-        process.env.MARGIN_PER_TRADE = String(margin);
-        const result = await executeBinanceTrade(signal, 0);
+        const result = await executeBinanceTrade(signal, 0); // sizing uses fixed $50 margin internally
 
         if (result.outcome === 'orders_placed' && result.entryPrice) {
             // Generate a unique trade ID and log full entry context
@@ -731,7 +701,14 @@ async function runCycle(): Promise<void> {
             );
         } else {
             stats.skipped++;
-            console.log(`[Skipped] ${result.message}`);
+            if (result.message?.startsWith('MARGIN_INSUFFICIENT')) {
+                if (_bankroll) { _bankroll.paused = true; _bankroll.pausedReason = 'Margin insufficient'; saveBankroll(_bankroll); }
+                await sendAlert(`⛔ ${_symbol} PAUSED — margin insufficient. Deposit more.`);
+                return;
+            }
+            if (result.message && result.message !== 'Position already open.' && result.message !== 'Entry GTX not filled.') {
+                console.log(`[Skipped] ${result.message}`);
+            }
         }
 
     } catch (e: any) {

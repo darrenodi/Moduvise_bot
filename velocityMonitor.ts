@@ -24,7 +24,7 @@ const IS_TESTNET  = ENVIRONMENT !== 'live';
 
 const WS_BASE = IS_TESTNET
     ? 'wss://dstream.binancefuture.com'
-    : process.env.WS_BASE ?? 'wss://fstream.binance.com';
+    : 'wss://fstream.binance.com';
 
 // Read from env — injected per-symbol by multiSymbol.ts orchestrator.
 // Falls back to 'xauusdt' for backwards compatibility with single-symbol runs.
