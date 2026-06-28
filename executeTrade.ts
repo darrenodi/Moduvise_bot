@@ -32,14 +32,13 @@ const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.e
 //  DOGEUSDT: tick=0.0001 qtyStep=1     minQty=1      slMin=0.002
 function getSymbolPrecision(symbol: string): {
     tick: number; qtyStep: number; minQty: number; slMin: number;
-    tp2Offset: number; slBackupExtra: number; maxLeverage: number;
+    tp2Offset: number; slBackupExtra: number;
 } {
     const s = symbol.toUpperCase();
-    if (s === 'DOGEUSDT') return { tick: 0.00001, qtyStep: 1,     minQty: 1,     slMin: 0.002, tp2Offset: 0.0002, slBackupExtra: 0.001,  maxLeverage: 75  };
-    if (s === 'ETHUSDT')  return { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 1.00,  tp2Offset: 0.10,   slBackupExtra: 0.50,   maxLeverage: 100 };
-    if (s === 'BTCUSDT')  return { tick: 0.10,    qtyStep: 0.001, minQty: 0.001, slMin: 10.00, tp2Offset: 1.00,   slBackupExtra: 5.00,   maxLeverage: 100 };
+    if (s === 'DOGEUSDT') return { tick: 0.00001, qtyStep: 1,     minQty: 1,     slMin: 0.002, tp2Offset: 0.0002, slBackupExtra: 0.001  };
+    if (s === 'ETHUSDT')  return { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 1.00,  tp2Offset: 0.10,   slBackupExtra: 0.50   };
     // Default: XAUUSDT
-    return                       { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 0.50,  tp2Offset: 0.10,   slBackupExtra: 1.20,   maxLeverage: 100 };
+    return                       { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 0.50,  tp2Offset: 0.10,   slBackupExtra: 1.20   };
 }
 
 const _precision = getSymbolPrecision(MARKET_SYMBOL);
@@ -51,11 +50,10 @@ const STRATEGY = {
     // Single-symbol runs fall back to $50.
     MARGIN_PER_TRADE: Number(process.env.MARGIN_PER_TRADE ?? 50),
 
-    // Leverage — capped by symbol's exchange limit
+    // Leverage: 10x demo / 100x live
     get LEVERAGE() {
         const raw = Number(process.env.BOT_LEVERAGE ?? (IS_DEMO ? 10 : 100));
-        const cap = _precision.maxLeverage;
-        return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
+        return IS_DEMO ? Math.min(raw, 10) : raw;
     },
 
     ENTRY_TICK: Number(process.env.ENTRY_TICK ?? _precision.tick),
@@ -436,7 +434,12 @@ export async function executeBinanceTrade(
         });
 
         if (!entryOrder?.orderId) {
-            return { success: false, outcome: 'error', message: `GTX order rejected: ${JSON.stringify(entryOrder)}` };
+            const msg = JSON.stringify(entryOrder);
+            if (entryOrder?.code === -2019) {
+                // Margin insufficient — tell main.ts to pause this symbol
+                return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${msg}` };
+            }
+            return { success: false, outcome: 'error', message: `GTX order rejected: ${msg}` };
         }
 
         // Poll for fill
@@ -470,18 +473,37 @@ export async function executeBinanceTrade(
 
         console.log(`[Execution] ✅ ${direction.toUpperCase()} filled @ $${actualEntry.toFixed(priceDp)} | ${size} ${STRATEGY.SYMBOL} | TP:$${tpPrice.toFixed(priceDp)} SL:$${slPrice.toFixed(priceDp)}`);
 
-        // TP1 resting limit
+        // TP1 resting limit — MUST succeed. No TP = no exit = uncontrolled loss.
         let tpOrderId = 0;
-        try {
-            const tpOrder = await privatePost('/fapi/v1/order', {
-                symbol: STRATEGY.SYMBOL, side: closeSide, type: 'LIMIT',
-                timeInForce: 'GTC', price: tpPrice.toFixed(priceDp),
-                quantity: size.toFixed(qtyDp), reduceOnly: 'true',
-            });
-            tpOrderId = tpOrder.orderId ?? 0;
-        } catch (e: any) { console.error(`[TP] Failed: ${e.message}`); }
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const tpOrder = await privatePost('/fapi/v1/order', {
+                    symbol: STRATEGY.SYMBOL, side: closeSide, type: 'LIMIT',
+                    timeInForce: 'GTC', price: tpPrice.toFixed(priceDp),
+                    quantity: size.toFixed(qtyDp), reduceOnly: 'true',
+                });
+                if (tpOrder?.orderId) {
+                    tpOrderId = tpOrder.orderId;
+                    console.log(`[TP] ✅ Set @ $${tpPrice.toFixed(priceDp)} | orderId=${tpOrderId}`);
+                    break;
+                } else {
+                    console.error(`[TP] ❌ Attempt ${attempt} rejected: ${JSON.stringify(tpOrder)}`);
+                    if (attempt < 3) await new Promise(r => setTimeout(r, 1000));
+                }
+            } catch (e: any) {
+                console.error(`[TP] ❌ Attempt ${attempt} threw: ${e.message}`);
+                if (attempt < 3) await new Promise(r => setTimeout(r, 1000));
+            }
+        }
+        if (!tpOrderId) {
+            // TP failed 3 times — emergency close to prevent uncontrolled position
+            console.error(`[TP] ❌ ALL ATTEMPTS FAILED — emergency closing position`);
+            await sendAlert(`🚨 ${STRATEGY.SYMBOL} TP placement failed 3 times — emergency closing. Check position!`);
+            await triggerEmergencyClose(direction, size, 'TP placement total failure');
+            return { success: false, outcome: 'error', message: 'TP placement failed, emergency closed.' };
+        }
 
-        // Primary SL — algo stop on mark price
+        // Primary SL — algo conditional stop on mark price
         let slAlgoId = 0;
         try {
             const slOrder = await privatePost('/fapi/v1/algoOrder', {
@@ -489,10 +511,15 @@ export async function executeBinanceTrade(
                 type: 'STOP_MARKET', quantity: size.toFixed(qtyDp),
                 triggerPrice: slPrice.toFixed(priceDp), workingType: 'MARK_PRICE', reduceOnly: 'true',
             });
-            slAlgoId = slOrder.algoId ?? 0;
-        } catch (e: any) { console.error(`[SL] Primary failed: ${e.message}`); }
+            if (slOrder?.algoId) {
+                slAlgoId = slOrder.algoId;
+                console.log(`[SL] ✅ Primary @ $${slPrice.toFixed(priceDp)} | algoId=${slAlgoId}`);
+            } else {
+                console.error(`[SL] ❌ Primary rejected: ${JSON.stringify(slOrder)}`);
+            }
+        } catch (e: any) { console.error(`[SL] Primary threw: ${e.message}`); }
 
-        // Backup SL
+        // Backup SL — regular stop market order
         let slBackupId = 0;
         try {
             const backupOrder = await privatePost('/fapi/v1/order', {
@@ -500,8 +527,13 @@ export async function executeBinanceTrade(
                 stopPrice: slBackupPrice.toFixed(priceDp), quantity: size.toFixed(qtyDp),
                 workingType: 'MARK_PRICE', reduceOnly: 'true',
             });
-            slBackupId = backupOrder.orderId ?? 0;
-        } catch (e: any) { console.error(`[SL] Backup failed: ${e.message}`); }
+            if (backupOrder?.orderId) {
+                slBackupId = backupOrder.orderId;
+                console.log(`[SL] ✅ Backup @ $${slBackupPrice.toFixed(priceDp)} | orderId=${slBackupId}`);
+            } else {
+                console.error(`[SL] ❌ Backup rejected: ${JSON.stringify(backupOrder)}`);
+            }
+        } catch (e: any) { console.error(`[SL] Backup threw: ${e.message}`); }
 
         if (!slAlgoId && !slBackupId) {
             await sendAlert(`🚨 Both SL orders failed. Emergency closing.`);
