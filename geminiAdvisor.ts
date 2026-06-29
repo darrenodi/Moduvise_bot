@@ -151,7 +151,7 @@ AVAILABLE GATES (what the bot checks before entering):
 RECENT PERFORMANCE CONTEXT:
 ${JSON.stringify(ctx.recentDiagnoses.slice(-5), null, 2)}
 
-Respond ONLY with valid JSON, no markdown:
+YOU MUST respond with ONLY raw JSON. No markdown. No code blocks. No explanation. Start your response with { and end with }.
 {
   "gateFailed": "name of the gate that should have blocked this (or 'none — bad luck' if all gates passed correctly)",
   "gateAdjustment": "specific threshold change to prevent this in future, e.g. 'raise ATR ceiling to $5.00' or 'tighten momentum trap to $0.30'",
@@ -163,7 +163,9 @@ Respond ONLY with valid JSON, no markdown:
 
     try {
         const raw      = await callGemini(prompt);
-        const match    = raw.match(/\{[\s\S]*\}/);
+        // Strip markdown fences if Gemini wraps in ```json ... ```
+        const stripped = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+        const match    = stripped.match(/\{[\s\S]*\}/);
         if (!match) throw new Error('No JSON in Gemini response');
         const analysis = JSON.parse(match[0]);
 
@@ -249,7 +251,7 @@ ${JSON.stringify(recentTrades.map(t => ({
 PREVIOUS DIAGNOSES:
 ${JSON.stringify(ctx.recentDiagnoses.slice(-10), null, 2)}
 
-Respond ONLY with valid JSON, no markdown:
+YOU MUST respond with ONLY raw JSON. No markdown. No code blocks. No explanation. Start your response with { and end with }.
 {
   "summary": "2-sentence summary of what patterns you see across these trades",
   "winRate": 0.72,
@@ -268,7 +270,8 @@ Respond ONLY with valid JSON, no markdown:
 
     try {
         const raw  = await callGemini(prompt);
-        const match = raw.match(/\{[\s\S]*\}/);
+        const stripped2 = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+        const match = stripped2.match(/\{[\s\S]*\}/);
         if (!match) throw new Error('No JSON in response');
         const tune  = JSON.parse(match[0]);
 

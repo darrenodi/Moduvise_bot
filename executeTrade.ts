@@ -4,10 +4,7 @@ import { MARKET_SYMBOL } from './signals.js';
 import { createHmac } from 'crypto';
 dotenv.config();
 
-// ─── ENVIRONMENT TOGGLE ───────────────────────────────────────────────────────
-// Single toggle: ENVIRONMENT=demo → demo account, 50x max, $50 margin per trade
-//               ENVIRONMENT=live → live account, 100x, full balance sizing
-// Everything else follows automatically — no other changes needed to go live.
+// ─── ENVIRONMENT ──────────────────────────────────────────────────────────────
 export const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 export const IS_DEMO     = ENVIRONMENT !== 'live';
 
@@ -15,70 +12,87 @@ const BASE_URL   = IS_DEMO ? 'https://demo-fapi.binance.com' : 'https://fapi.bin
 const API_KEY    = IS_DEMO ? (process.env.BINANCE_BOT_API    ?? '') : (process.env.BINANCE_API_KEY    ?? '');
 const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.env.BINANCE_API_SECRET ?? '');
 
-// ─── STRATEGY PARAMETERS ──────────────────────────────────────────────────────
-// Demo constraints: max 50x leverage, max $5000 position notional.
-// We use $50 margin × 50x = $2500 notional per trade — well within limits.
-// At $4000/XAU that's 0.625 XAU per trade.
+// ─── PER-SYMBOL CONFIGURATION ─────────────────────────────────────────────────
+// Each symbol has its own TP target, SL distance, tick size, and qty precision.
+// TP targets are fixed dollar moves for HFT scalping — not ATR-based percentages.
+// SL is set wide enough to survive normal oscillation but tight enough to protect capital.
 //
-// Live: $50 margin × 100x = $5000 notional. Same margin amount, double leverage.
-// Switching live→demo or back: change ENVIRONMENT only.
-// ─── PER-SYMBOL PRECISION ─────────────────────────────────────────────────────
-// Different symbols require different tick sizes and quantity precision.
-// Injected by multiSymbol.ts via env; falls back to XAUUSDT defaults for
-// single-symbol runs.
+// HFT Scalping targets (as requested):
+//   XAUUSDT : TP = $0.05  | SL = $0.30  (6:1 risk — tight gold scalp)
+//   ETHUSDT : TP = $5.00  | SL = $10.00 (2:1 risk — ETH has clean $5 swings)
+//   BTCUSDT : TP = $10.00 | SL = $20.00 (2:1 risk — BTC minimum viable move)
+//   DOGEUSDT: TP = 0.47%  | SL = 1.00%  (2:1 risk — percentage-based for tiny price)
 //
-//  XAUUSDT : tick=0.01  qtyStep=0.001  minQty=0.001  slMin=0.50
-//  ETHUSDT : tick=0.01  qtyStep=0.001  minQty=0.001  slMin=1.00
-//  DOGEUSDT: tick=0.0001 qtyStep=1     minQty=1      slMin=0.002
-function getSymbolPrecision(symbol: string): {
-    tick: number; qtyStep: number; minQty: number; slMin: number;
-    tp2Offset: number; slBackupExtra: number;
-} {
-    const s = symbol.toUpperCase();
-    if (s === 'DOGEUSDT') return { tick: 0.00001, qtyStep: 1,     minQty: 1,     slMin: 0.002, tp2Offset: 0.0002, slBackupExtra: 0.001  };
-    if (s === 'ETHUSDT')  return { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 1.00,  tp2Offset: 0.10,   slBackupExtra: 0.50   };
-    // Default: XAUUSDT
-    return                       { tick: 0.01,    qtyStep: 0.001, minQty: 0.001, slMin: 0.50,  tp2Offset: 0.10,   slBackupExtra: 1.20   };
+// SL is placed as Stop-Limit (maker) not Stop-Market, to avoid taker fees.
+// Limit price is set 1 tick beyond trigger to ensure fill while staying maker.
+
+interface SymbolConfig {
+    tick:        number;   // minimum price increment
+    qtyStep:     number;   // minimum quantity increment
+    minQty:      number;   // minimum order quantity
+    priceDp:     number;   // decimal places for price
+    qtyDp:       number;   // decimal places for quantity
+    maxLeverage: number;   // exchange maximum leverage
+    tpFixed:     number;   // fixed TP in USD (or fraction for DOGE %)
+    tpIsPct:     boolean;  // true = tpFixed is a percentage of price
+    slFixed:     number;   // fixed SL distance in USD (or fraction for DOGE %)
+    slIsPct:     boolean;  // true = slFixed is a percentage of price
+    tp2Offset:   number;   // TP2 rescue limit offset from entry
+    entryOffset: number;   // how far inside bid/ask to place entry (maker offset)
 }
 
-const _precision = getSymbolPrecision(MARKET_SYMBOL);
+function getConfig(symbol: string): SymbolConfig {
+    const s = symbol.toUpperCase();
+    if (s === 'ETHUSDT')  return {
+        tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
+        maxLeverage: 100,
+        tpFixed: 5.00,   tpIsPct: false,   // $5 TP
+        slFixed: 10.00,  slIsPct: false,   // $10 SL
+        tp2Offset: 1.00, entryOffset: 0.01,
+    };
+    if (s === 'BTCUSDT')  return {
+        tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
+        maxLeverage: 100,
+        tpFixed: 10.00,  tpIsPct: false,   // $10 TP
+        slFixed: 20.00,  slIsPct: false,   // $20 SL
+        tp2Offset: 2.00, entryOffset: 0.10,
+    };
+    if (s === 'DOGEUSDT') return {
+        tick: 0.00001, qtyStep: 1, minQty: 1, priceDp: 5, qtyDp: 0,
+        maxLeverage: 75,
+        tpFixed: 0.0047, tpIsPct: true,    // 0.47% of price
+        slFixed: 0.0100, slIsPct: true,    // 1.00% of price
+        tp2Offset: 0.0001, entryOffset: 0.00001,
+    };
+    // Default: XAUUSDT
+    return {
+        tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
+        maxLeverage: 100,
+        tpFixed: 0.05,   tpIsPct: false,   // $0.05 TP
+        slFixed: 0.30,   slIsPct: false,   // $0.30 SL
+        tp2Offset: 0.03, entryOffset: 0.01,
+    };
+}
 
+const _cfg = getConfig(MARKET_SYMBOL);
+
+// ─── STRATEGY PARAMETERS ──────────────────────────────────────────────────────
 const STRATEGY = {
-    SYMBOL: MARKET_SYMBOL,
+    SYMBOL:          MARKET_SYMBOL,
+    MARGIN_PER_TRADE: Number(process.env.MARGIN_PER_TRADE ?? 1),
 
-    // Margin per trade — overridden per-symbol by multiSymbol.ts via MARGIN_PER_TRADE env.
-    // Single-symbol runs fall back to $50.
-    MARGIN_PER_TRADE: Number(process.env.MARGIN_PER_TRADE ?? 50),
-
-    // Leverage: 10x demo / 100x live
     get LEVERAGE() {
         const raw = Number(process.env.BOT_LEVERAGE ?? (IS_DEMO ? 10 : 100));
-        return IS_DEMO ? Math.min(raw, 10) : raw;
+        const cap = _cfg.maxLeverage;
+        return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
-    ENTRY_TICK: Number(process.env.ENTRY_TICK ?? _precision.tick),
-
-    // TP: dynamic — clamp(atr5m × TP_ATR_MULT, TP_MIN, TP_MAX)
-    TP_ATR_MULT: Number(process.env.TP_ATR_MULT ?? 0.10),
-    TP_MIN:      Number(process.env.TP_MIN      ?? _precision.tick * 5),
-    TP_MAX:      Number(process.env.TP_MAX      ?? 1.00),
-
-    ATR_SL_MULT:     Number(process.env.ATR_SL_MULT ?? 2.00),
-    SL_MIN:          _precision.slMin,
-    SL_BACKUP_EXTRA: _precision.slBackupExtra,
-
     TP1_TIMEOUT_MS:    90_000,
-    TP2_OFFSET:        _precision.tp2Offset,
     TP2_TIMEOUT_MS:    30_000,
     SCRATCH_TIMEOUT_MS: 130_000,
 
-    PRICE_TICK:   _precision.tick,
-    MIN_QTY:      _precision.minQty,
-    QTY_STEP:     _precision.qtyStep,
-    MIN_NOTIONAL: 5.0,
-    TAKER_FEE:    0.0002,
     FILL_TIMEOUT: 60_000,
-    MAX_SIGNAL_DRIFT: 2.00,
+    MIN_NOTIONAL: 5.0,
 } as const;
 
 // ─── INTERFACES ───────────────────────────────────────────────────────────────
@@ -91,8 +105,6 @@ export interface TradeResult {
     tpPrice?:     number;
     slPrice?:     number;
     grossProfit?: number;
-    netProfit?:   number;
-    fees?:        number;
     message?:     string;
     fillTimeMs?:  number;
 }
@@ -101,7 +113,6 @@ export interface ActiveTrade {
     entryPrice:    number;
     tpPrice:       number;
     slPrice:       number;
-    slBackupPrice: number;
     side:          'long' | 'short';
     size:          number;
     margin:        number;
@@ -109,8 +120,7 @@ export interface ActiveTrade {
     leverage:      number;
     openedAt:      number;
     tpOrderId?:    number;
-    slAlgoId?:     number;
-    slBackupId?:   number;
+    slOrderId?:    number;
     tp2Phase:      boolean;
     tp2StartedAt?: number;
     tp2OrderId?:   number;
@@ -223,16 +233,29 @@ export async function getOpenPositionDetails(): Promise<{
 
 export async function getRealizedPnlSince(sinceMs: number): Promise<{ pnl: number; trades: number } | null> {
     try {
+        await new Promise(r => setTimeout(r, 1_500));
         const data = await privateGet('/fapi/v1/userTrades', {
             symbol:    STRATEGY.SYMBOL,
             startTime: sinceMs,
             limit:     50,
         });
-        if (!Array.isArray(data) || !data.length) return null;
+        if (!Array.isArray(data) || !data.length) {
+            // Retry with broader window for clock skew
+            const data2 = await privateGet('/fapi/v1/userTrades', {
+                symbol:    STRATEGY.SYMBOL,
+                startTime: sinceMs - 10_000,
+                limit:     50,
+            });
+            if (!Array.isArray(data2) || !data2.length) return null;
+            const pnl2 = data2.reduce((s: number, t: any) => s + Number(t.realizedPnl ?? 0), 0);
+            console.log(`[PnL] ${data2.length} trades (broad) | PnL: $${pnl2.toFixed(6)}`);
+            return { pnl: pnl2, trades: data2.length };
+        }
         const pnl = data.reduce((s: number, t: any) => s + Number(t.realizedPnl ?? 0), 0);
+        console.log(`[PnL] ${data.length} trades | PnL: $${pnl.toFixed(6)}`);
         return { pnl, trades: data.length };
     } catch (e: any) {
-        console.error(`[PnL] Verification failed: ${e.message}`);
+        console.error(`[PnL] Failed: ${e.message}`);
         return null;
     }
 }
@@ -240,24 +263,15 @@ export async function getRealizedPnlSince(sinceMs: number): Promise<{ pnl: numbe
 export async function cancelAllOrders(slAlgoId?: number): Promise<void> {
     try {
         await privateDelete('/fapi/v1/allOpenOrders', { symbol: STRATEGY.SYMBOL });
+        console.log(`[Cleanup] All orders cancelled`);
     } catch (e: any) {
-        console.error(`[Cleanup] Regular order cancel failed: ${e.message}`);
+        console.error(`[Cleanup] Cancel failed: ${e.message}`);
     }
     if (slAlgoId && slAlgoId > 0) {
         try {
             await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId: slAlgoId });
         } catch { /* no-op */ }
     }
-    try {
-        const openAlgos = await privateGet('/fapi/v1/algoOrders/openOrders', { symbol: STRATEGY.SYMBOL });
-        if (Array.isArray(openAlgos?.orders)) {
-            for (const o of openAlgos.orders) {
-                try {
-                    await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId: o.algoId });
-                } catch { /* no-op */ }
-            }
-        }
-    } catch { /* non-critical */ }
 }
 
 export async function cancelAlgoOrder(algoId: number): Promise<void> {
@@ -268,30 +282,24 @@ export async function cancelAlgoOrder(algoId: number): Promise<void> {
 
 export async function triggerEmergencyClose(side: 'long' | 'short', size: number, reason: string): Promise<void> {
     const closeSide = side === 'long' ? 'SELL' : 'BUY';
-    console.log(`[EMERGENCY] 🛑 Closing ${closeSide} ${size} ${STRATEGY.SYMBOL} | ${reason}`);
+    console.log(`[EMERGENCY] 🛑 ${closeSide} ${size} ${STRATEGY.SYMBOL} | ${reason}`);
     await cancelAllOrders();
 
-    // Attempt 1: tight limit order at current bid/ask — maker fee (free), no spread cost.
-    // Give it 5 seconds. If it doesn't fill, fall back to market.
+    // Try limit close first (maker — no fee)
     try {
         const ticker = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`)
             .then(r => r.json()) as any;
-        const limitPrice = closeSide === 'SELL'
-            ? Number(ticker.bidPrice)   // sell at best bid — fills immediately as taker but avoids wide spread
-            : Number(ticker.askPrice);  // buy at best ask
-
+        const limitPrice = closeSide === 'SELL' ? Number(ticker.bidPrice) : Number(ticker.askPrice);
         const limitOrder = await privatePost('/fapi/v1/order', {
             symbol:      STRATEGY.SYMBOL,
             side:        closeSide,
             type:        'LIMIT',
             timeInForce: 'GTC',
-            price:       limitPrice.toFixed(2),
-            quantity:    size.toFixed(3),
+            price:       limitPrice.toFixed(_cfg.priceDp),
+            quantity:    size.toFixed(_cfg.qtyDp),
             reduceOnly:  'true',
         });
-
         if (limitOrder?.orderId) {
-            // Poll 5s for fill
             const start = Date.now();
             while (Date.now() - start < 5_000) {
                 await new Promise(r => setTimeout(r, 500));
@@ -299,22 +307,16 @@ export async function triggerEmergencyClose(side: 'long' | 'short', size: number
                     symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId,
                 });
                 if (check.status === 'FILLED') {
-                    console.log(`[EMERGENCY] ✅ Limit close filled @ $${limitPrice.toFixed(2)} (maker — no taker fee)`);
+                    console.log(`[EMERGENCY] ✅ Limit close filled @ $${limitPrice.toFixed(_cfg.priceDp)}`);
                     clearActiveTrade();
                     return;
                 }
             }
-            // Didn't fill in 5s — cancel and fall through to market
-            await privateDelete('/fapi/v1/order', {
-                symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId,
-            }).catch(() => {});
-            console.log(`[EMERGENCY] Limit close timed out — falling back to market order`);
+            await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId }).catch(() => {});
         }
-    } catch (e: any) {
-        console.error(`[EMERGENCY] Limit close attempt failed: ${e.message} — falling back to market`);
-    }
+    } catch { /* fall through to market */ }
 
-    // Attempt 2: market order — guaranteed fill, pays taker fee (~$1.00 at $5000 notional)
+    // Market close as last resort
     try {
         await privatePost('/fapi/v1/order', {
             symbol:     STRATEGY.SYMBOL,
@@ -323,73 +325,74 @@ export async function triggerEmergencyClose(side: 'long' | 'short', size: number
             quantity:   size,
             reduceOnly: 'true',
         });
-        console.log(`[EMERGENCY] ✅ Market close executed (taker fee applies)`);
+        console.log(`[EMERGENCY] ✅ Market close executed`);
         clearActiveTrade();
     } catch (e: any) {
-        console.error(`[EMERGENCY] Market close FAILED: ${e.message}`);
-        await sendAlert(`🚨 EMERGENCY CLOSE FAILED on ${STRATEGY.SYMBOL} ${size} XAU. CHECK NOW. ${e.message}`);
+        console.error(`[EMERGENCY] Close FAILED: ${e.message}`);
+        await sendAlert(`🚨 EMERGENCY CLOSE FAILED ${STRATEGY.SYMBOL} ${size}. CHECK NOW. ${e.message}`);
     }
 }
 
 // ─── TP2 RESCUE LIMIT ─────────────────────────────────────────────────────────
 export async function placeReduceOnlyLimit(side: string, price: number, quantity: number): Promise<number> {
-    const priceDp = STRATEGY.PRICE_TICK < 0.01 ? 5 : 2;
-    const qtyDp   = STRATEGY.QTY_STEP   < 1    ? 3 : 0;
     const res = await privatePost('/fapi/v1/order', {
         symbol:      STRATEGY.SYMBOL,
         side,
         type:        'LIMIT',
         timeInForce: 'GTC',
-        price:       price.toFixed(priceDp),
-        quantity:    quantity.toFixed(qtyDp),
+        price:       price.toFixed(_cfg.priceDp),
+        quantity:    quantity.toFixed(_cfg.qtyDp),
         reduceOnly:  'true',
     });
-    if (!res?.orderId) throw new Error(`TP2 order rejected: ${JSON.stringify(res)}`);
+    if (!res?.orderId) throw new Error(`TP2 rejected: ${JSON.stringify(res)}`);
     return res.orderId as number;
 }
 
 // ─── SIZING ───────────────────────────────────────────────────────────────────
-// Fixed $50 margin per trade. Notional = $50 × leverage.
-// Demo: $50 × 50 = $2500 notional. At $4000/XAU → 0.625 XAU.
-// Live:  $50 × 100 = $5000 notional. At $4000/XAU → 1.25 XAU.
-// Max position check: notional never exceeds $5000 (demo exchange limit).
 function tickRound(price: number): number {
-    const tick = STRATEGY.PRICE_TICK;
-    return Math.round(price / tick) * tick;
+    const inv = 1 / _cfg.tick;
+    return Math.round(price * inv) / inv;
 }
 
 function qtyFloor(qty: number): number {
-    const steps = Math.floor(qty / STRATEGY.QTY_STEP);
-    return Math.max(STRATEGY.MIN_QTY, steps * STRATEGY.QTY_STEP);
+    const steps = Math.floor(qty / _cfg.qtyStep);
+    return Math.max(_cfg.minQty, steps * _cfg.qtyStep);
 }
 
 export function calcSize(price: number): number {
-    const leverage  = STRATEGY.LEVERAGE;
-    const margin    = STRATEGY.MARGIN_PER_TRADE;
-    const notional  = margin * leverage;
-    // Hard cap: demo exchange rejects large positions. At 10x, $50 margin = $500 notional.
-    const cappedNotional = IS_DEMO ? Math.min(notional, 500) : notional;
-    const raw  = cappedNotional / price;
-    let   size = qtyFloor(raw);
+    const margin   = Number(process.env.MARGIN_PER_TRADE ?? STRATEGY.MARGIN_PER_TRADE);
+    const leverage = STRATEGY.LEVERAGE;
+    const notional = Math.min(margin * leverage, 5000);
+    const raw      = notional / price;
+    let   size     = qtyFloor(raw);
     while (size * price < STRATEGY.MIN_NOTIONAL) {
-        size = Math.round((size + STRATEGY.QTY_STEP) * 1000) / 1000;
+        size = Number((size + _cfg.qtyStep).toFixed(_cfg.qtyDp === 0 ? 0 : 3));
     }
-    console.log(`[Size] ${IS_DEMO ? 'DEMO' : 'LIVE'} | ${STRATEGY.SYMBOL} | margin=$${margin} leverage=${leverage}x notional=$${(size*price).toFixed(2)} size=${size}`);
+    console.log(`[Size] ${STRATEGY.SYMBOL} | margin=$${Number(margin).toFixed(2)} ${leverage}x | notional=$${(size*price).toFixed(2)} | size=${size}`);
     return size;
 }
 
-function calcSlDistance(atr5m: number): number {
-    return Math.max(STRATEGY.SL_MIN, atr5m * STRATEGY.ATR_SL_MULT);
+// ─── TP AND SL CALCULATION ────────────────────────────────────────────────────
+function calcTpDistance(price: number): number {
+    if (_cfg.tpIsPct) return tickRound(price * _cfg.tpFixed);
+    return _cfg.tpFixed;
 }
 
-function calcTpMove(atr5m: number): number {
-    return Math.min(STRATEGY.TP_MAX, Math.max(STRATEGY.TP_MIN, atr5m * STRATEGY.TP_ATR_MULT));
+function calcSlDistance(price: number): number {
+    if (_cfg.slIsPct) return tickRound(price * _cfg.slFixed);
+    return _cfg.slFixed;
 }
 
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
+// Order flow (all maker, no taker unless emergency):
+//   1. GTX limit entry     → maker, cancels if it would be taker
+//   2. GTC limit TP        → maker resting order
+//   3. Stop-Limit SL       → maker: triggers at slPrice, places limit at slLimitPrice
+//   Entry + TP + SL all placed within seconds of fill.
+//   No position ever lives without both TP and SL.
 export async function executeBinanceTrade(
-    signal:         GeneratedSignal,
-    _tradingBalance: number,   // kept for API compatibility — sizing now uses fixed margin
+    signal:          GeneratedSignal,
+    _tradingBalance: number,
 ): Promise<TradeResult> {
     if (signal.direction === 'neutral') return { success: false, outcome: 'skipped' };
 
@@ -407,50 +410,45 @@ export async function executeBinanceTrade(
         const liveBid = signal.bid;
         const liveAsk = signal.ask;
 
-        // Set leverage on exchange
+        // Set leverage
         try {
             await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
         } catch { /* already set */ }
 
-        const tpMove     = calcTpMove(signal.atr5m);
-        const entryPrice = tickRound(
-            isBuy ? liveBid - STRATEGY.ENTRY_TICK : liveAsk + STRATEGY.ENTRY_TICK
-        );
-        const size = calcSize(entryPrice);
+        // Entry price: 1 tick inside bid/ask, rounded to symbol tick
+        const rawEntry   = isBuy
+            ? liveBid - _cfg.entryOffset
+            : liveAsk + _cfg.entryOffset;
+        const entryPrice = tickRound(rawEntry);
+        const size       = calcSize(entryPrice);
 
-        const priceDp = STRATEGY.PRICE_TICK < 0.01 ? 5 : 2;
-        const qtyDp   = STRATEGY.QTY_STEP   < 1    ? 3 : 0;
+        console.log(`[Entry] 🟢 ${STRATEGY.SYMBOL} ${direction.toUpperCase()} | entry=$${entryPrice.toFixed(_cfg.priceDp)} size=${size} | bid=$${liveBid.toFixed(_cfg.priceDp)} ask=$${liveAsk.toFixed(_cfg.priceDp)}`);
 
-        console.log(`[Entry] ${IS_DEMO ? '🟡 DEMO' : '🟢 LIVE'} | bid=$${liveBid.toFixed(priceDp)} ask=$${liveAsk.toFixed(priceDp)} entry=$${entryPrice.toFixed(priceDp)} TP=$${tpMove.toFixed(priceDp)} ATR=$${signal.atr5m.toFixed(priceDp)}`);
-
-        // GTX maker entry
+        // ── 1. GTX maker entry ────────────────────────────────────────────────
         const entryOrder = await privatePost('/fapi/v1/order', {
             symbol:      STRATEGY.SYMBOL,
             side,
             type:        'LIMIT',
-            timeInForce: 'GTX',
-            price:       entryPrice.toFixed(priceDp),
-            quantity:    size.toFixed(qtyDp),
+            timeInForce: 'GTX',   // Post-Only: cancels if would be taker
+            price:       entryPrice.toFixed(_cfg.priceDp),
+            quantity:    size.toFixed(_cfg.qtyDp),
         });
 
         if (!entryOrder?.orderId) {
             const msg = JSON.stringify(entryOrder);
-            if (entryOrder?.code === -2019) {
-                // Margin insufficient — tell main.ts to pause this symbol
-                return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${msg}` };
-            }
-            return { success: false, outcome: 'error', message: `GTX order rejected: ${msg}` };
+            if (entryOrder?.code === -2019) return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${msg}` };
+            if (entryOrder?.code === -5022) return { success: false, outcome: 'skipped', message: `GTX cancelled (would be taker)` };
+            return { success: false, outcome: 'error', message: `Entry rejected: ${msg}` };
         }
 
-        // Poll for fill
-        const fillStart  = Date.now();
-        let   filled     = false;
+        // Poll for fill (up to 60s)
+        const fillStart   = Date.now();
+        let   filled      = false;
         let   actualEntry = entryPrice;
         while (Date.now() - fillStart < STRATEGY.FILL_TIMEOUT) {
             await new Promise(r => setTimeout(r, 1_000));
             const check = await privateGet('/fapi/v1/order', {
-                symbol:  STRATEGY.SYMBOL,
-                orderId: entryOrder.orderId,
+                symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId,
             });
             if (check.status === 'FILLED') {
                 filled      = true;
@@ -462,101 +460,136 @@ export async function executeBinanceTrade(
 
         if (!filled) {
             await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }).catch(() => {});
-            return { success: false, outcome: 'skipped', message: 'Entry GTX not filled.' };
+            return { success: false, outcome: 'skipped', message: 'Entry not filled within timeout.' };
         }
 
-        // TP / SL prices
-        const tpPrice       = tickRound(isBuy ? actualEntry + tpMove : actualEntry - tpMove);
-        const slDistance    = calcSlDistance(signal.atr5m);
-        const slPrice       = tickRound(isBuy ? actualEntry - slDistance           : actualEntry + slDistance);
-        const slBackupPrice = tickRound(isBuy ? slPrice     - STRATEGY.SL_BACKUP_EXTRA : slPrice + STRATEGY.SL_BACKUP_EXTRA);
+        const fillMs = Date.now() - fillStart;
 
-        console.log(`[Execution] ✅ ${direction.toUpperCase()} filled @ $${actualEntry.toFixed(priceDp)} | ${size} ${STRATEGY.SYMBOL} | TP:$${tpPrice.toFixed(priceDp)} SL:$${slPrice.toFixed(priceDp)}`);
+        // ── Calculate TP and SL prices ────────────────────────────────────────
+        const tpDist  = calcTpDistance(actualEntry);
+        const slDist  = calcSlDistance(actualEntry);
+        const tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
+        const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
-        // TP1 resting limit — MUST succeed. No TP = no exit = uncontrolled loss.
+        // SL limit price: 1 tick beyond trigger (ensures fill, stays maker)
+        const slLimitPrice = tickRound(isBuy
+            ? slPrice - _cfg.tick   // long SL: limit 1 tick below trigger
+            : slPrice + _cfg.tick   // short SL: limit 1 tick above trigger
+        );
+
+        console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | SL=$${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)}) | fillTime=${fillMs}ms`);
+
+        // ── 2. TP limit order (maker, GTC) ───────────────────────────────────
+        // MUST succeed — no TP = uncontrolled position
         let tpOrderId = 0;
         for (let attempt = 1; attempt <= 3; attempt++) {
             try {
-                const tpOrder = await privatePost('/fapi/v1/order', {
-                    symbol: STRATEGY.SYMBOL, side: closeSide, type: 'LIMIT',
-                    timeInForce: 'GTC', price: tpPrice.toFixed(priceDp),
-                    quantity: size.toFixed(qtyDp), reduceOnly: 'true',
+                const tpRes = await privatePost('/fapi/v1/order', {
+                    symbol:      STRATEGY.SYMBOL,
+                    side:        closeSide,
+                    type:        'LIMIT',
+                    timeInForce: 'GTC',
+                    price:       tpPrice.toFixed(_cfg.priceDp),
+                    quantity:    size.toFixed(_cfg.qtyDp),
+                    reduceOnly:  'true',
                 });
-                if (tpOrder?.orderId) {
-                    tpOrderId = tpOrder.orderId;
-                    console.log(`[TP] ✅ Set @ $${tpPrice.toFixed(priceDp)} | orderId=${tpOrderId}`);
+                if (tpRes?.orderId) {
+                    tpOrderId = tpRes.orderId;
+                    console.log(`[TP] ✅ Limit @ $${tpPrice.toFixed(_cfg.priceDp)} | id=${tpOrderId}`);
                     break;
-                } else {
-                    console.error(`[TP] ❌ Attempt ${attempt} rejected: ${JSON.stringify(tpOrder)}`);
-                    if (attempt < 3) await new Promise(r => setTimeout(r, 1000));
                 }
+                console.error(`[TP] ❌ Attempt ${attempt}: ${JSON.stringify(tpRes)}`);
+                if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));
             } catch (e: any) {
                 console.error(`[TP] ❌ Attempt ${attempt} threw: ${e.message}`);
-                if (attempt < 3) await new Promise(r => setTimeout(r, 1000));
+                if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));
             }
         }
+
         if (!tpOrderId) {
-            // TP failed 3 times — emergency close to prevent uncontrolled position
-            console.error(`[TP] ❌ ALL ATTEMPTS FAILED — emergency closing position`);
-            await sendAlert(`🚨 ${STRATEGY.SYMBOL} TP placement failed 3 times — emergency closing. Check position!`);
+            console.error(`[TP] ❌ ALL ATTEMPTS FAILED — emergency closing`);
+            await sendAlert(`🚨 ${STRATEGY.SYMBOL} TP failed 3x — emergency closing!`);
             await triggerEmergencyClose(direction, size, 'TP placement total failure');
-            return { success: false, outcome: 'error', message: 'TP placement failed, emergency closed.' };
+            return { success: false, outcome: 'error', message: 'TP failed, emergency closed.' };
         }
 
-        // Primary SL — algo conditional stop on mark price
-        let slAlgoId = 0;
-        try {
-            const slOrder = await privatePost('/fapi/v1/algoOrder', {
-                symbol: STRATEGY.SYMBOL, side: closeSide, algoType: 'CONDITIONAL',
-                type: 'STOP_MARKET', quantity: size.toFixed(qtyDp),
-                triggerPrice: slPrice.toFixed(priceDp), workingType: 'MARK_PRICE', reduceOnly: 'true',
-            });
-            if (slOrder?.algoId) {
-                slAlgoId = slOrder.algoId;
-                console.log(`[SL] ✅ Primary @ $${slPrice.toFixed(priceDp)} | algoId=${slAlgoId}`);
-            } else {
-                console.error(`[SL] ❌ Primary rejected: ${JSON.stringify(slOrder)}`);
+        // ── 3. SL Stop-Limit order (maker) ───────────────────────────────────
+        // Stop-Limit: when triggerPrice is hit, places a limit order at slLimitPrice.
+        // This is a maker SL — avoids taker fee on stop-out.
+        // If the limit doesn't fill (fast gap), TP2 watchdog + emergency close are backstops.
+        let slOrderId = 0;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                const slRes = await privatePost('/fapi/v1/order', {
+                    symbol:      STRATEGY.SYMBOL,
+                    side:        closeSide,
+                    type:        'STOP',              // Stop-Limit on Binance Futures
+                    timeInForce: 'GTC',
+                    stopPrice:   slPrice.toFixed(_cfg.priceDp),      // trigger
+                    price:       slLimitPrice.toFixed(_cfg.priceDp), // limit (1 tick past trigger)
+                    quantity:    size.toFixed(_cfg.qtyDp),
+                    workingType: 'MARK_PRICE',
+                    reduceOnly:  'true',
+                });
+                if (slRes?.orderId) {
+                    slOrderId = slRes.orderId;
+                    console.log(`[SL] ✅ Stop-Limit trigger=$${slPrice.toFixed(_cfg.priceDp)} limit=$${slLimitPrice.toFixed(_cfg.priceDp)} | id=${slOrderId}`);
+                    break;
+                }
+                // If Stop-Limit not supported, fall back to algo stop-market
+                console.error(`[SL] ❌ Stop-Limit attempt ${attempt}: ${JSON.stringify(slRes)} — trying algo order`);
+                const slAlgo = await privatePost('/fapi/v1/algoOrder', {
+                    symbol:       STRATEGY.SYMBOL,
+                    side:         closeSide,
+                    algoType:     'CONDITIONAL',
+                    type:         'STOP_MARKET',
+                    quantity:     size.toFixed(_cfg.qtyDp),
+                    triggerPrice: slPrice.toFixed(_cfg.priceDp),
+                    workingType:  'MARK_PRICE',
+                    reduceOnly:   'true',
+                });
+                if (slAlgo?.algoId) {
+                    slOrderId = slAlgo.algoId;
+                    console.log(`[SL] ✅ Algo Stop-Market @ $${slPrice.toFixed(_cfg.priceDp)} | algoId=${slOrderId}`);
+                    break;
+                }
+                console.error(`[SL] ❌ Algo attempt ${attempt}: ${JSON.stringify(slAlgo)}`);
+            } catch (e: any) {
+                console.error(`[SL] ❌ Attempt ${attempt} threw: ${e.message}`);
             }
-        } catch (e: any) { console.error(`[SL] Primary threw: ${e.message}`); }
+        }
 
-        // Backup SL — regular stop market order
-        let slBackupId = 0;
-        try {
-            const backupOrder = await privatePost('/fapi/v1/order', {
-                symbol: STRATEGY.SYMBOL, side: closeSide, type: 'STOP_MARKET',
-                stopPrice: slBackupPrice.toFixed(priceDp), quantity: size.toFixed(qtyDp),
-                workingType: 'MARK_PRICE', reduceOnly: 'true',
-            });
-            if (backupOrder?.orderId) {
-                slBackupId = backupOrder.orderId;
-                console.log(`[SL] ✅ Backup @ $${slBackupPrice.toFixed(priceDp)} | orderId=${slBackupId}`);
-            } else {
-                console.error(`[SL] ❌ Backup rejected: ${JSON.stringify(backupOrder)}`);
-            }
-        } catch (e: any) { console.error(`[SL] Backup threw: ${e.message}`); }
-
-        if (!slAlgoId && !slBackupId) {
-            await sendAlert(`🚨 Both SL orders failed. Emergency closing.`);
-            await triggerEmergencyClose(direction, size, 'SL total failure');
+        if (!slOrderId) {
+            // No SL at all — cancel TP and emergency close
+            console.error(`[SL] ❌ ALL SL ATTEMPTS FAILED — cancelling TP and emergency closing`);
+            await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: tpOrderId }).catch(() => {});
+            await sendAlert(`🚨 ${STRATEGY.SYMBOL} SL failed — emergency closing!`);
+            await triggerEmergencyClose(direction, size, 'SL placement total failure');
             return { success: false, outcome: 'error', message: 'SL failed, emergency closed.' };
         }
 
+        // ── Lock active trade state ───────────────────────────────────────────
         _activeTrade = {
-            entryPrice:    actualEntry,
+            entryPrice:  actualEntry,
             tpPrice,
             slPrice,
-            slBackupPrice,
-            side:          direction,
+            side:        direction,
             size,
-            margin:        STRATEGY.MARGIN_PER_TRADE,
-            posVal:        size * actualEntry,
+            margin:      Number(process.env.MARGIN_PER_TRADE ?? STRATEGY.MARGIN_PER_TRADE),
+            posVal:      size * actualEntry,
             leverage,
-            openedAt:      Date.now(),
+            openedAt:    Date.now(),
             tpOrderId,
-            slAlgoId,
-            slBackupId,
-            tp2Phase:      false,
+            slOrderId,
+            tp2Phase:    false,
         };
+
+        await sendAlert(
+            `✅ ${STRATEGY.SYMBOL} ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)}\n` +
+            `TP: $${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)})\n` +
+            `SL: $${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)})\n` +
+            `Size: ${size} | Margin: $${Number(process.env.MARGIN_PER_TRADE ?? 1).toFixed(2)}`
+        );
 
         return {
             success:     true,
@@ -564,13 +597,12 @@ export async function executeBinanceTrade(
             entryPrice:  actualEntry,
             tpPrice,
             slPrice,
-            grossProfit: size * tpMove,
-            netProfit:   size * tpMove,
-            fees:        0,
-            fillTimeMs:  Date.now() - fillStart,
+            grossProfit: size * tpDist,
+            fillTimeMs:  fillMs,
         };
 
     } catch (e: any) {
+        console.error(`[Trade] Unhandled error: ${e.message}`);
         return { success: false, outcome: 'error', message: e.message };
     }
 }
