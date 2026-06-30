@@ -17,74 +17,24 @@ import { sendAlert, getAvailableBalance } from './executeTrade.js';
 
 const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 
+// TP/SL are now derived from margin-ROI (TP_ROI_PCT / SL_ROI_PCT, set in .env and
+// inherited by every child), so no per-asset TP/SL tuning lives here. All signal
+// gates are scale-relative (see signals.ts), so only genuinely per-symbol values
+// remain: leverage cap, loss cooldown, and the liquidity-wall notional floor.
 interface SymbolConfig {
-    marketSymbol:   string;
-    displaySymbol:  string;
-    wsSymbol:       string;
-    leverage:       number;
-    tpAtrMult:      number;
-    tpMin:          number;
-    tpMax:          number;
-    atrCeiling:     number;
-    momentumTrap:   number;
-    lossCooldownMs: number;
-    atrSlMult:      number;
+    marketSymbol:    string;
+    displaySymbol:   string;
+    wsSymbol:        string;
+    leverage:        number;
+    lossCooldownMs:  number;
+    wallMinNotional: number;
 }
 
 const SYMBOLS: SymbolConfig[] = [
-    {
-        marketSymbol:   'XAUUSDT',
-        displaySymbol:  'XAU/USDT',
-        wsSymbol:       'xauusdt',
-        leverage:       100,
-        tpAtrMult:      0.15,
-        tpMin:          0.10,
-        tpMax:          1.00,
-        atrCeiling:     6.00,
-        momentumTrap:   0.30,
-        lossCooldownMs: 120_000,
-        atrSlMult:      2.00,
-    },
-    {
-        // ETH signals are excellent — wide TP to capture the full move
-        marketSymbol:   'ETHUSDT',
-        displaySymbol:  'ETH/USDT',
-        wsSymbol:       'ethusdt',
-        leverage:       100,
-        tpAtrMult:      0.50,   // ETH ATR ~$3-8 → TP $1.50-4.00
-        tpMin:          1.00,   // minimum $1 TP — never lose to fees
-        tpMax:          10.00,
-        atrCeiling:     30.00,
-        momentumTrap:   2.00,
-        lossCooldownMs: 180_000,
-        atrSlMult:      1.50,
-    },
-    {
-        marketSymbol:   'DOGEUSDT',
-        displaySymbol:  'DOGE/USDT',
-        wsSymbol:       'dogeusdt',
-        leverage:       75,     // max 75x on Binance for DOGE
-        tpAtrMult:      0.30,
-        tpMin:          0.0005,
-        tpMax:          0.005,
-        atrCeiling:     0.005,
-        momentumTrap:   0.001,
-        lossCooldownMs: 120_000,
-        atrSlMult:      2.00,
-    },
-    {
-        marketSymbol:   'BTCUSDT',
-        displaySymbol:  'BTC/USDT',
-        wsSymbol:       'btcusdt',
-        leverage:       100,
-        tpAtrMult:      0.40,
-        tpMin:          5.00,
-        tpMax:          100.00,
-        atrCeiling:     500.00,
-        momentumTrap:   10.00,
-        lossCooldownMs: 180_000,
-        atrSlMult:      0.50,   // BTC ATR ~$60 → SL ~$30
-    },
+    { marketSymbol: 'XAUUSDT',  displaySymbol: 'XAU/USDT',  wsSymbol: 'xauusdt',  leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 20_000 },
+    { marketSymbol: 'ETHUSDT',  displaySymbol: 'ETH/USDT',  wsSymbol: 'ethusdt',  leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 50_000 },
+    { marketSymbol: 'BTCUSDT',  displaySymbol: 'BTC/USDT',  wsSymbol: 'btcusdt',  leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 100_000 },
+    { marketSymbol: 'DOGEUSDT', displaySymbol: 'DOGE/USDT', wsSymbol: 'dogeusdt', leverage: 75,  lossCooldownMs: 120_000, wallMinNotional: 20_000 },
 ];
 
 // ─── PROCESS REGISTRY ─────────────────────────────────────────────────────────
@@ -115,26 +65,25 @@ function spawnSymbol(entry: ManagedProcess): void {
 
     const margin = getCurrentMargin(bankroll);
 
+    // Relative signal knobs (TP_ROI_PCT, SL_ROI_PCT, ATR_CEIL_PCT, MOM_*_ATR, …)
+    // are inherited from .env via ...process.env, or fall back to code defaults.
     const env: NodeJS.ProcessEnv = {
         ...process.env,
-        MARKET_SYMBOL:    cfg.marketSymbol,
-        DISPLAY_SYMBOL:   cfg.displaySymbol,
-        WS_SYMBOL:        cfg.wsSymbol,
-        MARGIN_PER_TRADE: String(margin),
-        BOT_LEVERAGE:     String(cfg.leverage),
-        TP_ATR_MULT:      String(cfg.tpAtrMult),
-        TP_MIN:           String(cfg.tpMin),
-        TP_MAX:           String(cfg.tpMax),
-        ATR_CEILING:      String(cfg.atrCeiling),
-        MOMENTUM_TRAP:    String(cfg.momentumTrap),
-        LOSS_COOLDOWN_MS: String(cfg.lossCooldownMs),
-        ATR_SL_MULT:      String(cfg.atrSlMult),
-        STATE_FILE:       `./bot-state-${cfg.marketSymbol}.json`,
-        TRADE_LOG_FILE:   `./tradeLog-${cfg.marketSymbol}.jsonl`,
-        STATE_DIR:        '.',
+        MARKET_SYMBOL:     cfg.marketSymbol,
+        DISPLAY_SYMBOL:    cfg.displaySymbol,
+        WS_SYMBOL:         cfg.wsSymbol,
+        MARGIN_PER_TRADE:  String(margin),
+        BOT_LEVERAGE:      String(cfg.leverage),
+        LOSS_COOLDOWN_MS:  String(cfg.lossCooldownMs),
+        WALL_MIN_NOTIONAL: String(cfg.wallMinNotional),
+        STATE_FILE:        `./bot-state-${cfg.marketSymbol}.json`,
+        TRADE_LOG_FILE:    `./tradeLog-${cfg.marketSymbol}.jsonl`,
+        STATE_DIR:         '.',
     };
 
-    const child = spawn('node', ['dist/main.js'], {
+    // Run TypeScript directly via tsx (no build step). `node --import tsx` keeps
+    // the loader registered for the child process.
+    const child = spawn(process.execPath, ['--import', 'tsx', 'main.ts'], {
         env, cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
     });
 

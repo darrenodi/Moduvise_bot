@@ -32,10 +32,10 @@ const WS_PREFIX = IS_TESTNET ? '/ws' : '/market/ws';
 // Falls back to 'xauusdt' for backwards compatibility with single-symbol runs.
 const SYMBOL_LOWER = (process.env.WS_SYMBOL ?? 'xauusdt').toLowerCase();
 
-const WINDOW_MS   = 5_000;   // 5-second rolling window
-const FLUSH_RATIO = 2.0;     // lowered: 2:1 sell/buy triggers flush
-const SPIKE_RATIO = 2.0;     // lowered: 2:1 buy/sell triggers spike
-const MIN_VOL     = 0.0001;  // minimum volume to count a flush (avoid false positives on zero)
+const WINDOW_MS   = Number(process.env.VELOCITY_WINDOW_MS ?? 5_000);   // rolling window
+const FLUSH_RATIO = Number(process.env.VELOCITY_FLUSH_RATIO ?? 2.0);   // sell/buy triggers flush
+const SPIKE_RATIO = Number(process.env.VELOCITY_SPIKE_RATIO ?? 2.0);   // buy/sell triggers spike
+const MIN_VOL     = Number(process.env.VELOCITY_MIN_VOL ?? 0.0001);    // min volume to count (avoid zero noise)
 
 // ─── ROLLING TRADE BUFFER ────────────────────────────────────────────────────
 interface AggTick {

@@ -12,7 +12,6 @@ import type { SymbolBankroll } from './symbolBankroll.js';
 import { checkKillSwitch, analyseFailedTrade } from './geminiAdvisor.js';
 import {
     executeBinanceTrade,
-    getAvailableBalance,
     getOpenPositionDetails,
     getActiveTrade,
     clearActiveTrade,
@@ -21,6 +20,7 @@ import {
     getRealizedPnlSince,
     sendAlert,
     placeReduceOnlyLimit,
+    getTp2Price,
 } from './executeTrade.js';
 
 dotenv.config();
@@ -28,6 +28,11 @@ dotenv.config();
 const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
 const BASE_URL    = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
+
+// ─── EXIT-LIFECYCLE TIMEOUTS (env-tunable, mirror executeTrade STRATEGY) ───────
+const TP1_TIMEOUT_MS     = Number(process.env.TP1_TIMEOUT_MS     ?? 90_000);
+const TP2_TIMEOUT_MS     = Number(process.env.TP2_TIMEOUT_MS     ?? 30_000);
+const SCRATCH_TIMEOUT_MS = Number(process.env.SCRATCH_TIMEOUT_MS ?? 130_000);
 
 // ─── PER-SYMBOL STATE ─────────────────────────────────────────────────────────
 const _symbol   = process.env.MARKET_SYMBOL ?? 'XAUUSDT';
@@ -359,7 +364,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     // ── TP2 phase ────────────────────────────────────────────────────────────
     if (trade.tp2Phase) {
         const tp2Age = Date.now() - (trade.tp2StartedAt ?? Date.now());
-        if (tp2Age < 30_000) return 'open';
+        if (tp2Age < TP2_TIMEOUT_MS) return 'open';
 
         const profit = isBuy ? pos.currentPrice - trade.entryPrice : trade.entryPrice - pos.currentPrice;
         console.log(`[Scratch] ⏱ TP2 timeout ${(tp2Age/1000).toFixed(0)}s — exit @ $${pos.currentPrice}`);
@@ -380,16 +385,12 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     }
 
     // ── TP1 timeout → switch to TP2 ──────────────────────────────────────────
-    if (ageMs >= 90_000) {
+    if (ageMs >= TP1_TIMEOUT_MS) {
         _priceAtTp1Timeout = pos.currentPrice;
         try { await cancelAllOrders(trade.slOrderId); } catch { /* belt-and-suspenders */ }
 
-        // TP2 offset: per-symbol (from executeTrade config)
-        // Use a small fixed offset — just enough to capture near-breakeven
-        const tp2Offset  = Number(process.env.TP2_OFFSET ?? 0.05);
-        const tp2RawPrice = isBuy ? trade.entryPrice + tp2Offset : trade.entryPrice - tp2Offset;
-        // Round to 2dp for XAU/ETH, 1dp for BTC
-        const tp2Price   = Math.round(tp2RawPrice * 100) / 100;
+        // TP2 rescue near breakeven — per-asset offset in ticks, tick-rounded.
+        const tp2Price = getTp2Price(trade.entryPrice, trade.side);
 
         let tp2OrderId = 0;
         try {
@@ -420,8 +421,8 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         return 'open';
     }
 
-    // ── Hard backstop 130s ────────────────────────────────────────────────────
-    if (ageMs > 130_000) {
+    // ── Hard backstop ─────────────────────────────────────────────────────────
+    if (ageMs > SCRATCH_TIMEOUT_MS) {
         const profit = isBuy ? pos.currentPrice - trade.entryPrice : trade.entryPrice - pos.currentPrice;
         console.log(`[Scratch] ⏱ Hard backstop ${(ageMs/1000).toFixed(0)}s`);
         await cancelAllOrders(trade.slOrderId);
@@ -563,10 +564,10 @@ const _mar = process.env.MARGIN_PER_TRADE ?? '1';
 console.log(`\n${'═'.repeat(70)}`);
 console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
 console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
-console.log(`  TP       : fixed per symbol (XAU $0.05 | ETH $5 | BTC $10 | DOGE 0.47%)`);
-console.log(`  SL       : Stop-Limit maker (XAU $0.30 | ETH $10 | BTC $20 | DOGE 1%)`);
-console.log(`  EXIT     : TP2 rescue @ 90s | Scratch @ 120s | Backstop @ 130s`);
-console.log(`  ATR GATE : $${process.env.ATR_CEILING ?? '6'} max`);
+console.log(`  TP       : +${process.env.TP_ROI_PCT ?? '0.5'}% margin ROI (maker limit)`);
+console.log(`  SL       : -${process.env.SL_ROI_PCT ?? '2.0'}% margin ROI (maker stop-limit)`);
+console.log(`  EXIT     : TP2 rescue @ ${(TP1_TIMEOUT_MS/1000)}s | TP2 win @ ${(TP2_TIMEOUT_MS/1000)}s | Backstop @ ${(SCRATCH_TIMEOUT_MS/1000)}s`);
+console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);
 console.log(`  STACK    : $${getStack().toFixed(4)} | BANKED: $${getBanked().toFixed(4)}`);
 console.log(`  LOG      : ${TRADE_LOG_FILE}`);
 console.log(`${'═'.repeat(70)}\n`);

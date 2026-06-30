@@ -1,15 +1,19 @@
 {
-  "name": "moduvise-hyperliquid-bot",
+  "name": "moduvise-binance-bot",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "tsx main.ts"
+    "start": "tsx main.ts",
+    "start:multi": "tsx multiSymbol.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "ccxt": "^4.3.0",
     "dotenv": "^16.4.5",
-    "technicalindicators": "^3.1.0"
+    "technicalindicators": "^3.1.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

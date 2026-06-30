@@ -13,32 +13,34 @@ const API_KEY    = IS_DEMO ? (process.env.BINANCE_BOT_API    ?? '') : (process.e
 const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.env.BINANCE_API_SECRET ?? '');
 
 // ─── PER-SYMBOL CONFIGURATION ─────────────────────────────────────────────────
-// Each symbol has its own TP target, SL distance, tick size, and qty precision.
-// TP targets are fixed dollar moves for HFT scalping — not ATR-based percentages.
-// SL is set wide enough to survive normal oscillation but tight enough to protect capital.
+// Only EXCHANGE constants live here (tick/step/precision/max leverage). The TP and
+// SL distances are NOT hardcoded per asset — they are derived at runtime from the
+// margin-ROI targets (TP_ROI_PCT / SL_ROI_PCT) so behaviour is identical across
+// every symbol regardless of price scale.
 //
-// HFT Scalping targets (as requested):
-//   XAUUSDT : TP = $0.05  | SL = $0.30  (6:1 risk — tight gold scalp)
-//   ETHUSDT : TP = $5.00  | SL = $10.00 (2:1 risk — ETH has clean $5 swings)
-//   BTCUSDT : TP = $10.00 | SL = $20.00 (2:1 risk — BTC minimum viable move)
-//   DOGEUSDT: TP = 0.47%  | SL = 1.00%  (2:1 risk — percentage-based for tiny price)
+//   TP price distance = entry * (TP_ROI_PCT/100) / leverage   (default +0.5% margin)
+//   SL price distance = entry * (SL_ROI_PCT/100) / leverage   (default -2.0% margin)
 //
-// SL is placed as Stop-Limit (maker) not Stop-Market, to avoid taker fees.
-// Limit price is set 1 tick beyond trigger to ensure fill while staying maker.
+// The only per-asset tuning kept here is expressed in TICKS (scale-free):
+//   entryOffsetTicks : how far inside bid/ask the maker entry sits
+//   slLimitTicks     : how far the stop-limit LIMIT price sits beyond the trigger
+//   tp2OffsetTicks   : TP2 rescue offset from entry
+//   tpMinTicks/slMinTicks : floor so an ROI-derived distance is never sub-tick
+//
+// SL is a true maker Stop-Limit (type=STOP) — never Stop-Market (taker).
 
 interface SymbolConfig {
-    tick:        number;   // minimum price increment
-    qtyStep:     number;   // minimum quantity increment
-    minQty:      number;   // minimum order quantity
-    priceDp:     number;   // decimal places for price
-    qtyDp:       number;   // decimal places for quantity
-    maxLeverage: number;   // exchange maximum leverage
-    tpFixed:     number;   // fixed TP in USD (or fraction for DOGE %)
-    tpIsPct:     boolean;  // true = tpFixed is a percentage of price
-    slFixed:     number;   // fixed SL distance in USD (or fraction for DOGE %)
-    slIsPct:     boolean;  // true = slFixed is a percentage of price
-    tp2Offset:   number;   // TP2 rescue limit offset from entry
-    entryOffset: number;   // how far inside bid/ask to place entry (maker offset)
+    tick:             number;   // minimum price increment
+    qtyStep:          number;   // minimum quantity increment
+    minQty:           number;   // minimum order quantity
+    priceDp:          number;   // decimal places for price
+    qtyDp:            number;   // decimal places for quantity
+    maxLeverage:      number;   // exchange maximum leverage
+    entryOffsetTicks: number;   // ticks inside bid/ask for the maker entry
+    slLimitTicks:     number;   // ticks the stop-limit price sits beyond the trigger
+    tp2OffsetTicks:   number;   // TP2 rescue offset from entry, in ticks
+    tpMinTicks:       number;   // minimum TP distance in ticks (sub-tick floor)
+    slMinTicks:       number;   // minimum SL distance in ticks (sub-tick floor)
 }
 
 function getConfig(symbol: string): SymbolConfig {
@@ -46,31 +48,27 @@ function getConfig(symbol: string): SymbolConfig {
     if (s === 'ETHUSDT')  return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
         maxLeverage: 100,
-        tpFixed: 5.00,   tpIsPct: false,   // $5 TP
-        slFixed: 10.00,  slIsPct: false,   // $10 SL
-        tp2Offset: 1.00, entryOffset: 0.01,
+        entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
+        tpMinTicks: 2, slMinTicks: 5,
     };
     if (s === 'BTCUSDT')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
         maxLeverage: 100,
-        tpFixed: 10.00,  tpIsPct: false,   // $10 TP
-        slFixed: 20.00,  slIsPct: false,   // $20 SL
-        tp2Offset: 2.00, entryOffset: 0.10,
+        entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
+        tpMinTicks: 2, slMinTicks: 5,
     };
     if (s === 'DOGEUSDT') return {
         tick: 0.00001, qtyStep: 1, minQty: 1, priceDp: 5, qtyDp: 0,
         maxLeverage: 75,
-        tpFixed: 0.0047, tpIsPct: true,    // 0.47% of price
-        slFixed: 0.0100, slIsPct: true,    // 1.00% of price
-        tp2Offset: 0.0001, entryOffset: 0.00001,
+        entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
+        tpMinTicks: 2, slMinTicks: 5,
     };
     // Default: XAUUSDT
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
         maxLeverage: 100,
-        tpFixed: 0.05,   tpIsPct: false,   // $0.05 TP
-        slFixed: 0.30,   slIsPct: false,   // $0.30 SL
-        tp2Offset: 0.03, entryOffset: 0.01,
+        entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
+        tpMinTicks: 2, slMinTicks: 5,
     };
 }
 
@@ -87,13 +85,21 @@ const STRATEGY = {
         return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
-    TP1_TIMEOUT_MS:    90_000,
-    TP2_TIMEOUT_MS:    30_000,
-    SCRATCH_TIMEOUT_MS: 130_000,
+    // Margin-ROI targets (asset-agnostic). TP/SL price distances are derived from
+    // these at runtime: priceDist = entry * (roiPct/100) / leverage.
+    get TP_ROI_PCT() { return Number(process.env.TP_ROI_PCT ?? 0.5); },
+    get SL_ROI_PCT() { return Number(process.env.SL_ROI_PCT ?? 2.0); },
 
-    FILL_TIMEOUT: 60_000,
+    // Exit-lifecycle timeouts — env-tunable for HFT cadence.
+    get TP1_TIMEOUT_MS()     { return Number(process.env.TP1_TIMEOUT_MS     ?? 90_000); },
+    get TP2_TIMEOUT_MS()     { return Number(process.env.TP2_TIMEOUT_MS     ?? 30_000); },
+    get SCRATCH_TIMEOUT_MS() { return Number(process.env.SCRATCH_TIMEOUT_MS ?? 130_000); },
+
+    // Maker entry should fill fast or be abandoned (keeps REST polling cheap).
+    get FILL_TIMEOUT() { return Number(process.env.FILL_TIMEOUT_MS ?? 6_000); },
+    get FILL_POLL_MS() { return Number(process.env.FILL_POLL_MS    ?? 1_000); },
     MIN_NOTIONAL: 5.0,
-} as const;
+};
 
 // ─── INTERFACES ───────────────────────────────────────────────────────────────
 export type TradeOutcome = 'orders_placed' | 'tp_confirmed' | 'sl_triggered' | 'skipped' | 'error';
@@ -128,6 +134,7 @@ export interface ActiveTrade {
 }
 
 let _activeTrade: ActiveTrade | null = null;
+let _entryInProgress = false;   // locks the async fill-poll window against re-entry
 export function getActiveTrade(): ActiveTrade | null { return _activeTrade; }
 export function clearActiveTrade(): void { _activeTrade = null; }
 
@@ -150,6 +157,27 @@ export async function sendAlert(message: string): Promise<void> {
     }
 }
 
+// ─── ORDER-RATE GUARD ─────────────────────────────────────────────────────────
+// Binance Futures caps order ops at 300/10s (per account). We throttle every
+// order placement/cancel through a token bucket sized well under that limit so a
+// burst of HFT cycles can never trip -1015 (too many orders).
+const ORDER_MAX_PER_10S = Number(process.env.ORDER_MAX_PER_10S ?? 100);
+let   _orderTimestamps: number[] = [];
+
+async function orderRateGuard(): Promise<void> {
+    for (;;) {
+        const now = Date.now();
+        _orderTimestamps = _orderTimestamps.filter(t => now - t < 10_000);
+        if (_orderTimestamps.length < ORDER_MAX_PER_10S) {
+            _orderTimestamps.push(now);
+            return;
+        }
+        const waitMs = 10_000 - (now - _orderTimestamps[0]) + 50;
+        console.warn(`[RateGuard] ⏳ order cap reached (${ORDER_MAX_PER_10S}/10s) — waiting ${waitMs}ms`);
+        await new Promise(r => setTimeout(r, waitMs));
+    }
+}
+
 // ─── API INFRASTRUCTURE ───────────────────────────────────────────────────────
 function signedUrl(path: string, params: Record<string, string | number> = {}): string {
     const ts      = Date.now();
@@ -168,6 +196,7 @@ export async function privateGet(path: string, params: Record<string, string | n
 }
 
 export async function privatePost(path: string, params: Record<string, string | number> = {}): Promise<any> {
+    if (path.toLowerCase().includes('order')) await orderRateGuard();
     const ts      = Date.now();
     const entries = { ...params, timestamp: ts, recvWindow: 10000 };
     const rawQ    = Object.entries(entries).map(([k, v]) => `${k}=${v}`).join('&');
@@ -183,6 +212,7 @@ export async function privatePost(path: string, params: Record<string, string | 
 }
 
 async function privateDelete(path: string, params: Record<string, string | number> = {}): Promise<any> {
+    if (path.toLowerCase().includes('order')) await orderRateGuard();   // /order, /allOpenOrders, /algoOrder
     const res = await fetch(signedUrl(path, params), {
         method:  'DELETE',
         headers: { 'X-MBX-APIKEY': API_KEY },
@@ -203,6 +233,13 @@ export async function hasOpenPosition(): Promise<boolean> {
     try {
         const data = await privateGet('/fapi/v3/positionRisk', { symbol: STRATEGY.SYMBOL });
         return Array.isArray(data) && data.some((p: any) => Math.abs(Number(p.positionAmt ?? 0)) > 0);
+    } catch { return false; }
+}
+
+export async function hasOpenOrders(): Promise<boolean> {
+    try {
+        const data = await privateGet('/fapi/v1/openOrders', { symbol: STRATEGY.SYMBOL });
+        return Array.isArray(data) && data.length > 0;
     } catch { return false; }
 }
 
@@ -260,24 +297,24 @@ export async function getRealizedPnlSince(sinceMs: number): Promise<{ pnl: numbe
     }
 }
 
+// Cancels the resting TP (normal order) via /allOpenOrders AND the SL algo
+// stop-limit via the Algo endpoint (allOpenOrders does NOT touch algo orders).
+// slAlgoId is the algoId returned when the SL was placed.
 export async function cancelAllOrders(slAlgoId?: number): Promise<void> {
     try {
         await privateDelete('/fapi/v1/allOpenOrders', { symbol: STRATEGY.SYMBOL });
-        console.log(`[Cleanup] All orders cancelled`);
+        console.log(`[Cleanup] Open orders cancelled`);
     } catch (e: any) {
         console.error(`[Cleanup] Cancel failed: ${e.message}`);
     }
     if (slAlgoId && slAlgoId > 0) {
         try {
             await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId: slAlgoId });
-        } catch { /* no-op */ }
+            console.log(`[Cleanup] SL algo ${slAlgoId} cancelled`);
+        } catch (e: any) {
+            console.error(`[Cleanup] Algo cancel failed: ${e.message}`);
+        }
     }
-}
-
-export async function cancelAlgoOrder(algoId: number): Promise<void> {
-    try {
-        await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId });
-    } catch { /* no-op */ }
 }
 
 export async function triggerEmergencyClose(side: 'long' | 'short', size: number, reason: string): Promise<void> {
@@ -334,6 +371,12 @@ export async function triggerEmergencyClose(side: 'long' | 'short', size: number
 }
 
 // ─── TP2 RESCUE LIMIT ─────────────────────────────────────────────────────────
+// TP2 price = entry ± tp2OffsetTicks, tick-rounded (per-asset, scale-free).
+export function getTp2Price(entryPrice: number, side: 'long' | 'short'): number {
+    const offset = _cfg.tp2OffsetTicks * _cfg.tick;
+    return tickRound(side === 'long' ? entryPrice + offset : entryPrice - offset);
+}
+
 export async function placeReduceOnlyLimit(side: string, price: number, quantity: number): Promise<number> {
     const res = await privatePost('/fapi/v1/order', {
         symbol:      STRATEGY.SYMBOL,
@@ -372,23 +415,31 @@ export function calcSize(price: number): number {
     return size;
 }
 
-// ─── TP AND SL CALCULATION ────────────────────────────────────────────────────
-function calcTpDistance(price: number): number {
-    if (_cfg.tpIsPct) return tickRound(price * _cfg.tpFixed);
-    return _cfg.tpFixed;
+// ─── TP AND SL CALCULATION (margin-ROI based) ─────────────────────────────────
+// priceDist = entry * (roiPct/100) / leverage, floored to a minimum tick count so
+// the distance is never sub-tick (would round to zero and reject the order).
+function roiPriceDist(entry: number, roiPct: number, leverage: number): number {
+    return entry * (roiPct / 100) / leverage;
 }
 
-function calcSlDistance(price: number): number {
-    if (_cfg.slIsPct) return tickRound(price * _cfg.slFixed);
-    return _cfg.slFixed;
+function calcTpDistance(entry: number, leverage: number): number {
+    const raw   = roiPriceDist(entry, STRATEGY.TP_ROI_PCT, leverage);
+    const floor = _cfg.tpMinTicks * _cfg.tick;
+    return tickRound(Math.max(raw, floor));
+}
+
+function calcSlDistance(entry: number, leverage: number): number {
+    const raw   = roiPriceDist(entry, STRATEGY.SL_ROI_PCT, leverage);
+    const floor = _cfg.slMinTicks * _cfg.tick;
+    return tickRound(Math.max(raw, floor));
 }
 
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
-// Order flow (all maker, no taker unless emergency):
-//   1. GTX limit entry     → maker, cancels if it would be taker
-//   2. GTC limit TP        → maker resting order
-//   3. Algo Conditional Stop-Market SL → only mechanism Binance Futures allows
-//                                          for stops outside the Algo API
+// Order flow (all maker, never taker except emergency close):
+//   1. GTX limit entry        → maker, cancels if it would be taker
+//   2. GTC limit TP            → maker resting order
+//   3. Algo CONDITIONAL STOP   → maker stop-LIMIT; on trigger posts a limit (maker),
+//                                limit sits a few ticks beyond the trigger so it fills
 //   Entry + TP + SL all placed within seconds of fill.
 //   No position ever lives without both TP and SL.
 export async function executeBinanceTrade(
@@ -397,17 +448,30 @@ export async function executeBinanceTrade(
 ): Promise<TradeResult> {
     if (signal.direction === 'neutral') return { success: false, outcome: 'skipped' };
 
+    // ── Re-entry guard ────────────────────────────────────────────────────────
+    // _entryInProgress closes the async fill-poll window; the exchange checks
+    // (position + resting orders) close the cross-process gap. If flat but stale
+    // orders linger, clear them before opening anything new.
+    if (_entryInProgress || _activeTrade) {
+        return { success: false, outcome: 'skipped', message: 'Position already open.' };
+    }
+    if (await hasOpenPosition()) {
+        return { success: false, outcome: 'skipped', message: 'Position already open.' };
+    }
+    if (await hasOpenOrders()) {
+        console.warn(`[Entry] Stale resting orders with no position — cancelling before entry`);
+        await cancelAllOrders();
+        return { success: false, outcome: 'skipped', message: 'Cleared stale orders; retry next cycle.' };
+    }
+
     const direction = signal.direction as 'long' | 'short';
     const isBuy     = direction === 'long';
     const side      = isBuy ? 'BUY'  : 'SELL';
     const closeSide = isBuy ? 'SELL' : 'BUY';
     const leverage  = STRATEGY.LEVERAGE;
 
+    _entryInProgress = true;
     try {
-        if (_activeTrade || await hasOpenPosition()) {
-            return { success: false, outcome: 'skipped', message: 'Position already open.' };
-        }
-
         const liveBid = signal.bid;
         const liveAsk = signal.ask;
 
@@ -416,10 +480,11 @@ export async function executeBinanceTrade(
             await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
         } catch { /* already set */ }
 
-        // Entry price: 1 tick inside bid/ask, rounded to symbol tick
+        // Entry price: entryOffsetTicks inside bid/ask, rounded to symbol tick
+        const entryOffset = _cfg.entryOffsetTicks * _cfg.tick;
         const rawEntry   = isBuy
-            ? liveBid - _cfg.entryOffset
-            : liveAsk + _cfg.entryOffset;
+            ? liveBid - entryOffset
+            : liveAsk + entryOffset;
         const entryPrice = tickRound(rawEntry);
         const size       = calcSize(entryPrice);
 
@@ -442,12 +507,12 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'error', message: `Entry rejected: ${msg}` };
         }
 
-        // Poll for fill (up to 60s)
+        // Poll for fill (bounded by FILL_TIMEOUT — short, to keep REST cheap)
         const fillStart   = Date.now();
         let   filled      = false;
         let   actualEntry = entryPrice;
         while (Date.now() - fillStart < STRATEGY.FILL_TIMEOUT) {
-            await new Promise(r => setTimeout(r, 1_000));
+            await new Promise(r => setTimeout(r, STRATEGY.FILL_POLL_MS));
             const check = await privateGet('/fapi/v1/order', {
                 symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId,
             });
@@ -466,9 +531,9 @@ export async function executeBinanceTrade(
 
         const fillMs = Date.now() - fillStart;
 
-        // ── Calculate TP and SL prices ────────────────────────────────────────
-        const tpDist  = calcTpDistance(actualEntry);
-        const slDist  = calcSlDistance(actualEntry);
+        // ── Calculate TP and SL prices (margin-ROI based) ─────────────────────
+        const tpDist  = calcTpDistance(actualEntry, leverage);
+        const slDist  = calcSlDistance(actualEntry, leverage);
         const tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
@@ -508,31 +573,36 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'error', message: 'TP failed, emergency closed.' };
         }
 
-        // ── 3. SL — Algo Conditional Stop-Market ──────────────────────────────
-        // Binance Futures rejects STOP/STOP_LIMIT on /fapi/v1/order (-4120).
-        // The only working stop-loss mechanism is the Algo Order endpoint.
-        // This still triggers as a stop, but executes as taker on fire — that's
-        // the cost of having a guaranteed-fill SL. Acceptable: SL firing rarely,
-        // and a missed SL is far worse than a small taker fee.
+        // ── 3. SL — maker Stop-Limit via Algo Conditional ─────────────────────
+        // Binance rejects STOP on /fapi/v1/order (-4120: "use the Algo Order API").
+        // So we place a CONDITIONAL algo order with orderType=STOP — a true
+        // stop-LIMIT: on trigger it posts a LIMIT (maker), not a market (taker).
+        // The limit price sits slLimitTicks beyond the trigger in the adverse
+        // direction so it still fills as price continues through, while never
+        // crossing the book as a taker on placement. slOrderId is an algoId.
+        const slLimitOffset = _cfg.slLimitTicks * _cfg.tick;
+        const slLimitPrice  = tickRound(isBuy ? slPrice - slLimitOffset : slPrice + slLimitOffset);
         let slOrderId = 0;
         for (let attempt = 1; attempt <= 3; attempt++) {
             try {
-                const slAlgo = await privatePost('/fapi/v1/algoOrder', {
+                const slRes = await privatePost('/fapi/v1/algoOrder', {
                     symbol:       STRATEGY.SYMBOL,
                     side:         closeSide,
                     algoType:     'CONDITIONAL',
-                    type:         'STOP_MARKET',
+                    type:         'STOP',           // stop-LIMIT (maker), not STOP_MARKET
+                    timeInForce:  'GTC',
                     quantity:     size.toFixed(_cfg.qtyDp),
+                    price:        slLimitPrice.toFixed(_cfg.priceDp),
                     triggerPrice: slPrice.toFixed(_cfg.priceDp),
                     workingType:  'MARK_PRICE',
                     reduceOnly:   'true',
                 });
-                if (slAlgo?.algoId) {
-                    slOrderId = slAlgo.algoId;
-                    console.log(`[SL] ✅ Algo Stop-Market @ $${slPrice.toFixed(_cfg.priceDp)} | algoId=${slOrderId}`);
+                if (slRes?.algoId) {
+                    slOrderId = slRes.algoId;
+                    console.log(`[SL] ✅ Algo Stop-Limit trigger=$${slPrice.toFixed(_cfg.priceDp)} limit=$${slLimitPrice.toFixed(_cfg.priceDp)} | algoId=${slOrderId}`);
                     break;
                 }
-                console.error(`[SL] ❌ Algo attempt ${attempt}: ${JSON.stringify(slAlgo)}`);
+                console.error(`[SL] ❌ Attempt ${attempt}: ${JSON.stringify(slRes)}`);
                 if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));
             } catch (e: any) {
                 console.error(`[SL] ❌ Attempt ${attempt} threw: ${e.message}`);
@@ -585,5 +655,7 @@ export async function executeBinanceTrade(
     } catch (e: any) {
         console.error(`[Trade] Unhandled error: ${e.message}`);
         return { success: false, outcome: 'error', message: e.message };
+    } finally {
+        _entryInProgress = false;
     }
 }
