@@ -41,6 +41,12 @@ interface SymbolConfig {
     tp2OffsetTicks:   number;   // TP2 rescue offset from entry, in ticks
     tpMinTicks:       number;   // minimum TP distance in ticks (sub-tick floor)
     slMinTicks:       number;   // minimum SL distance in ticks (sub-tick floor)
+    maxSpreadUsd:     number;   // skip entry if bid/ask spread exceeds this (price units)
+    // ── Per-asset exit timing (NOT env — set explicitly per asset) ────────────
+    tp1TimeoutMs:     number;   // TP1 resting window before TP2 rescue
+    tp2TimeoutMs:     number;   // TP2 rescue window before scratch
+    scratchTimeoutMs: number;   // hard backstop — no trade lives longer
+    lossCooldownMs:   number;   // pause after a loss before next entry
 }
 
 function getConfig(symbol: string): SymbolConfig {
@@ -49,43 +55,57 @@ function getConfig(symbol: string): SymbolConfig {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 0.50, slFixedUsd: 5.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
-        tpMinTicks: 2, slMinTicks: 5,
+        tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.05,
+        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
     };
     if (s === 'BTCUSDT')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 5.00, slFixedUsd: 50.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
-        tpMinTicks: 2, slMinTicks: 5,
+        tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
+        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
     };
     if (s === 'DOGEUSDT') return {
         tick: 0.00001, qtyStep: 1, minQty: 1, priceDp: 5, qtyDp: 0,
         maxLeverage: 75, tpFixedUsd: 0.0001, slFixedUsd: 0.0020,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
-        tpMinTicks: 2, slMinTicks: 5,
+        tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.0002,
+        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
     };
     // USDC-margined perps — 0% maker, so profitable to scalp like XAU.
     if (s === 'ETHUSDC')  return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 0.10, slFixedUsd: 2.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
-        tpMinTicks: 2, slMinTicks: 5,
+        tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.05,
+        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
     };
     if (s === 'BTCUSDC')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 1.00, slFixedUsd: 20.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
-        tpMinTicks: 2, slMinTicks: 5,
+        tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
+        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
     };
     // Default: XAUUSDT — TP $0.05, SL $1.00
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 0.05, slFixedUsd: 1.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
-        tpMinTicks: 2, slMinTicks: 5,
+        tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.10,
+        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
     };
 }
 
 const _cfg = getConfig(MARKET_SYMBOL);
+
+// Per-asset exit timing for the current symbol — imported by main.ts (no env).
+export const ASSET_TIMING = {
+    tp1TimeoutMs:     _cfg.tp1TimeoutMs,
+    tp2TimeoutMs:     _cfg.tp2TimeoutMs,
+    scratchTimeoutMs: _cfg.scratchTimeoutMs,
+    lossCooldownMs:   _cfg.lossCooldownMs,
+};
 
 // ─── STRATEGY PARAMETERS ──────────────────────────────────────────────────────
 const STRATEGY = {
@@ -101,11 +121,6 @@ const STRATEGY = {
     // Fixed-dollar TP/SL distances (env overrides the per-asset config default).
     get TP_FIXED_USD() { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
     get SL_FIXED_USD() { return Number(process.env.SL_FIXED_USD ?? _cfg.slFixedUsd); },
-
-    // Exit-lifecycle timeouts — env-tunable for HFT cadence (1–2.5 min round trips).
-    get TP1_TIMEOUT_MS()     { return Number(process.env.TP1_TIMEOUT_MS     ?? 105_000); },
-    get TP2_TIMEOUT_MS()     { return Number(process.env.TP2_TIMEOUT_MS     ?? 30_000); },
-    get SCRATCH_TIMEOUT_MS() { return Number(process.env.SCRATCH_TIMEOUT_MS ?? 150_000); },
 
     // Maker entry should fill fast or be abandoned (keeps REST polling cheap).
     get FILL_TIMEOUT() { return Number(process.env.FILL_TIMEOUT_MS ?? 6_000); },
@@ -481,6 +496,12 @@ export async function executeBinanceTrade(
     try {
         const liveBid = signal.bid;
         const liveAsk = signal.ask;
+
+        // Spread gate — a wide spread relative to a tiny TP means thin/risky book.
+        const spread = liveAsk - liveBid;
+        if (!IS_DEMO && spread > _cfg.maxSpreadUsd) {
+            return { success: false, outcome: 'skipped', message: `Spread $${spread.toFixed(3)} > $${_cfg.maxSpreadUsd} cap` };
+        }
 
         // Set leverage
         try {

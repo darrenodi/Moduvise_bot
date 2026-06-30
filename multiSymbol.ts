@@ -17,16 +17,14 @@ import { sendAlert, getAvailableBalance } from './executeTrade.js';
 
 const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 
-// TP/SL are derived from 5m ATR (TP_ATR_MULT / SL_ATR_MULT, set in .env and
-// inherited by every child), so no per-asset TP/SL tuning lives here. All signal
-// gates are scale-relative (see signals.ts), so only genuinely per-symbol values
-// remain: leverage cap, loss cooldown, and the liquidity-wall notional floor.
+// TP/SL, exit timeouts and loss cooldown are all per-asset in executeTrade's
+// getConfig (not here, not env). This orchestrator only owns spawn-level concerns:
+// which symbols, leverage cap, and the liquidity-wall notional floor.
 interface SymbolConfig {
     marketSymbol:    string;
     displaySymbol:   string;
     wsSymbol:        string;
     leverage:        number;
-    lossCooldownMs:  number;
     wallMinNotional: number;
 }
 
@@ -35,9 +33,9 @@ interface SymbolConfig {
 // charge 0.02% maker / 0.05% taker — ~4% of margin round-trip at 100x — so they
 // bleed on fees and are intentionally excluded.
 const SYMBOLS: SymbolConfig[] = [
-    { marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt', leverage: 100, lossCooldownMs: 30_000, wallMinNotional: 20_000 },
-    { marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc', leverage: 100, lossCooldownMs: 30_000, wallMinNotional: 100_000 },
-    { marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc', leverage: 100, lossCooldownMs: 30_000, wallMinNotional: 50_000 },
+    { marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt', leverage: 100, wallMinNotional: 20_000 },
+    { marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc', leverage: 100, wallMinNotional: 100_000 },
+    { marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc', leverage: 100, wallMinNotional: 50_000 },
 ];
 
 // ─── PROCESS REGISTRY ─────────────────────────────────────────────────────────
@@ -77,7 +75,6 @@ function spawnSymbol(entry: ManagedProcess): void {
         WS_SYMBOL:         cfg.wsSymbol,
         MARGIN_PER_TRADE:  String(margin),
         BOT_LEVERAGE:      String(cfg.leverage),
-        LOSS_COOLDOWN_MS:  String(cfg.lossCooldownMs),
         WALL_MIN_NOTIONAL: String(cfg.wallMinNotional),
         STATE_FILE:        `./bot-state-${cfg.marketSymbol}.json`,
         TRADE_LOG_FILE:    `./tradeLog-${cfg.marketSymbol}.jsonl`,

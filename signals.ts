@@ -35,6 +35,7 @@ export interface TechnicalIndicators {
     fundingRate:          number | null;
     spreadUsd:            number;
     obImbalance:          number;
+    topObImbalance:       number;   // imbalance of the top 3 levels (next-tick predictor)
     priceVsVwap:          number;
     recentSwingHigh:      number;
     recentSwingLow:       number;
@@ -124,7 +125,8 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 // ─── RELATIVE SIGNAL THRESHOLDS (env-tunable, scale-free) ─────────────────────
 // Every threshold is expressed relative to price/ATR so all four symbols behave
 // identically regardless of absolute price. This is what makes XAU & DOGE trade.
-const MAX_SPREAD_BPS    = Number(process.env.MAX_SPREAD_BPS    ?? 3.0);   // spread/price in basis points
+const TOUCH_TOL         = Number(process.env.TOUCH_TOL         ?? 0.10);  // block if top-of-book imbalance opposes by more than this
+const FLOW_AGAINST      = Number(process.env.FLOW_AGAINST      ?? 1.3);   // block if opposing 5s trade flow exceeds this ratio
 const ATR_CEIL_PCT      = Number(process.env.ATR_CEIL_PCT      ?? 0.6);   // ATR as % of price — above = too fast
 const ATR_FLOOR_PCT     = Number(process.env.ATR_FLOOR_PCT     ?? 0.02);  // ATR as % of price — below = dead
 const MOM_TRAP_ATR      = Number(process.env.MOM_TRAP_ATR      ?? 1.0);   // momentum AGAINST dir, in ATR units
@@ -236,15 +238,11 @@ function getDirection(
     const neutral = (reasoning: string) => ({ direction: 'neutral' as SignalDirection, reasoning, confidence: 0 });
 
     const ob        = ind.obImbalance;
+    const top       = ind.topObImbalance;                // top-of-book (next-tick) imbalance
     const atr       = ind.atr5m > 0 ? ind.atr5m : 1e-9;
     const momScore  = ind.momentum5m / atr;              // momentum in ATR units (scale-free)
     const atrPct    = ind.atrPct * 100;                  // ATR as % of price
-    const spreadBps = price > 0 ? (ind.spreadUsd / price) * 1e4 : 999;
-
-    // ── Gate 1: Spread (bps, scale-free) ──────────────────────────────────────
-    if (process.env.ENVIRONMENT === 'live' && spreadBps > MAX_SPREAD_BPS) {
-        return neutral(`SPREAD BLOCK: ${spreadBps.toFixed(2)}bps > ${MAX_SPREAD_BPS}bps`);
-    }
+    // (Spread is gated per-asset at execution time in executeTrade, not here.)
 
     // ── Gate 2: ATR window — too fast (trap) or too dead (TP never reached) ────
     if (atrPct > ATR_CEIL_PCT) return neutral(`TOO FAST: ATR ${atrPct.toFixed(2)}% > ${ATR_CEIL_PCT}% ceiling`);
@@ -315,13 +313,24 @@ function getDirection(
         }
     }
 
-    // ── Gate 6: 5-second velocity guard (don't enter into a flush/spike) ──────
+    // ── Gate 6: Top-of-book must not oppose (sets the next tick — vital for a
+    //            tiny TP). The best few levels predict the immediate move. ───────
+    if (dir === 'long'  && top < -TOUCH_TOL) return neutral(`TOUCH OPPOSES LONG: top ob ${(top*100).toFixed(0)}%`);
+    if (dir === 'short' && top >  TOUCH_TOL) return neutral(`TOUCH OPPOSES SHORT: top ob ${(top*100).toFixed(0)}%`);
+
+    // ── Gate 7: Real-time trade flow must not run against us — the main cause of
+    //            a fast adverse move that blows the SL before TP. ───────────────
     if (velocityState?.wsReady) {
-        if (dir === 'long'  && velocityState.isSellFlush) return neutral(`VELOCITY: sell flush ratio=${velocityState.ratio}x`);
-        if (dir === 'short' && velocityState.isBuyFlush)  return neutral(`VELOCITY: buy spike ratio=${velocityState.ratio}x`);
+        const b = velocityState.buyVol5s, s = velocityState.sellVol5s;
+        if (dir === 'long'  && s > b * FLOW_AGAINST && s > 0) return neutral(`FLOW AGAINST LONG: sell ${s} > ${FLOW_AGAINST}× buy ${b}`);
+        if (dir === 'short' && b > s * FLOW_AGAINST && b > 0) return neutral(`FLOW AGAINST SHORT: buy ${b} > ${FLOW_AGAINST}× sell ${s}`);
     }
 
-    return { direction: dir, reasoning: `[${regime}] ${reason}`, confidence: conf };
+    // Confidence boost when the touch and flow actively agree with the entry.
+    const touchAgrees = dir === 'long' ? top > TOUCH_TOL : top < -TOUCH_TOL;
+    if (touchAgrees) conf = Math.min(1, conf + 0.15);
+
+    return { direction: dir, reasoning: `[${regime}] ${reason} | top=${(top*100).toFixed(0)}%`, confidence: conf };
 }
 
 // ─── SIGNAL DISPATCHER ────────────────────────────────────────────────────────

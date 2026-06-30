@@ -22,6 +22,7 @@ import {
     sendAlert,
     placeReduceOnlyLimit,
     getTp2Price,
+    ASSET_TIMING,
 } from './executeTrade.js';
 
 dotenv.config();
@@ -30,12 +31,11 @@ const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
 const BASE_URL    = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
 
-// ─── EXIT-LIFECYCLE TIMEOUTS (env-tunable) ────────────────────────────────────
-// Tuned for 1–2.5 min round trips: TP has 105s to fill, a 30s near-breakeven
-// rescue, then a hard 150s (2.5 min) backstop — no trade ever lives longer.
-const TP1_TIMEOUT_MS     = Number(process.env.TP1_TIMEOUT_MS     ?? 105_000);
-const TP2_TIMEOUT_MS     = Number(process.env.TP2_TIMEOUT_MS     ?? 30_000);
-const SCRATCH_TIMEOUT_MS = Number(process.env.SCRATCH_TIMEOUT_MS ?? 150_000);
+// ─── EXIT-LIFECYCLE TIMEOUTS (per-asset, from executeTrade getConfig) ──────────
+// Tuned for 1–2.5 min round trips: TP fills within tp1, a near-breakeven rescue,
+// then a hard backstop — no trade ever lives longer. Set per asset, not env.
+const { tp1TimeoutMs: TP1_TIMEOUT_MS, tp2TimeoutMs: TP2_TIMEOUT_MS,
+        scratchTimeoutMs: SCRATCH_TIMEOUT_MS, lossCooldownMs: LOSS_COOLDOWN_MS } = ASSET_TIMING;
 
 // ─── PER-SYMBOL STATE ─────────────────────────────────────────────────────────
 const _symbol   = process.env.MARKET_SYMBOL ?? 'XAUUSDT';
@@ -233,6 +233,11 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
     const totNot = bidNot + askNot;
     const obImbalance = totNot === 0 ? 0 : (bidNot - askNot) / totNot;
 
+    // Top-of-book (best 3 levels) imbalance — the next-tick predictor for tiny TPs.
+    const bidTop3 = bookRes.bids.slice(0, 3).reduce((s: number, v: string[]) => s + Number(v[0]) * Number(v[1]), 0);
+    const askTop3 = bookRes.asks.slice(0, 3).reduce((s: number, v: string[]) => s + Number(v[0]) * Number(v[1]), 0);
+    const topObImbalance = (bidTop3 + askTop3) === 0 ? 0 : (bidTop3 - askTop3) / (bidTop3 + askTop3);
+
     const highs   = klinesRes.map((c: any) => Number(c[2]));
     const lows    = klinesRes.map((c: any) => Number(c[3]));
     const closes  = klinesRes.map((c: any) => Number(c[4]));
@@ -277,7 +282,7 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
         distanceToResistance: Math.abs(swingHigh - currentPrice),
         distanceToSupport:    Math.abs(currentPrice - swingLow),
         high24h: Number(tickerRes.highPrice), low24h: Number(tickerRes.lowPrice),
-        adx, fundingRate, spreadUsd, obImbalance, priceVsVwap,
+        adx, fundingRate, spreadUsd, obImbalance, topObImbalance, priceVsVwap,
         recentSwingHigh: swingHigh, recentSwingLow: swingLow,
     };
 
@@ -501,10 +506,9 @@ async function runCycle(): Promise<void> {
         const margin = getCurrentMargin(_bankroll);
         process.env.MARGIN_PER_TRADE = String(+margin.toFixed(2));
 
-        // Loss cooldown
-        const LOSS_CD = Number(process.env.LOSS_COOLDOWN_MS ?? 120_000);
-        if (Date.now() - _lastLossAt < LOSS_CD) {
-            console.log(`[${_symbol}] ⏸ Cooldown: ${Math.ceil((LOSS_CD-(Date.now()-_lastLossAt))/1000)}s`);
+        // Loss cooldown (per-asset)
+        if (Date.now() - _lastLossAt < LOSS_COOLDOWN_MS) {
+            console.log(`[${_symbol}] ⏸ Cooldown: ${Math.ceil((LOSS_COOLDOWN_MS-(Date.now()-_lastLossAt))/1000)}s`);
             return;
         }
 
