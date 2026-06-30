@@ -17,7 +17,7 @@ import { sendAlert, getAvailableBalance } from './executeTrade.js';
 
 const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 
-// TP/SL are now derived from margin-ROI (TP_ROI_PCT / SL_ROI_PCT, set in .env and
+// TP/SL are derived from 5m ATR (TP_ATR_MULT / SL_ATR_MULT, set in .env and
 // inherited by every child), so no per-asset TP/SL tuning lives here. All signal
 // gates are scale-relative (see signals.ts), so only genuinely per-symbol values
 // remain: leverage cap, loss cooldown, and the liquidity-wall notional floor.
@@ -30,11 +30,12 @@ interface SymbolConfig {
     wallMinNotional: number;
 }
 
+// XAU only: it's the sole symbol with 0% maker fees, so the only one that can
+// profit at scalp targets. BTC/ETH/DOGE charge 0.02% maker / 0.05% taker, which
+// at 100x = ~4% of margin round-trip — they bleed on fees alone. Re-add them here
+// if you secure a fee deal or switch to much larger (fee-clearing) targets.
 const SYMBOLS: SymbolConfig[] = [
     { marketSymbol: 'XAUUSDT',  displaySymbol: 'XAU/USDT',  wsSymbol: 'xauusdt',  leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 20_000 },
-    { marketSymbol: 'ETHUSDT',  displaySymbol: 'ETH/USDT',  wsSymbol: 'ethusdt',  leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 50_000 },
-    { marketSymbol: 'BTCUSDT',  displaySymbol: 'BTC/USDT',  wsSymbol: 'btcusdt',  leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 100_000 },
-    { marketSymbol: 'DOGEUSDT', displaySymbol: 'DOGE/USDT', wsSymbol: 'dogeusdt', leverage: 75,  lossCooldownMs: 120_000, wallMinNotional: 20_000 },
 ];
 
 // ─── PROCESS REGISTRY ─────────────────────────────────────────────────────────
@@ -65,7 +66,7 @@ function spawnSymbol(entry: ManagedProcess): void {
 
     const margin = getCurrentMargin(bankroll);
 
-    // Relative signal knobs (TP_ROI_PCT, SL_ROI_PCT, ATR_CEIL_PCT, MOM_*_ATR, …)
+    // Target & signal knobs (TP_ATR_MULT, SL_ATR_MULT, ATR_CEIL_PCT, MOM_*_ATR, …)
     // are inherited from .env via ...process.env, or fall back to code defaults.
     const env: NodeJS.ProcessEnv = {
         ...process.env,

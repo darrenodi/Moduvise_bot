@@ -15,11 +15,10 @@ const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.e
 // ─── PER-SYMBOL CONFIGURATION ─────────────────────────────────────────────────
 // Only EXCHANGE constants live here (tick/step/precision/max leverage). The TP and
 // SL distances are NOT hardcoded per asset — they are derived at runtime from the
-// margin-ROI targets (TP_ROI_PCT / SL_ROI_PCT) so behaviour is identical across
-// every symbol regardless of price scale.
+// 5m ATR so they scale with volatility and sit outside intrabar noise:
 //
-//   TP price distance = entry * (TP_ROI_PCT/100) / leverage   (default +0.5% margin)
-//   SL price distance = entry * (SL_ROI_PCT/100) / leverage   (default -2.0% margin)
+//   TP price distance = TP_ATR_MULT × atr5m   (default 0.8× ATR)
+//   SL price distance = SL_ATR_MULT × atr5m   (default 1.5× ATR)
 //
 // The only per-asset tuning kept here is expressed in TICKS (scale-free):
 //   entryOffsetTicks : how far inside bid/ask the maker entry sits
@@ -85,10 +84,11 @@ const STRATEGY = {
         return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
-    // Margin-ROI targets (asset-agnostic). TP/SL price distances are derived from
-    // these at runtime: priceDist = entry * (roiPct/100) / leverage.
-    get TP_ROI_PCT() { return Number(process.env.TP_ROI_PCT ?? 0.5); },
-    get SL_ROI_PCT() { return Number(process.env.SL_ROI_PCT ?? 2.0); },
+    // ATR-relative targets. TP/SL price distances scale with 5m ATR so they sit
+    // OUTSIDE the noise — the maker stop-limit fills near its trigger (less taker
+    // slippage) and the TP is realistically reachable. Tune via env.
+    get TP_ATR_MULT() { return Number(process.env.TP_ATR_MULT ?? 0.8); },
+    get SL_ATR_MULT() { return Number(process.env.SL_ATR_MULT ?? 1.5); },
 
     // Exit-lifecycle timeouts — env-tunable for HFT cadence.
     get TP1_TIMEOUT_MS()     { return Number(process.env.TP1_TIMEOUT_MS     ?? 90_000); },
@@ -416,21 +416,18 @@ export function calcSize(price: number): number {
     return size;
 }
 
-// ─── TP AND SL CALCULATION (margin-ROI based) ─────────────────────────────────
-// priceDist = entry * (roiPct/100) / leverage, floored to a minimum tick count so
-// the distance is never sub-tick (would round to zero and reject the order).
-function roiPriceDist(entry: number, roiPct: number, leverage: number): number {
-    return entry * (roiPct / 100) / leverage;
-}
-
-function calcTpDistance(entry: number, leverage: number): number {
-    const raw   = roiPriceDist(entry, STRATEGY.TP_ROI_PCT, leverage);
+// ─── TP AND SL CALCULATION (ATR-relative) ─────────────────────────────────────
+// priceDist = mult × 5m ATR, floored to a minimum tick count so the distance is
+// never sub-tick (would round to zero and reject the order). Sized off ATR so the
+// targets sit outside intrabar noise and the maker stop-limit can fill near trigger.
+function calcTpDistance(atr5m: number): number {
+    const raw   = STRATEGY.TP_ATR_MULT * atr5m;
     const floor = _cfg.tpMinTicks * _cfg.tick;
     return tickRound(Math.max(raw, floor));
 }
 
-function calcSlDistance(entry: number, leverage: number): number {
-    const raw   = roiPriceDist(entry, STRATEGY.SL_ROI_PCT, leverage);
+function calcSlDistance(atr5m: number): number {
+    const raw   = STRATEGY.SL_ATR_MULT * atr5m;
     const floor = _cfg.slMinTicks * _cfg.tick;
     return tickRound(Math.max(raw, floor));
 }
@@ -546,9 +543,10 @@ export async function executeBinanceTrade(
 
         const fillMs = Date.now() - fillStart;
 
-        // ── Calculate TP and SL prices (margin-ROI based) ─────────────────────
-        const tpDist  = calcTpDistance(actualEntry, leverage);
-        const slDist  = calcSlDistance(actualEntry, leverage);
+        // ── Calculate TP and SL prices (ATR-relative) ─────────────────────────
+        const atr5m   = signal.atr5m > 0 ? signal.atr5m : _cfg.tick * _cfg.slMinTicks;
+        const tpDist  = calcTpDistance(atr5m);
+        const slDist  = calcSlDistance(atr5m);
         const tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
