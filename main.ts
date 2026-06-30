@@ -20,6 +20,7 @@ import {
     cancelAllOrders,
     getRealizedPnlSince,
     sendAlert,
+    getAvailableBalance,
     ASSET_TIMING,
 } from './executeTrade.js';
 
@@ -32,6 +33,9 @@ const BASE_URL    = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi
 // Per-asset loss cooldown (from executeTrade getConfig). No exit timeouts — the
 // position rides on its maker TP + maker SL until one fills or liquidation.
 const { lossCooldownMs: LOSS_COOLDOWN_MS } = ASSET_TIMING;
+
+// Below this available balance, stop trying to trade (don't force doomed orders).
+const MIN_STACK = Number(process.env.MIN_STACK ?? 0.60);
 
 // ─── PER-SYMBOL STATE ─────────────────────────────────────────────────────────
 const _symbol   = process.env.MARKET_SYMBOL ?? 'XAUUSDT';
@@ -415,6 +419,23 @@ async function runCycle(): Promise<void> {
         console.log(`[Heartbeat] ${signal.reasoning} | Stack: $${getStack().toFixed(4)} | Banked: $${getBanked().toFixed(4)}`);
 
         if (signal.direction === 'neutral') { stats.skipped++; return; }
+
+        // Balance gate — if real available balance can't cover this trade's margin,
+        // don't force a doomed order. Skip cleanly and wait (a closing trade frees
+        // margin); pause only when balance is below the absolute minimum to trade.
+        const avail = await getAvailableBalance();
+        if (avail < margin) {
+            stats.skipped++;
+            if (avail < MIN_STACK) {
+                _bankroll.paused = true;
+                _bankroll.pausedReason = `Balance too low: $${avail.toFixed(4)} < $${MIN_STACK}`;
+                saveBankroll(_bankroll);
+                await sendAlert(`💤 ${_symbol} balance too low ($${avail.toFixed(4)}) — paused, not forcing trades.`);
+            } else {
+                console.log(`[${_symbol}] 💤 Balance $${avail.toFixed(4)} < margin $${margin.toFixed(2)} — skipping, not forcing.`);
+            }
+            return;
+        }
 
         const result = await executeBinanceTrade(signal, 0);
 
