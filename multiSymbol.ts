@@ -35,9 +35,9 @@ interface SymbolConfig {
 // charge 0.02% maker / 0.05% taker — ~4% of margin round-trip at 100x — so they
 // bleed on fees and are intentionally excluded.
 const SYMBOLS: SymbolConfig[] = [
-    { marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt', leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 20_000 },
-    { marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc', leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 100_000 },
-    { marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc', leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 50_000 },
+    { marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt', leverage: 100, lossCooldownMs: 30_000, wallMinNotional: 20_000 },
+    { marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc', leverage: 100, lossCooldownMs: 30_000, wallMinNotional: 100_000 },
+    { marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc', leverage: 100, lossCooldownMs: 30_000, wallMinNotional: 50_000 },
 ];
 
 // ─── PROCESS REGISTRY ─────────────────────────────────────────────────────────

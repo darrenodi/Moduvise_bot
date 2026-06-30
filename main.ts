@@ -30,10 +30,12 @@ const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
 const BASE_URL    = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
 
-// ─── EXIT-LIFECYCLE TIMEOUTS (env-tunable, mirror executeTrade STRATEGY) ───────
-const TP1_TIMEOUT_MS     = Number(process.env.TP1_TIMEOUT_MS     ?? 90_000);
+// ─── EXIT-LIFECYCLE TIMEOUTS (env-tunable) ────────────────────────────────────
+// Tuned for 1–2.5 min round trips: TP has 105s to fill, a 30s near-breakeven
+// rescue, then a hard 150s (2.5 min) backstop — no trade ever lives longer.
+const TP1_TIMEOUT_MS     = Number(process.env.TP1_TIMEOUT_MS     ?? 105_000);
 const TP2_TIMEOUT_MS     = Number(process.env.TP2_TIMEOUT_MS     ?? 30_000);
-const SCRATCH_TIMEOUT_MS = Number(process.env.SCRATCH_TIMEOUT_MS ?? 130_000);
+const SCRATCH_TIMEOUT_MS = Number(process.env.SCRATCH_TIMEOUT_MS ?? 150_000);
 
 // ─── PER-SYMBOL STATE ─────────────────────────────────────────────────────────
 const _symbol   = process.env.MARKET_SYMBOL ?? 'XAUUSDT';

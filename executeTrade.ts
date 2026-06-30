@@ -102,10 +102,10 @@ const STRATEGY = {
     get TP_FIXED_USD() { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
     get SL_FIXED_USD() { return Number(process.env.SL_FIXED_USD ?? _cfg.slFixedUsd); },
 
-    // Exit-lifecycle timeouts — env-tunable for HFT cadence.
-    get TP1_TIMEOUT_MS()     { return Number(process.env.TP1_TIMEOUT_MS     ?? 90_000); },
+    // Exit-lifecycle timeouts — env-tunable for HFT cadence (1–2.5 min round trips).
+    get TP1_TIMEOUT_MS()     { return Number(process.env.TP1_TIMEOUT_MS     ?? 105_000); },
     get TP2_TIMEOUT_MS()     { return Number(process.env.TP2_TIMEOUT_MS     ?? 30_000); },
-    get SCRATCH_TIMEOUT_MS() { return Number(process.env.SCRATCH_TIMEOUT_MS ?? 130_000); },
+    get SCRATCH_TIMEOUT_MS() { return Number(process.env.SCRATCH_TIMEOUT_MS ?? 150_000); },
 
     // Maker entry should fill fast or be abandoned (keeps REST polling cheap).
     get FILL_TIMEOUT() { return Number(process.env.FILL_TIMEOUT_MS ?? 6_000); },

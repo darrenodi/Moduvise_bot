@@ -80,12 +80,13 @@ export function getSession(): {
     cycleMsMax: number;
     sizePct:    number;
 } {
+    // Tight cycle cadence for HFT — quick re-evaluation/re-entry after each close.
     const h = new Date().getUTCHours();
-    if (h >= 13 && h < 16) return { name: 'London/NY Overlap', quality: 'PEAK', cycleMsMin: 8_000,  cycleMsMax: 12_000, sizePct: 1.00 };
-    if (h >= 9  && h < 13) return { name: 'London',            quality: 'HIGH', cycleMsMin: 10_000, cycleMsMax: 15_000, sizePct: 1.00 };
-    if (h >= 16 && h < 19) return { name: 'New York',          quality: 'HIGH', cycleMsMin: 10_000, cycleMsMax: 15_000, sizePct: 1.00 };
-    if (h >= 19 && h < 21) return { name: 'NY Close',          quality: 'LOW',  cycleMsMin: 20_000, cycleMsMax: 30_000, sizePct: 1.00 };
-    return                         { name: 'Asia/Off-hours',   quality: 'LOW',  cycleMsMin: 20_000, cycleMsMax: 30_000, sizePct: 1.00 };
+    if (h >= 13 && h < 16) return { name: 'London/NY Overlap', quality: 'PEAK', cycleMsMin: 4_000,  cycleMsMax: 7_000,  sizePct: 1.00 };
+    if (h >= 9  && h < 13) return { name: 'London',            quality: 'HIGH', cycleMsMin: 5_000,  cycleMsMax: 9_000,  sizePct: 1.00 };
+    if (h >= 16 && h < 19) return { name: 'New York',          quality: 'HIGH', cycleMsMin: 5_000,  cycleMsMax: 9_000,  sizePct: 1.00 };
+    if (h >= 19 && h < 21) return { name: 'NY Close',          quality: 'LOW',  cycleMsMin: 9_000,  cycleMsMax: 14_000, sizePct: 1.00 };
+    return                         { name: 'Asia/Off-hours',   quality: 'LOW',  cycleMsMin: 9_000,  cycleMsMax: 14_000, sizePct: 1.00 };
 }
 
 // ─── DIP / RIP REGIME DETECTION ───────────────────────────────────────────────
