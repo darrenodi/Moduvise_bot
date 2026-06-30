@@ -42,11 +42,7 @@ interface SymbolConfig {
     tpMinTicks:       number;   // minimum TP distance in ticks (sub-tick floor)
     slMinTicks:       number;   // minimum SL distance in ticks (sub-tick floor)
     maxSpreadUsd:     number;   // skip entry if bid/ask spread exceeds this (price units)
-    // ── Per-asset exit timing (NOT env — set explicitly per asset) ────────────
-    tp1TimeoutMs:     number;   // TP1 resting window before TP2 rescue
-    tp2TimeoutMs:     number;   // TP2 rescue window before scratch
-    scratchTimeoutMs: number;   // hard backstop — no trade lives longer
-    lossCooldownMs:   number;   // pause after a loss before next entry
+    lossCooldownMs:   number;   // pause after a loss before next entry (per-asset, NOT env)
 }
 
 function getConfig(symbol: string): SymbolConfig {
@@ -56,21 +52,21 @@ function getConfig(symbol: string): SymbolConfig {
         maxLeverage: 100, tpFixedUsd: 0.50, slFixedUsd: 5.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.05,
-        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000,
     };
     if (s === 'BTCUSDT')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 5.00, slFixedUsd: 50.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
-        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000,
     };
     if (s === 'DOGEUSDT') return {
         tick: 0.00001, qtyStep: 1, minQty: 1, priceDp: 5, qtyDp: 0,
         maxLeverage: 75, tpFixedUsd: 0.0001, slFixedUsd: 0.0020,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.0002,
-        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000,
     };
     // USDC-margined perps — 0% maker, so profitable to scalp like XAU.
     if (s === 'ETHUSDC')  return {
@@ -78,14 +74,14 @@ function getConfig(symbol: string): SymbolConfig {
         maxLeverage: 100, tpFixedUsd: 0.10, slFixedUsd: 2.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.05,
-        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000,
     };
     if (s === 'BTCUSDC')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 1.00, slFixedUsd: 20.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
-        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000,
     };
     // Default: XAUUSDT — TP $0.05, SL $1.00
     return {
@@ -93,18 +89,15 @@ function getConfig(symbol: string): SymbolConfig {
         maxLeverage: 100, tpFixedUsd: 0.05, slFixedUsd: 1.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.10,
-        tp1TimeoutMs: 105_000, tp2TimeoutMs: 30_000, scratchTimeoutMs: 150_000, lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000,
     };
 }
 
 const _cfg = getConfig(MARKET_SYMBOL);
 
-// Per-asset exit timing for the current symbol — imported by main.ts (no env).
+// Per-asset trading timing for the current symbol — imported by main.ts (no env).
 export const ASSET_TIMING = {
-    tp1TimeoutMs:     _cfg.tp1TimeoutMs,
-    tp2TimeoutMs:     _cfg.tp2TimeoutMs,
-    scratchTimeoutMs: _cfg.scratchTimeoutMs,
-    lossCooldownMs:   _cfg.lossCooldownMs,
+    lossCooldownMs: _cfg.lossCooldownMs,
 };
 
 // ─── STRATEGY PARAMETERS ──────────────────────────────────────────────────────
@@ -345,16 +338,19 @@ export async function cancelAllOrders(slAlgoId?: number): Promise<void> {
     }
 }
 
+// MAKER-ONLY close (user rule: never taker). Used to recover orphan/unmanaged
+// positions. Posts a reduce-only LIMIT at the touch; if it doesn't fill, it leaves
+// the position to ride (NO market/taker fallback) and alerts.
 export async function triggerEmergencyClose(side: 'long' | 'short', size: number, reason: string): Promise<void> {
     const closeSide = side === 'long' ? 'SELL' : 'BUY';
-    console.log(`[EMERGENCY] 🛑 ${closeSide} ${size} ${STRATEGY.SYMBOL} | ${reason}`);
+    console.log(`[CLOSE] 🛑 maker ${closeSide} ${size} ${STRATEGY.SYMBOL} | ${reason}`);
     await cancelAllOrders();
 
-    // Try limit close first (maker — no fee)
     try {
         const ticker = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`)
             .then(r => r.json()) as any;
-        const limitPrice = closeSide === 'SELL' ? Number(ticker.bidPrice) : Number(ticker.askPrice);
+        // Post on the maker side of the book (sell at ask, buy at bid) so it rests.
+        const limitPrice = closeSide === 'SELL' ? Number(ticker.askPrice) : Number(ticker.bidPrice);
         const limitOrder = await privatePost('/fapi/v1/order', {
             symbol:      STRATEGY.SYMBOL,
             side:        closeSide,
@@ -372,29 +368,18 @@ export async function triggerEmergencyClose(side: 'long' | 'short', size: number
                     symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId,
                 });
                 if (check.status === 'FILLED') {
-                    console.log(`[EMERGENCY] ✅ Limit close filled @ $${limitPrice.toFixed(_cfg.priceDp)}`);
+                    console.log(`[CLOSE] ✅ Maker close filled @ $${limitPrice.toFixed(_cfg.priceDp)}`);
                     clearActiveTrade();
                     return;
                 }
             }
-            await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId }).catch(() => {});
+            // Didn't fill — leave it resting and let the position ride (no taker).
+            console.warn(`[CLOSE] ⚠️ Maker close didn't fill — leaving position to ride (no taker)`);
+            await sendAlert(`⚠️ ${STRATEGY.SYMBOL} maker close didn't fill — position riding (no taker per rule). ${reason}`);
         }
-    } catch { /* fall through to market */ }
-
-    // Market close as last resort
-    try {
-        await privatePost('/fapi/v1/order', {
-            symbol:     STRATEGY.SYMBOL,
-            side:       closeSide,
-            type:       'MARKET',
-            quantity:   size,
-            reduceOnly: 'true',
-        });
-        console.log(`[EMERGENCY] ✅ Market close executed`);
-        clearActiveTrade();
     } catch (e: any) {
-        console.error(`[EMERGENCY] Close FAILED: ${e.message}`);
-        await sendAlert(`🚨 EMERGENCY CLOSE FAILED ${STRATEGY.SYMBOL} ${size}. CHECK NOW. ${e.message}`);
+        console.error(`[CLOSE] Maker close error: ${e.message}`);
+        await sendAlert(`⚠️ ${STRATEGY.SYMBOL} maker close error: ${e.message} — position riding.`);
     }
 }
 

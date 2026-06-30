@@ -20,8 +20,6 @@ import {
     cancelAllOrders,
     getRealizedPnlSince,
     sendAlert,
-    placeReduceOnlyLimit,
-    getTp2Price,
     ASSET_TIMING,
 } from './executeTrade.js';
 
@@ -31,11 +29,9 @@ const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
 const BASE_URL    = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
 
-// ─── EXIT-LIFECYCLE TIMEOUTS (per-asset, from executeTrade getConfig) ──────────
-// Tuned for 1–2.5 min round trips: TP fills within tp1, a near-breakeven rescue,
-// then a hard backstop — no trade ever lives longer. Set per asset, not env.
-const { tp1TimeoutMs: TP1_TIMEOUT_MS, tp2TimeoutMs: TP2_TIMEOUT_MS,
-        scratchTimeoutMs: SCRATCH_TIMEOUT_MS, lossCooldownMs: LOSS_COOLDOWN_MS } = ASSET_TIMING;
+// Per-asset loss cooldown (from executeTrade getConfig). No exit timeouts — the
+// position rides on its maker TP + maker SL until one fills or liquidation.
+const { lossCooldownMs: LOSS_COOLDOWN_MS } = ASSET_TIMING;
 
 // ─── PER-SYMBOL STATE ─────────────────────────────────────────────────────────
 const _symbol   = process.env.MARKET_SYMBOL ?? 'XAUUSDT';
@@ -309,12 +305,9 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
 }
 
 // ─── POSITION HEALTH CHECK ────────────────────────────────────────────────────
-// Two-stage exit:
-//   Phase 1 (TP1): resting limit, 90s window
-//   Phase 2 (TP2): rescue limit near entry, 30s window
-//   Phase 3 (Scratch): market exit, hard cap 130s total
-let _currentTradeId:    string | null = null;
-let _priceAtTp1Timeout: number | undefined;
+// Maker-only exits: a position rides on its resting maker TP + maker SL stop-limit
+// until one fills, or liquidation if the SL gaps. No taker timeout/scratch/fail-safe.
+let _currentTradeId: string | null = null;
 let _lastLossAt = 0;
 
 async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
@@ -352,8 +345,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 await applyTradeResult(real.pnl);
                 await cancelAllOrders(trade.slOrderId);
                 if (_currentTradeId) {
-                    logTradeClose(_currentTradeId, outcome, pos.currentPrice, real.pnl,
-                        trade.tp2Phase ? 'tp2' : 'tp1', trade.tp2Phase ?? false, false, _priceAtTp1Timeout);
+                    logTradeClose(_currentTradeId, outcome, pos.currentPrice, real.pnl, 'tp1', false, false);
                     // Gemini post-mortem on SL hits
                     if (outcome === 'sl') {
                         try {
@@ -363,8 +355,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                             analyseFailedTrade(logEntry, sendAlert).catch(() => {});
                         } catch { /* non-critical */ }
                     }
-                    _currentTradeId    = null;
-                    _priceAtTp1Timeout = undefined;
+                    _currentTradeId = null;
                 }
                 clearActiveTrade();
                 console.log(`[Health] ${outcome.toUpperCase()} | PnL: $${real.pnl.toFixed(4)}`);
@@ -386,107 +377,10 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
 
     if (!trade) return 'open';
 
-    const ageMs     = Date.now() - trade.openedAt;
-    const isBuy     = trade.side === 'long';
-    const closeSide = isBuy ? 'SELL' : 'BUY';
-
-    // ── TP2 phase ────────────────────────────────────────────────────────────
-    if (trade.tp2Phase) {
-        const tp2Age = Date.now() - (trade.tp2StartedAt ?? Date.now());
-        if (tp2Age < TP2_TIMEOUT_MS) return 'open';
-
-        const profit = isBuy ? pos.currentPrice - trade.entryPrice : trade.entryPrice - pos.currentPrice;
-        console.log(`[Scratch] ⏱ TP2 timeout ${(tp2Age/1000).toFixed(0)}s — exit @ $${pos.currentPrice}`);
-        await cancelAllOrders(trade.slOrderId);
-        await triggerEmergencyClose(trade.side, trade.size, 'TP2 timeout');
-        const real = await getRealizedPnlSince(trade.openedAt - 2_000);
-        const pnl  = real ? real.pnl : profit * trade.size;
-        if (pnl >= 0) stats.tpHits++; else { stats.slHits++; _lastLossAt = Date.now(); }
-        stats.fills++;
-        await applyTradeResult(pnl);
-        if (_currentTradeId) {
-            logTradeClose(_currentTradeId, pnl >= 0 ? 'tp' : 'sl', pos.currentPrice, pnl, 'scratch', true, true, _priceAtTp1Timeout);
-            _currentTradeId = null; _priceAtTp1Timeout = undefined;
-        }
-        clearActiveTrade();
-        await sendAlert(`⏱ ${_symbol} Scratched (TP2 timeout) | ${trade.side.toUpperCase()} | PnL: $${pnl.toFixed(4)}`);
-        return pnl >= 0 ? 'tp' : 'sl';
-    }
-
-    // ── TP1 timeout → switch to TP2 ──────────────────────────────────────────
-    if (ageMs >= TP1_TIMEOUT_MS) {
-        _priceAtTp1Timeout = pos.currentPrice;
-        try { await cancelAllOrders(trade.slOrderId); } catch { /* belt-and-suspenders */ }
-
-        // TP2 rescue near breakeven — per-asset offset in ticks, tick-rounded.
-        const tp2Price = getTp2Price(trade.entryPrice, trade.side);
-
-        let tp2OrderId = 0;
-        try {
-            tp2OrderId = await placeReduceOnlyLimit(closeSide, tp2Price, trade.size);
-            console.log(`[TP2] 🔄 TP1 timeout ${(ageMs/1000).toFixed(0)}s — rescue @ $${tp2Price} | id=${tp2OrderId}`);
-            await sendAlert(`⏳ ${_symbol} TP1 timeout | Rescue TP2 @ $${tp2Price} | ${trade.side.toUpperCase()}`);
-        } catch (e: any) {
-            console.error(`[TP2] Failed: ${e.message} — scratching`);
-            const profit = isBuy ? pos.currentPrice - trade.entryPrice : trade.entryPrice - pos.currentPrice;
-            await triggerEmergencyClose(trade.side, trade.size, 'TP2 placement failed');
-            const real = await getRealizedPnlSince(trade.openedAt - 2_000);
-            const pnl  = real ? real.pnl : profit * trade.size;
-            if (pnl >= 0) stats.tpHits++; else { stats.slHits++; _lastLossAt = Date.now(); }
-            stats.fills++;
-            await applyTradeResult(pnl);
-            if (_currentTradeId) {
-                logTradeClose(_currentTradeId, pnl >= 0 ? 'tp' : 'sl', pos.currentPrice, pnl, 'scratch', true, true, _priceAtTp1Timeout);
-                _currentTradeId = null; _priceAtTp1Timeout = undefined;
-            }
-            clearActiveTrade();
-            return pnl >= 0 ? 'tp' : 'sl';
-        }
-
-        (trade as any).tp2Phase     = true;
-        (trade as any).tp2StartedAt = Date.now();
-        (trade as any).tp2OrderId   = tp2OrderId;
-        (trade as any).tp2Price     = tp2Price;
-        return 'open';
-    }
-
-    // ── Hard backstop ─────────────────────────────────────────────────────────
-    if (ageMs > SCRATCH_TIMEOUT_MS) {
-        const profit = isBuy ? pos.currentPrice - trade.entryPrice : trade.entryPrice - pos.currentPrice;
-        console.log(`[Scratch] ⏱ Hard backstop ${(ageMs/1000).toFixed(0)}s`);
-        await cancelAllOrders(trade.slOrderId);
-        await triggerEmergencyClose(trade.side, trade.size, 'Hard backstop');
-        const real = await getRealizedPnlSince(trade.openedAt - 2_000);
-        const pnl  = real ? real.pnl : profit * trade.size;
-        if (pnl >= 0) stats.tpHits++; else { stats.slHits++; _lastLossAt = Date.now(); }
-        stats.fills++;
-        await applyTradeResult(pnl);
-        if (_currentTradeId) {
-            logTradeClose(_currentTradeId, pnl >= 0 ? 'tp' : 'sl', pos.currentPrice, pnl, 'scratch', false, true, _priceAtTp1Timeout);
-            _currentTradeId = null; _priceAtTp1Timeout = undefined;
-        }
-        clearActiveTrade();
-        return pnl >= 0 ? 'tp' : 'sl';
-    }
-
-    // ── Fail-safe: price blew past SL ────────────────────────────────────────
-    const adverseMove = isBuy ? trade.entryPrice - pos.currentPrice : pos.currentPrice - trade.entryPrice;
-    const slDist      = Math.abs(trade.slPrice - trade.entryPrice);
-    if (adverseMove >= slDist * 1.1) {
-        await sendAlert(`🛑 ${_symbol} Fail-safe: $${adverseMove.toFixed(4)} adverse on ${trade.side.toUpperCase()}`);
-        await triggerEmergencyClose(trade.side, trade.size, `Fail-safe $${adverseMove.toFixed(4)} adverse`);
-        const real = await getRealizedPnlSince(trade.openedAt - 2_000);
-        const loss = real ? real.pnl : -(trade.size * adverseMove);
-        stats.slHits++; stats.fills++; _lastLossAt = Date.now();
-        await applyTradeResult(loss);
-        if (_currentTradeId) {
-            logTradeClose(_currentTradeId, 'sl', pos.currentPrice, loss, 'failsafe', false, false);
-            _currentTradeId = null;
-        }
-        clearActiveTrade();
-        return 'sl';
-    }
-
+    // Position is open with its maker TP + maker SL stop-limit resting. Per user
+    // rule: NO taker exits. Let it ride until the maker TP or maker SL fills — or
+    // liquidation if the SL gaps and can't fill as maker. No timeout/scratch/
+    // backstop/fail-safe.
     return 'open';
 }
 
@@ -525,8 +419,7 @@ async function runCycle(): Promise<void> {
         const result = await executeBinanceTrade(signal, 0);
 
         if (result.outcome === 'orders_placed' && result.entryPrice) {
-            _currentTradeId    = new Date().toISOString().replace(/[:.]/g, '-');
-            _priceAtTp1Timeout = undefined;
+            _currentTradeId = new Date().toISOString().replace(/[:.]/g, '-');
             logTradeEntry(_currentTradeId, signal, asset, result.entryPrice,
                 result.tpPrice ?? 0, result.slPrice ?? 0,
                 _lastKlines, _lastRawBook.bids, _lastRawBook.asks);
@@ -594,7 +487,7 @@ console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
 console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
 console.log(`  TP       : $${process.env.TP_FIXED_USD ?? '0.05'} fixed (maker limit)`);
 console.log(`  SL       : $${process.env.SL_FIXED_USD ?? '1.00'} fixed (maker stop-limit)`);
-console.log(`  EXIT     : TP2 rescue @ ${(TP1_TIMEOUT_MS/1000)}s | TP2 win @ ${(TP2_TIMEOUT_MS/1000)}s | Backstop @ ${(SCRATCH_TIMEOUT_MS/1000)}s`);
+console.log(`  EXIT     : maker TP or maker SL only — no taker, rides to liquidation if SL gaps`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);
 console.log(`  STACK    : $${getStack().toFixed(4)} | BANKED: $${getBanked().toFixed(4)}`);
 console.log(`  LOG      : ${TRADE_LOG_FILE}`);
