@@ -46,9 +46,11 @@ interface ManagedProcess {
     lastStart: number;
 }
 
-const registry: ManagedProcess[] = SYMBOLS.map(cfg => ({
-    config: cfg, child: null, restarts: 0, lastStart: 0,
-}));
+// Populated in initBankrolls() with only the symbols the live balance can afford.
+let registry: ManagedProcess[] = [];
+
+// Minimum balance to give a symbol its own bankroll share.
+const MIN_PER_SYMBOL = Number(process.env.MIN_STACK ?? 0.60);
 
 // ─── SPAWN ONE SYMBOL BOT ─────────────────────────────────────────────────────
 function spawnSymbol(entry: ManagedProcess): void {
@@ -111,33 +113,42 @@ function spawnSymbol(entry: ManagedProcess): void {
     console.log(`${tag} 🚀 Started | stack=$${bankroll.stack.toFixed(4)} margin=$${margin.toFixed(2)} ${cfg.leverage}x`);
 }
 
-// ─── STARTUP: DIVIDE BALANCE AMONG SYMBOLS ───────────────────────────────────
+// ─── STARTUP: RUN ONLY WHAT THE BALANCE AFFORDS ──────────────────────────────
+// Never hard-exit on low balance (that would crash-loop under pm2). Instead run
+// as many of the configured symbols as the live balance can fund — at least 1.
 async function initBankrolls(): Promise<void> {
     const balance = await getAvailableBalance();
     console.log(`[Orchestrator] Live balance: $${balance.toFixed(4)}`);
 
-    if (balance < SYMBOLS.length * 0.60) {
-        console.error(`[Orchestrator] ❌ Balance $${balance.toFixed(2)} too low for ${SYMBOLS.length} symbols (need $${(SYMBOLS.length * 0.60).toFixed(2)} min)`);
-        await sendAlert(`❌ Balance $${balance.toFixed(2)} too low to run ${SYMBOLS.length} symbols. Deposit more.`);
-        process.exit(1);
+    // How many symbols can we afford? Clamp to [1, SYMBOLS.length].
+    const affordable = Math.max(1, Math.min(SYMBOLS.length, Math.floor(balance / MIN_PER_SYMBOL)));
+    const active     = SYMBOLS.slice(0, affordable);
+
+    if (affordable < SYMBOLS.length) {
+        const msg = `⚠️ Balance $${balance.toFixed(2)} — running ${affordable}/${SYMBOLS.length} symbol(s): ${active.map(s => s.marketSymbol).join(', ')}`;
+        console.warn(`[Orchestrator] ${msg}`);
+        await sendAlert(msg);
     }
 
-    const sharePerSymbol = balance / SYMBOLS.length;
-    console.log(`[Orchestrator] Allocating $${sharePerSymbol.toFixed(4)} per symbol`);
+    const sharePerSymbol = balance / active.length;
+    console.log(`[Orchestrator] Allocating $${sharePerSymbol.toFixed(4)} per symbol across ${active.length}`);
 
-    for (const cfg of SYMBOLS) {
+    for (const cfg of active) {
         const existing = loadBankroll(cfg.marketSymbol);
         if (existing && !existing.paused) {
-            // Already has a bankroll — don't reset it
             console.log(`[Orchestrator] ${cfg.marketSymbol}: existing bankroll restored — stack=$${existing.stack.toFixed(4)}`);
         } else if (existing?.paused) {
             console.log(`[Orchestrator] ${cfg.marketSymbol}: ⛔ paused — skipping`);
         } else {
-            // First run — create fresh bankroll
             createBankroll(cfg.marketSymbol, sharePerSymbol);
             console.log(`[Orchestrator] ${cfg.marketSymbol}: created — stack=$${sharePerSymbol.toFixed(4)}`);
         }
     }
+
+    // Build the process registry from only the affordable, non-paused symbols.
+    registry = active
+        .filter(cfg => !loadBankroll(cfg.marketSymbol)?.paused)
+        .map(cfg => ({ config: cfg, child: null, restarts: 0, lastStart: 0 }));
 }
 
 // ─── STATUS HEARTBEAT ─────────────────────────────────────────────────────────
@@ -176,13 +187,18 @@ console.log(`  BANK    : 50% profit protected | 50% compounds per symbol`);
 console.log(`  PAUSE   : stack < $0.60 → symbol pauses automatically`);
 console.log(`${'═'.repeat(70)}\n`);
 
-// Init bankrolls then stagger-start all symbols
+// Init bankrolls then stagger-start the affordable symbols. Never exit on error —
+// exiting under pm2 would crash-loop. If startup fails or nothing is runnable, the
+// process idles (status heartbeat keeps it alive) until restarted or funded.
 initBankrolls().then(() => {
+    if (registry.length === 0) {
+        console.warn(`[Orchestrator] No runnable symbols (balance too low or all paused) — idling.`);
+        return;
+    }
     registry.forEach((entry, i) => {
         setTimeout(() => spawnSymbol(entry), i * 3_000);
     });
 }).catch(async (e) => {
-    console.error(`[Orchestrator] Startup failed: ${e.message}`);
-    await sendAlert(`🚨 Orchestrator startup failed: ${e.message}`);
-    process.exit(1);
+    console.error(`[Orchestrator] Startup error (idling, not exiting): ${e.message}`);
+    await sendAlert(`🚨 Orchestrator startup error: ${e.message} — idling.`).catch(() => {});
 });
