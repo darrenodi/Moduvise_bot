@@ -137,6 +137,7 @@ let _activeTrade: ActiveTrade | null = null;
 let _entryInProgress = false;   // locks the async fill-poll window against re-entry
 export function getActiveTrade(): ActiveTrade | null { return _activeTrade; }
 export function clearActiveTrade(): void { _activeTrade = null; }
+export function isEntryInProgress(): boolean { return _entryInProgress; }
 
 // ─── ALERTING ─────────────────────────────────────────────────────────────────
 const TELEGRAM_TOKEN   = process.env.TELEGRAM_BOT_TOKEN ?? '';
@@ -525,8 +526,22 @@ export async function executeBinanceTrade(
         }
 
         if (!filled) {
-            await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }).catch(() => {});
-            return { success: false, outcome: 'skipped', message: 'Entry not filled within timeout.' };
+            // The order may have filled right at the buzzer. Re-query authoritatively
+            // BEFORE giving up — otherwise we'd cancel a filled order and leave a
+            // naked position with no TP/SL.
+            const finalCheck = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }).catch(() => null);
+            if (finalCheck?.status === 'FILLED') {
+                filled = true; actualEntry = Number(finalCheck.avgPrice ?? entryPrice);
+            } else {
+                await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }).catch(() => {});
+                // The cancel itself can race a fill — verify once more after cancelling.
+                const postCancel = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }).catch(() => null);
+                if (postCancel?.status === 'FILLED') {
+                    filled = true; actualEntry = Number(postCancel.avgPrice ?? entryPrice);
+                } else {
+                    return { success: false, outcome: 'skipped', message: 'Entry not filled within timeout.' };
+                }
+            }
         }
 
         const fillMs = Date.now() - fillStart;

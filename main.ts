@@ -15,6 +15,7 @@ import {
     getOpenPositionDetails,
     getActiveTrade,
     clearActiveTrade,
+    isEntryInProgress,
     triggerEmergencyClose,
     cancelAllOrders,
     getRealizedPnlSince,
@@ -310,8 +311,29 @@ let _priceAtTp1Timeout: number | undefined;
 let _lastLossAt = 0;
 
 async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
-    const pos   = await getOpenPositionDetails();
+    let   pos   = await getOpenPositionDetails();
     const trade = getActiveTrade();
+
+    // ── Orphan safety net ─────────────────────────────────────────────────────
+    // A position with no active trade is UNMANAGED (no TP/SL). Never let one
+    // persist — flatten it immediately. Skip while an entry is mid-flight (the
+    // brief window between fill and TP/SL placement, guarded by _entryInProgress).
+    if (pos.exists && !trade && !isEntryInProgress()) {
+        console.error(`[Health] 🛑 ORPHAN ${pos.side} position ${pos.size} — no TP/SL, force closing`);
+        await sendAlert(`🛑 ${_symbol} ORPHAN position (no TP/SL) detected — force closing ${pos.side} ${pos.size}`);
+        await cancelAllOrders();
+        await triggerEmergencyClose(pos.side as 'long' | 'short', pos.size, 'orphan position recovery');
+        return 'none';
+    }
+
+    // ── Phantom-close guard ───────────────────────────────────────────────────
+    // A single empty positionRisk read can be a transient API blip. If we acted on
+    // it we'd cancel our own live TP/SL and orphan the position. Re-confirm flat.
+    if (!pos.exists && trade) {
+        await new Promise(r => setTimeout(r, 1_200));
+        pos = await getOpenPositionDetails();
+        if (pos.exists) return 'open';   // false alarm — still in the trade
+    }
 
     if (!pos.exists) {
         if (trade) {
