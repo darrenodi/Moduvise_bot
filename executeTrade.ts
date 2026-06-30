@@ -387,7 +387,8 @@ function calcSlDistance(price: number): number {
 // Order flow (all maker, no taker unless emergency):
 //   1. GTX limit entry     → maker, cancels if it would be taker
 //   2. GTC limit TP        → maker resting order
-//   3. Stop-Limit SL       → maker: triggers at slPrice, places limit at slLimitPrice
+//   3. Algo Conditional Stop-Market SL → only mechanism Binance Futures allows
+//                                          for stops outside the Algo API
 //   Entry + TP + SL all placed within seconds of fill.
 //   No position ever lives without both TP and SL.
 export async function executeBinanceTrade(
@@ -471,12 +472,6 @@ export async function executeBinanceTrade(
         const tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
-        // SL limit price: 1 tick beyond trigger (ensures fill, stays maker)
-        const slLimitPrice = tickRound(isBuy
-            ? slPrice - _cfg.tick   // long SL: limit 1 tick below trigger
-            : slPrice + _cfg.tick   // short SL: limit 1 tick above trigger
-        );
-
         console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | SL=$${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)}) | fillTime=${fillMs}ms`);
 
         // ── 2. TP limit order (maker, GTC) ───────────────────────────────────
@@ -513,31 +508,15 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'error', message: 'TP failed, emergency closed.' };
         }
 
-        // ── 3. SL Stop-Limit order (maker) ───────────────────────────────────
-        // Stop-Limit: when triggerPrice is hit, places a limit order at slLimitPrice.
-        // This is a maker SL — avoids taker fee on stop-out.
-        // If the limit doesn't fill (fast gap), TP2 watchdog + emergency close are backstops.
+        // ── 3. SL — Algo Conditional Stop-Market ──────────────────────────────
+        // Binance Futures rejects STOP/STOP_LIMIT on /fapi/v1/order (-4120).
+        // The only working stop-loss mechanism is the Algo Order endpoint.
+        // This still triggers as a stop, but executes as taker on fire — that's
+        // the cost of having a guaranteed-fill SL. Acceptable: SL firing rarely,
+        // and a missed SL is far worse than a small taker fee.
         let slOrderId = 0;
-        for (let attempt = 1; attempt <= 2; attempt++) {
+        for (let attempt = 1; attempt <= 3; attempt++) {
             try {
-                const slRes = await privatePost('/fapi/v1/order', {
-                    symbol:      STRATEGY.SYMBOL,
-                    side:        closeSide,
-                    type:        'STOP',              // Stop-Limit on Binance Futures
-                    timeInForce: 'GTC',
-                    stopPrice:   slPrice.toFixed(_cfg.priceDp),      // trigger
-                    price:       slLimitPrice.toFixed(_cfg.priceDp), // limit (1 tick past trigger)
-                    quantity:    size.toFixed(_cfg.qtyDp),
-                    workingType: 'MARK_PRICE',
-                    reduceOnly:  'true',
-                });
-                if (slRes?.orderId) {
-                    slOrderId = slRes.orderId;
-                    console.log(`[SL] ✅ Stop-Limit trigger=$${slPrice.toFixed(_cfg.priceDp)} limit=$${slLimitPrice.toFixed(_cfg.priceDp)} | id=${slOrderId}`);
-                    break;
-                }
-                // If Stop-Limit not supported, fall back to algo stop-market
-                console.error(`[SL] ❌ Stop-Limit attempt ${attempt}: ${JSON.stringify(slRes)} — trying algo order`);
                 const slAlgo = await privatePost('/fapi/v1/algoOrder', {
                     symbol:       STRATEGY.SYMBOL,
                     side:         closeSide,
@@ -554,8 +533,10 @@ export async function executeBinanceTrade(
                     break;
                 }
                 console.error(`[SL] ❌ Algo attempt ${attempt}: ${JSON.stringify(slAlgo)}`);
+                if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));
             } catch (e: any) {
                 console.error(`[SL] ❌ Attempt ${attempt} threw: ${e.message}`);
+                if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));
             }
         }
 

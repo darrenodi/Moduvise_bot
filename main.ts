@@ -202,10 +202,14 @@ let _lastKlines:  any[] = [];
 let _lastRawBook: { bids: string[][]; asks: string[][] } = { bids: [], asks: [] };
 
 async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
+    interface BinanceTicker { lastPrice: string; highPrice: string; lowPrice: string; priceChangePercent: string; }
+    interface BinanceDepth  { bids: string[][]; asks: string[][]; }
+    type BinanceKline = [number, string, string, string, string, string, ...unknown[]];
+
     const [tickerRes, bookRes, klinesRes] = await Promise.all([
-        fetch(`${BASE_URL}/fapi/v1/ticker/24hr?symbol=${symbol}`).then(r => r.json()),
-        fetch(`${BASE_URL}/fapi/v1/depth?symbol=${symbol}&limit=20`).then(r => r.json()),
-        fetch(`${BASE_URL}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=100`).then(r => r.json()),
+        fetch(`${BASE_URL}/fapi/v1/ticker/24hr?symbol=${symbol}`).then(r => r.json() as Promise<BinanceTicker>),
+        fetch(`${BASE_URL}/fapi/v1/depth?symbol=${symbol}&limit=20`).then(r => r.json() as Promise<BinanceDepth>),
+        fetch(`${BASE_URL}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=100`).then(r => r.json() as Promise<BinanceKline[]>),
     ]);
 
     _lastKlines  = klinesRes;
@@ -312,7 +316,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 if (outcome === 'tp') stats.tpHits++; else { stats.slHits++; _lastLossAt = Date.now(); }
                 stats.fills++;
                 await applyTradeResult(real.pnl);
-                await cancelAllOrders();
+                await cancelAllOrders(trade.slOrderId);
                 if (_currentTradeId) {
                     logTradeClose(_currentTradeId, outcome, pos.currentPrice, real.pnl,
                         trade.tp2Phase ? 'tp2' : 'tp1', trade.tp2Phase ?? false, false, _priceAtTp1Timeout);
@@ -334,7 +338,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 if (killed) process.exit(0);
                 return outcome;
             }
-            await cancelAllOrders();
+            await cancelAllOrders(trade.slOrderId);
             if (_currentTradeId) {
                 logTradeClose(_currentTradeId, 'unknown', pos.currentPrice, 0, 'unknown', false, false);
                 _currentTradeId = null;
@@ -359,7 +363,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
 
         const profit = isBuy ? pos.currentPrice - trade.entryPrice : trade.entryPrice - pos.currentPrice;
         console.log(`[Scratch] ⏱ TP2 timeout ${(tp2Age/1000).toFixed(0)}s — exit @ $${pos.currentPrice}`);
-        await cancelAllOrders();
+        await cancelAllOrders(trade.slOrderId);
         await triggerEmergencyClose(trade.side, trade.size, 'TP2 timeout');
         const real = await getRealizedPnlSince(trade.openedAt - 2_000);
         const pnl  = real ? real.pnl : profit * trade.size;
@@ -378,7 +382,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     // ── TP1 timeout → switch to TP2 ──────────────────────────────────────────
     if (ageMs >= 90_000) {
         _priceAtTp1Timeout = pos.currentPrice;
-        try { await cancelAllOrders(); } catch { /* belt-and-suspenders */ }
+        try { await cancelAllOrders(trade.slOrderId); } catch { /* belt-and-suspenders */ }
 
         // TP2 offset: per-symbol (from executeTrade config)
         // Use a small fixed offset — just enough to capture near-breakeven
@@ -420,7 +424,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     if (ageMs > 130_000) {
         const profit = isBuy ? pos.currentPrice - trade.entryPrice : trade.entryPrice - pos.currentPrice;
         console.log(`[Scratch] ⏱ Hard backstop ${(ageMs/1000).toFixed(0)}s`);
-        await cancelAllOrders();
+        await cancelAllOrders(trade.slOrderId);
         await triggerEmergencyClose(trade.side, trade.size, 'Hard backstop');
         const real = await getRealizedPnlSince(trade.openedAt - 2_000);
         const pnl  = real ? real.pnl : profit * trade.size;
