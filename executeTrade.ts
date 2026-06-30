@@ -13,18 +13,17 @@ const API_KEY    = IS_DEMO ? (process.env.BINANCE_BOT_API    ?? '') : (process.e
 const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.env.BINANCE_API_SECRET ?? '');
 
 // ─── PER-SYMBOL CONFIGURATION ─────────────────────────────────────────────────
-// Only EXCHANGE constants live here (tick/step/precision/max leverage). The TP and
-// SL distances are NOT hardcoded per asset — they are derived at runtime from the
-// 5m ATR so they scale with volatility and sit outside intrabar noise:
+// Exchange constants + the per-asset FIXED-dollar TP/SL distances.
+// TP/SL are tiny fixed moves (e.g. gold: TP $0.05, SL $1.00), NOT ATR-scaled:
+//   long  entry E → TP = E + tpFixedUsd, SL = E − slFixedUsd
+//   short entry E → TP = E − tpFixedUsd, SL = E + slFixedUsd
+// Override per run with env TP_FIXED_USD / SL_FIXED_USD.
 //
-//   TP price distance = TP_ATR_MULT × atr5m   (default 0.8× ATR)
-//   SL price distance = SL_ATR_MULT × atr5m   (default 1.5× ATR)
-//
-// The only per-asset tuning kept here is expressed in TICKS (scale-free):
+// Per-asset tick-based tuning:
 //   entryOffsetTicks : how far inside bid/ask the maker entry sits
 //   slLimitTicks     : how far the stop-limit LIMIT price sits beyond the trigger
 //   tp2OffsetTicks   : TP2 rescue offset from entry
-//   tpMinTicks/slMinTicks : floor so an ROI-derived distance is never sub-tick
+//   tpMinTicks/slMinTicks : floor so a distance is never sub-tick
 //
 // SL is a true maker Stop-Limit (type=STOP) — never Stop-Market (taker).
 
@@ -35,6 +34,8 @@ interface SymbolConfig {
     priceDp:          number;   // decimal places for price
     qtyDp:            number;   // decimal places for quantity
     maxLeverage:      number;   // exchange maximum leverage
+    tpFixedUsd:       number;   // fixed TP distance in USD
+    slFixedUsd:       number;   // fixed SL distance in USD
     entryOffsetTicks: number;   // ticks inside bid/ask for the maker entry
     slLimitTicks:     number;   // ticks the stop-limit price sits beyond the trigger
     tp2OffsetTicks:   number;   // TP2 rescue offset from entry, in ticks
@@ -46,26 +47,39 @@ function getConfig(symbol: string): SymbolConfig {
     const s = symbol.toUpperCase();
     if (s === 'ETHUSDT')  return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
-        maxLeverage: 100,
+        maxLeverage: 100, tpFixedUsd: 0.50, slFixedUsd: 5.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5,
     };
     if (s === 'BTCUSDT')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
-        maxLeverage: 100,
+        maxLeverage: 100, tpFixedUsd: 5.00, slFixedUsd: 50.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5,
     };
     if (s === 'DOGEUSDT') return {
         tick: 0.00001, qtyStep: 1, minQty: 1, priceDp: 5, qtyDp: 0,
-        maxLeverage: 75,
+        maxLeverage: 75, tpFixedUsd: 0.0001, slFixedUsd: 0.0020,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5,
     };
-    // Default: XAUUSDT
+    // USDC-margined perps — 0% maker, so profitable to scalp like XAU.
+    if (s === 'ETHUSDC')  return {
+        tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
+        maxLeverage: 100, tpFixedUsd: 0.10, slFixedUsd: 2.00,
+        entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
+        tpMinTicks: 2, slMinTicks: 5,
+    };
+    if (s === 'BTCUSDC')  return {
+        tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
+        maxLeverage: 100, tpFixedUsd: 1.00, slFixedUsd: 20.00,
+        entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
+        tpMinTicks: 2, slMinTicks: 5,
+    };
+    // Default: XAUUSDT — TP $0.05, SL $1.00
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
-        maxLeverage: 100,
+        maxLeverage: 100, tpFixedUsd: 0.05, slFixedUsd: 1.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5,
     };
@@ -84,11 +98,9 @@ const STRATEGY = {
         return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
-    // ATR-relative targets. TP/SL price distances scale with 5m ATR so they sit
-    // OUTSIDE the noise — the maker stop-limit fills near its trigger (less taker
-    // slippage) and the TP is realistically reachable. Tune via env.
-    get TP_ATR_MULT() { return Number(process.env.TP_ATR_MULT ?? 0.8); },
-    get SL_ATR_MULT() { return Number(process.env.SL_ATR_MULT ?? 1.5); },
+    // Fixed-dollar TP/SL distances (env overrides the per-asset config default).
+    get TP_FIXED_USD() { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
+    get SL_FIXED_USD() { return Number(process.env.SL_FIXED_USD ?? _cfg.slFixedUsd); },
 
     // Exit-lifecycle timeouts — env-tunable for HFT cadence.
     get TP1_TIMEOUT_MS()     { return Number(process.env.TP1_TIMEOUT_MS     ?? 90_000); },
@@ -416,20 +428,17 @@ export function calcSize(price: number): number {
     return size;
 }
 
-// ─── TP AND SL CALCULATION (ATR-relative) ─────────────────────────────────────
-// priceDist = mult × 5m ATR, floored to a minimum tick count so the distance is
-// never sub-tick (would round to zero and reject the order). Sized off ATR so the
-// targets sit outside intrabar noise and the maker stop-limit can fill near trigger.
-function calcTpDistance(atr5m: number): number {
-    const raw   = STRATEGY.TP_ATR_MULT * atr5m;
+// ─── TP AND SL CALCULATION (fixed dollar) ─────────────────────────────────────
+// Tiny fixed move (gold: TP $0.05, SL $1.00), floored to a minimum tick count so
+// the distance is never sub-tick (would round to zero and reject the order).
+function calcTpDistance(): number {
     const floor = _cfg.tpMinTicks * _cfg.tick;
-    return tickRound(Math.max(raw, floor));
+    return tickRound(Math.max(STRATEGY.TP_FIXED_USD, floor));
 }
 
-function calcSlDistance(atr5m: number): number {
-    const raw   = STRATEGY.SL_ATR_MULT * atr5m;
+function calcSlDistance(): number {
     const floor = _cfg.slMinTicks * _cfg.tick;
-    return tickRound(Math.max(raw, floor));
+    return tickRound(Math.max(STRATEGY.SL_FIXED_USD, floor));
 }
 
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
@@ -543,10 +552,9 @@ export async function executeBinanceTrade(
 
         const fillMs = Date.now() - fillStart;
 
-        // ── Calculate TP and SL prices (ATR-relative) ─────────────────────────
-        const atr5m   = signal.atr5m > 0 ? signal.atr5m : _cfg.tick * _cfg.slMinTicks;
-        const tpDist  = calcTpDistance(atr5m);
-        const slDist  = calcSlDistance(atr5m);
+        // ── Calculate TP and SL prices (fixed dollar) ─────────────────────────
+        const tpDist  = calcTpDistance();
+        const slDist  = calcSlDistance();
         const tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 

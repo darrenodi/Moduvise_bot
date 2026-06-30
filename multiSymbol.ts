@@ -30,12 +30,14 @@ interface SymbolConfig {
     wallMinNotional: number;
 }
 
-// XAU only: it's the sole symbol with 0% maker fees, so the only one that can
-// profit at scalp targets. BTC/ETH/DOGE charge 0.02% maker / 0.05% taker, which
-// at 100x = ~4% of margin round-trip — they bleed on fees alone. Re-add them here
-// if you secure a fee deal or switch to much larger (fee-clearing) targets.
+// Only 0%-maker symbols: XAUUSDT, plus the USDC-margined BTC/ETH perps (BTCUSDC /
+// ETHUSDC) which also have 0% maker. The USDT crypto pairs (BTCUSDT/ETHUSDT/DOGE)
+// charge 0.02% maker / 0.05% taker — ~4% of margin round-trip at 100x — so they
+// bleed on fees and are intentionally excluded.
 const SYMBOLS: SymbolConfig[] = [
-    { marketSymbol: 'XAUUSDT',  displaySymbol: 'XAU/USDT',  wsSymbol: 'xauusdt',  leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 20_000 },
+    { marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt', leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 20_000 },
+    { marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc', leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 100_000 },
+    { marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc', leverage: 100, lossCooldownMs: 120_000, wallMinNotional: 50_000 },
 ];
 
 // ─── PROCESS REGISTRY ─────────────────────────────────────────────────────────
