@@ -21,6 +21,7 @@ import {
     getRealizedPnlSince,
     sendAlert,
     getAvailableBalance,
+    hasOpenOrders,
     ASSET_TIMING,
 } from './executeTrade.js';
 
@@ -319,14 +320,17 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     const trade = getActiveTrade();
 
     // ── Orphan safety net ─────────────────────────────────────────────────────
-    // A position with no active trade is UNMANAGED (no TP/SL). Never let one
-    // persist — flatten it immediately. Skip while an entry is mid-flight (the
-    // brief window between fill and TP/SL placement, guarded by _entryInProgress).
+    // A position with no active trade object (e.g. after a restart). If it still
+    // has a resting maker TP, it's fine — let it ride to TP. Only a TRULY naked
+    // position (no orders at all) gets recovered with a maker close. Skip while an
+    // entry is mid-flight (guarded by _entryInProgress).
     if (pos.exists && !trade && !isEntryInProgress()) {
-        console.error(`[Health] 🛑 ORPHAN ${pos.side} position ${pos.size} — no TP/SL, force closing`);
-        await sendAlert(`🛑 ${_symbol} ORPHAN position (no TP/SL) detected — force closing ${pos.side} ${pos.size}`);
-        await cancelAllOrders();
-        await triggerEmergencyClose(pos.side as 'long' | 'short', pos.size, 'orphan position recovery');
+        if (await hasOpenOrders()) {
+            return 'open';   // has a resting TP — let it ride
+        }
+        console.error(`[Health] 🛑 NAKED ${pos.side} position ${pos.size} (no TP) — maker recover`);
+        await sendAlert(`🛑 ${_symbol} naked position (no TP) — maker close ${pos.side} ${pos.size}`);
+        await triggerEmergencyClose(pos.side as 'long' | 'short', pos.size, 'naked position recovery');
         return 'none';
     }
 
@@ -507,8 +511,8 @@ console.log(`\n${'═'.repeat(70)}`);
 console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
 console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
 console.log(`  TP       : $${process.env.TP_FIXED_USD ?? '0.05'} fixed (maker limit)`);
-console.log(`  SL       : $${process.env.SL_FIXED_USD ?? '1.00'} fixed (maker stop-limit)`);
-console.log(`  EXIT     : maker TP or maker SL only — no taker, rides to liquidation if SL gaps`);
+console.log(`  SL       : NONE — rides to TP or liquidation (user rule)`);
+console.log(`  EXIT     : maker TP only, else ride to liquidation`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);
 console.log(`  STACK    : $${getStack().toFixed(4)} | BANKED: $${getBanked().toFixed(4)}`);
 console.log(`  LOG      : ${TRADE_LOG_FILE}`);
