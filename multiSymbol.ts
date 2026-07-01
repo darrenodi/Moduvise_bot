@@ -185,7 +185,7 @@ console.log(`\n${'═'.repeat(70)}`);
 console.log(`  MULTI-SYMBOL SCALPER`);
 console.log(`  ENV     : ${ENVIRONMENT}`);
 console.log(`  SYMBOLS : ${SYMBOLS.map(s => s.marketSymbol).join(', ')}`);
-console.log(`  BANK    : 50% profit protected | 50% compounds per symbol`);
+console.log(`  BANK    : 30% profit protected | 70% compounds | 100% stack as margin`);
 console.log(`  PAUSE   : stack < $0.60 → symbol pauses automatically`);
 console.log(`${'═'.repeat(70)}\n`);
 

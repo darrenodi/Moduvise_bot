@@ -6,7 +6,7 @@ import * as path from 'path';
 // Example: $6 balance, 4 symbols → $1.50 each.
 //
 // Each symbol tracks its own stack independently:
-//   - Wins: 50% banked (protected forever), 50% added back to stack
+//   - Wins: 30% banked (protected forever), 70% added back to stack
 //   - Losses: deducted from stack only
 //   - Stack < $0.60: symbol pauses, Telegram alert sent
 //   - Stack grows: margin scales up automatically (compounds)
@@ -28,8 +28,8 @@ export interface SymbolBankroll {
     updatedAt:     string;
 }
 
-const BANK_SPLIT   = 0.50;   // 50% of profit goes to banked
-const MIN_STACK    = 0.60;   // pause if stack drops below this
+const BANK_SPLIT   = Number(process.env.BANK_SPLIT ?? 0.30);   // 30% of profit banked, 70% compounds
+const MIN_STACK    = Number(process.env.MIN_STACK ?? 0.60);    // pause if stack drops below this
 const STATE_DIR    = process.env.STATE_DIR ?? '.';
 
 function stateFile(symbol: string): string {
@@ -74,13 +74,13 @@ export function createBankroll(symbol: string, initialStack: number): SymbolBank
     return b;
 }
 
-// Margin to use for next trade — scales with stack
+// Margin to use for next trade — deploy 100% of the stack (max compounding).
+// The exchange available-balance check in main.ts caps this to real free margin,
+// and calcSize enforces the exchange MIN_NOTIONAL floor. Env MARGIN_STACK_PCT can
+// dial it back below 100% if desired.
 export function getCurrentMargin(b: SymbolBankroll): number {
-    const s = b.stack;
-    if (s >= 5.00) return 3.00;
-    if (s >= 2.00) return 2.00;
-    if (s >= 1.00) return Math.min(s * 0.90, 1.50); // 90% of stack, max $1.50
-    return Math.min(s * 0.90, s);                    // 90% of whatever is left
+    const pct = Number(process.env.MARGIN_STACK_PCT ?? 100) / 100;
+    return b.stack * pct;
 }
 
 // Apply win or loss — returns updated bankroll and whether symbol should pause
