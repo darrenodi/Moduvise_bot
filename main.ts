@@ -37,6 +37,8 @@ const { lossCooldownMs: LOSS_COOLDOWN_MS } = ASSET_TIMING;
 
 // Below this available balance, stop trying to trade (don't force doomed orders).
 const MIN_STACK = Number(process.env.MIN_STACK ?? 0.60);
+// Binance min order notional (matches executeTrade STRATEGY.MIN_NOTIONAL).
+const STRATEGY_MIN_NOTIONAL = Number(process.env.MIN_NOTIONAL ?? 5);
 
 // ─── PER-SYMBOL STATE ─────────────────────────────────────────────────────────
 const _symbol   = process.env.MARKET_SYMBOL ?? 'XAUUSDT';
@@ -404,10 +406,6 @@ async function runCycle(): Promise<void> {
         _bankroll = loadBankroll(_symbol);
         if (!_bankroll || _bankroll.paused) return;
 
-        // Dynamic margin from bankroll tier
-        const margin = getCurrentMargin(_bankroll);
-        process.env.MARGIN_PER_TRADE = String(+margin.toFixed(2));
-
         // Loss cooldown (per-asset)
         if (Date.now() - _lastLossAt < LOSS_COOLDOWN_MS) {
             console.log(`[${_symbol}] ⏸ Cooldown: ${Math.ceil((LOSS_COOLDOWN_MS-(Date.now()-_lastLossAt))/1000)}s`);
@@ -424,22 +422,27 @@ async function runCycle(): Promise<void> {
 
         if (signal.direction === 'neutral') { stats.skipped++; return; }
 
-        // Balance gate — if real available balance can't cover this trade's margin,
-        // don't force a doomed order. Skip cleanly and wait (a closing trade frees
-        // margin); pause only when balance is below the absolute minimum to trade.
-        const avail = await getAvailableBalance();
-        if (avail < margin) {
+        // Size the trade to REAL available balance. Deploy the stack, but never more
+        // than ~98% of free balance (buffer), and skip only if we can't meet the
+        // exchange's $5 min-notional. (Using literally 100% would deadlock since
+        // available is always a hair below the stack.)
+        const avail    = await getAvailableBalance();
+        const leverage = Number(process.env.BOT_LEVERAGE ?? 100);
+        const minMargin = STRATEGY_MIN_NOTIONAL / leverage;   // $5 / leverage
+        if (avail < minMargin) {
             stats.skipped++;
-            if (avail < MIN_STACK) {
+            if (_bankroll.stack < MIN_STACK) {
                 _bankroll.paused = true;
-                _bankroll.pausedReason = `Balance too low: $${avail.toFixed(4)} < $${MIN_STACK}`;
+                _bankroll.pausedReason = `Balance too low: $${avail.toFixed(4)}`;
                 saveBankroll(_bankroll);
-                await sendAlert(`💤 ${_symbol} balance too low ($${avail.toFixed(4)}) — paused, not forcing trades.`);
+                await sendAlert(`💤 ${_symbol} balance too low ($${avail.toFixed(4)}) — paused.`);
             } else {
-                console.log(`[${_symbol}] 💤 Balance $${avail.toFixed(4)} < margin $${margin.toFixed(2)} — skipping, not forcing.`);
+                console.log(`[${_symbol}] 💤 Balance $${avail.toFixed(4)} < min margin $${minMargin.toFixed(4)} — skipping.`);
             }
             return;
         }
+        const margin = Math.min(getCurrentMargin(_bankroll), avail * 0.98);
+        process.env.MARGIN_PER_TRADE = margin.toFixed(2);
 
         const result = await executeBinanceTrade(signal, 0);
 
