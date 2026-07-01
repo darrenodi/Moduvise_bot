@@ -489,11 +489,14 @@ export async function executeBinanceTrade(
             await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
         } catch { /* already set */ }
 
-        // Entry price: entryOffsetTicks inside bid/ask, rounded to symbol tick
+        // Entry price: post AGGRESSIVELY inside the spread — buy near the ask, sell
+        // near the bid — so we fill on a small move WITH us, not only when price runs
+        // against us (adverse selection). GTX (post-only) still guarantees maker: if
+        // the quote moves and this would cross, the order is cancelled, not takER'd.
         const entryOffset = _cfg.entryOffsetTicks * _cfg.tick;
         const rawEntry   = isBuy
-            ? liveBid - entryOffset
-            : liveAsk + entryOffset;
+            ? liveAsk - entryOffset   // just inside the ask
+            : liveBid + entryOffset;  // just inside the bid
         const entryPrice = tickRound(rawEntry);
         const size       = calcSize(entryPrice);
 
