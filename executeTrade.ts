@@ -440,7 +440,7 @@ function calcTpDistance(entry: number, leverage: number): number {
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
 // Order flow (all maker, never taker except emergency close):
 //   1. GTX limit entry        → maker, cancels if it would be taker
-//   2. GTC limit TP            → maker resting order
+//   2. GTX limit TP            → post-only maker resting order (never taker)
 //   3. Algo CONDITIONAL STOP   → maker stop-LIMIT; on trigger posts a limit (maker),
 //                                limit sits a few ticks beyond the trigger so it fills
 //   Entry + TP + SL all placed within seconds of fill.
@@ -560,34 +560,44 @@ export async function executeBinanceTrade(
         // ── Calculate TP price (0.5% margin ROI). NO stop-loss (user rule): the
         //    position rides on the maker TP until it fills, or liquidation. ──────
         const tpDist  = calcTpDistance(actualEntry, leverage);
-        const tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
+        let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
 
         console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | NO SL (ride to TP/liquidation) | fillTime=${fillMs}ms`);
 
-        // ── 2. TP limit order (maker, GTC) ───────────────────────────────────
-        // MUST succeed — no TP = uncontrolled position
+        // ── 2. TP limit order — POST-ONLY (GTX), never taker ─────────────────
+        // MUST succeed — no TP = uncontrolled position. If price has already run
+        // past the TP, GTX would cross (-5022); we then re-anchor to the current
+        // touch (join the ask/bid) so it still rests as MAKER instead of crossing.
         let tpOrderId = 0;
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        for (let attempt = 1; attempt <= 4; attempt++) {
             try {
                 const tpRes = await privatePost('/fapi/v1/order', {
                     symbol:      STRATEGY.SYMBOL,
                     side:        closeSide,
                     type:        'LIMIT',
-                    timeInForce: 'GTC',
+                    timeInForce: 'GTX',   // post-only: cancels if it would be taker
                     price:       tpPrice.toFixed(_cfg.priceDp),
                     quantity:    size.toFixed(_cfg.qtyDp),
                     reduceOnly:  'true',
                 });
                 if (tpRes?.orderId) {
                     tpOrderId = tpRes.orderId;
-                    console.log(`[TP] ✅ Limit @ $${tpPrice.toFixed(_cfg.priceDp)} | id=${tpOrderId}`);
+                    console.log(`[TP] ✅ Post-only @ $${tpPrice.toFixed(_cfg.priceDp)} | id=${tpOrderId}`);
                     break;
                 }
+                // -5022: post-only would cross (price already past TP). Re-anchor to
+                // the maker touch so we still rest as maker (join ask for a sell).
+                if (tpRes?.code === -5022) {
+                    const bt = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
+                    tpPrice = tickRound(isBuy ? Number(bt.askPrice) : Number(bt.bidPrice));
+                    console.warn(`[TP] ⚠️ price ran past TP — re-anchoring post-only to touch $${tpPrice.toFixed(_cfg.priceDp)}`);
+                    continue;
+                }
                 console.error(`[TP] ❌ Attempt ${attempt}: ${JSON.stringify(tpRes)}`);
-                if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));
+                if (attempt < 4) await new Promise(r => setTimeout(r, 800));
             } catch (e: any) {
                 console.error(`[TP] ❌ Attempt ${attempt} threw: ${e.message}`);
-                if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));
+                if (attempt < 4) await new Promise(r => setTimeout(r, 800));
             }
         }
 
