@@ -481,6 +481,14 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'skipped', message: `Spread $${spread.toFixed(3)} > $${_cfg.maxSpreadUsd} cap` };
         }
 
+        // Isolated margin so a liquidation can only ever take THIS position's margin
+        // (the trading stack) — never the banked profit sitting in the wallet. This
+        // is what makes "banked money is protected" actually true (cross margin uses
+        // the whole wallet, incl. banked, as collateral). Set only while flat.
+        try {
+            await privatePost('/fapi/v1/marginType', { symbol: STRATEGY.SYMBOL, marginType: process.env.MARGIN_TYPE ?? 'ISOLATED' });
+        } catch { /* -4046: already set */ }
+
         // Set leverage
         try {
             await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
