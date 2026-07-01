@@ -441,7 +441,7 @@ async function runCycle(): Promise<void> {
             }
             return;
         }
-        const margin = Math.min(getCurrentMargin(_bankroll), avail * 0.98);
+        const margin = Math.min(getCurrentMargin(_bankroll), avail * 0.95);
         process.env.MARGIN_PER_TRADE = margin.toFixed(2);
 
         const result = await executeBinanceTrade(signal, 0);
@@ -455,8 +455,10 @@ async function runCycle(): Promise<void> {
         } else {
             stats.skipped++;
             if (result.message?.startsWith('MARGIN_INSUFFICIENT')) {
-                if (_bankroll) { _bankroll.paused = true; _bankroll.pausedReason = 'Margin insufficient on exchange'; saveBankroll(_bankroll); }
-                await sendAlert(`⛔ ${_symbol} PAUSED — margin insufficient. Deposit more.`);
+                // Transient at the razor's edge (a just-closed trade not yet settled).
+                // Skip and retry next cycle — do NOT pause. The balance gate handles
+                // the genuine "too low to trade" case.
+                console.log(`[${_symbol}] ⏭ Margin insufficient this instant — skipping, will retry.`);
                 return;
             }
             const skip = result.message ?? '';
