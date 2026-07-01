@@ -22,6 +22,7 @@ import {
     sendAlert,
     getAvailableBalance,
     hasOpenOrders,
+    transferBankedToSpot,
     ASSET_TIMING,
 } from './executeTrade.js';
 
@@ -110,12 +111,29 @@ function printDailySummary(): void {
 }
 
 // ─── BANKING ENGINE ───────────────────────────────────────────────────────────
+// Sweep banked profit to Spot only once it's worth moving (no tiny transfers).
+const BANK_TRANSFER_MIN = Number(process.env.BANK_TRANSFER_MIN ?? 5);
+
 async function applyTradeResult(realizedPnl: number): Promise<void> {
     if (!_bankroll) return;
     const { updated, shouldPause } = bankrollApply(_bankroll, realizedPnl);
     _bankroll = updated;
     if (realizedPnl > 0) { stats.grossProfit += realizedPnl; stats.netProfit += realizedPnl; }
     else { stats.netProfit += realizedPnl; stats.slLoss += Math.abs(realizedPnl); }
+
+    // Once the un-swept banked pile crosses the threshold, physically move it to
+    // Spot (out of the futures wallet entirely). Below threshold it just sits in
+    // the wallet, already protected by isolated margin.
+    const inWallet = _bankroll.banked - (_bankroll.transferred ?? 0);
+    if (inWallet >= BANK_TRANSFER_MIN) {
+        const ok = await transferBankedToSpot(inWallet);
+        if (ok) {
+            _bankroll.transferred = (_bankroll.transferred ?? 0) + inWallet;
+            saveBankroll(_bankroll);
+            await sendAlert(`🏦 ${_symbol} swept $${inWallet.toFixed(2)} banked → Spot (safe). Total banked: $${_bankroll.banked.toFixed(2)}`);
+        }
+    }
+
     if (shouldPause) {
         await sendAlert(`⛔ ${_symbol} PAUSED — stack $${_bankroll.stack.toFixed(4)} < $0.60 | Banked (safe): $${_bankroll.banked.toFixed(4)}`);
     }

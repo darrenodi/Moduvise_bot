@@ -231,6 +231,35 @@ export async function privatePost(path: string, params: Record<string, string | 
     return res.json();
 }
 
+// ─── SWEEP BANKED PROFIT: FUTURES → SPOT ──────────────────────────────────────
+// Physically moves banked USDT out of the Futures wallet to Spot, so it's fully
+// out of reach of any futures liquidation. Only called once the banked pile is
+// worth moving (threshold gated in main.ts). Needs the API key to permit
+// Universal Transfer; fails gracefully (isolated margin still protects otherwise).
+export async function transferBankedToSpot(amount: number, asset = 'USDT'): Promise<boolean> {
+    if (IS_DEMO) { console.log('[Bank] transfer skipped (demo/testnet)'); return false; }
+    if (!(amount > 0)) return false;
+    try {
+        const ts     = Date.now();
+        const params = { type: 'UMFUTURE_MAIN', asset, amount: amount.toFixed(4), timestamp: ts, recvWindow: 10000 };
+        const raw    = Object.entries(params).map(([k, v]) => `${k}=${v}`).join('&');
+        const sig    = createHmac('sha256', API_SECRET).update(raw).digest('hex');
+        const res = await fetch(`https://api.binance.com/sapi/v1/asset/transfer`, {
+            method:  'POST',
+            headers: { 'X-MBX-APIKEY': API_KEY, 'Content-Type': 'application/x-www-form-urlencoded' },
+            body:    raw + `&signature=${sig}`,
+            signal:  AbortSignal.timeout(10_000),
+        });
+        const j: any = await res.json();
+        if (j?.tranId) { console.log(`[Bank] ✅ Swept $${amount.toFixed(4)} ${asset} Futures→Spot (tranId ${j.tranId})`); return true; }
+        console.error(`[Bank] Transfer failed: ${JSON.stringify(j)}`);
+        return false;
+    } catch (e: any) {
+        console.error(`[Bank] Transfer error: ${e.message}`);
+        return false;
+    }
+}
+
 async function privateDelete(path: string, params: Record<string, string | number> = {}): Promise<any> {
     if (path.toLowerCase().includes('order')) await orderRateGuard();   // /order, /allOpenOrders, /algoOrder
     const res = await fetch(signedUrl(path, params), {

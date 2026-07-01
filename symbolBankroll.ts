@@ -19,6 +19,7 @@ export interface SymbolBankroll {
     symbol:        string;
     stack:         number;   // active trading capital for this symbol
     banked:        number;   // protected profit — never used for trading
+    transferred:   number;   // banked USDT physically swept to Spot (of `banked`)
     initialStack:  number;   // what we started with
     trades:        number;
     wins:          number;
@@ -62,6 +63,7 @@ export function createBankroll(symbol: string, initialStack: number): SymbolBank
         symbol,
         stack:        initialStack,
         banked:       0,
+        transferred:  0,
         initialStack,
         trades:       0,
         wins:         0,
