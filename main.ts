@@ -316,6 +316,7 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
 // until one fills, or liquidation if the SL gaps. No taker timeout/scratch/fail-safe.
 let _currentTradeId: string | null = null;
 let _lastLossAt = 0;
+let _closeInProgress = false;   // guards against runCycle + watchdog double-processing a close
 
 async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     let   pos   = await getOpenPositionDetails();
@@ -347,40 +348,48 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
 
     if (!pos.exists) {
         if (trade) {
-            const real = await getRealizedPnlSince(trade.openedAt - 2_000);
-            if (real) {
-                const outcome = real.pnl >= 0 ? 'tp' : 'sl';
-                if (outcome === 'tp') stats.tpHits++; else { stats.slHits++; _lastLossAt = Date.now(); }
-                stats.fills++;
-                await applyTradeResult(real.pnl);
+            // Guard: only ONE handler (runCycle or the 2s watchdog) may process this
+            // close — otherwise the PnL gets applied twice (the double-count bug).
+            if (_closeInProgress) return 'none';
+            _closeInProgress = true;
+            try {
+                const real = await getRealizedPnlSince(trade.openedAt - 2_000);
+                if (real) {
+                    const outcome = real.pnl >= 0 ? 'tp' : 'sl';
+                    if (outcome === 'tp') stats.tpHits++; else { stats.slHits++; _lastLossAt = Date.now(); }
+                    stats.fills++;
+                    await applyTradeResult(real.pnl);
+                    await cancelAllOrders(trade.slOrderId);
+                    if (_currentTradeId) {
+                        logTradeClose(_currentTradeId, outcome, pos.currentPrice, real.pnl, 'tp1', false, false);
+                        // Gemini post-mortem on SL hits
+                        if (outcome === 'sl') {
+                            try {
+                                const lines = fs.readFileSync(TRADE_LOG_FILE, 'utf-8')
+                                    .split('\n').filter(l => l.trim() && l.includes(_currentTradeId!));
+                                const logEntry = lines.length ? JSON.parse(lines[lines.length - 1]) : {};
+                                analyseFailedTrade(logEntry, sendAlert).catch(() => {});
+                            } catch { /* non-critical */ }
+                        }
+                        _currentTradeId = null;
+                    }
+                    clearActiveTrade();
+                    console.log(`[Health] ${outcome.toUpperCase()} | PnL: $${real.pnl.toFixed(4)}`);
+                    const killed = await checkKillSwitch(real.pnl, sendAlert);
+                    if (killed) process.exit(0);
+                    return outcome;
+                }
                 await cancelAllOrders(trade.slOrderId);
                 if (_currentTradeId) {
-                    logTradeClose(_currentTradeId, outcome, pos.currentPrice, real.pnl, 'tp1', false, false);
-                    // Gemini post-mortem on SL hits
-                    if (outcome === 'sl') {
-                        try {
-                            const lines = fs.readFileSync(TRADE_LOG_FILE, 'utf-8')
-                                .split('\n').filter(l => l.trim() && l.includes(_currentTradeId!));
-                            const logEntry = lines.length ? JSON.parse(lines[lines.length - 1]) : {};
-                            analyseFailedTrade(logEntry, sendAlert).catch(() => {});
-                        } catch { /* non-critical */ }
-                    }
+                    logTradeClose(_currentTradeId, 'unknown', pos.currentPrice, 0, 'unknown', false, false);
                     _currentTradeId = null;
                 }
                 clearActiveTrade();
-                console.log(`[Health] ${outcome.toUpperCase()} | PnL: $${real.pnl.toFixed(4)}`);
-                const killed = await checkKillSwitch(real.pnl, sendAlert);
-                if (killed) process.exit(0);
-                return outcome;
+                await sendAlert(`⚠️ ${_symbol} position closed, PnL unverifiable. Check Binance.`);
+                return 'none';
+            } finally {
+                _closeInProgress = false;
             }
-            await cancelAllOrders(trade.slOrderId);
-            if (_currentTradeId) {
-                logTradeClose(_currentTradeId, 'unknown', pos.currentPrice, 0, 'unknown', false, false);
-                _currentTradeId = null;
-            }
-            clearActiveTrade();
-            await sendAlert(`⚠️ ${_symbol} position closed, PnL unverifiable. Check Binance.`);
-            return 'none';
         }
         return 'none';
     }
@@ -515,7 +524,7 @@ const _mar = process.env.MARGIN_PER_TRADE ?? '1';
 console.log(`\n${'═'.repeat(70)}`);
 console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
 console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
-console.log(`  TP       : ${process.env.TP_ROI_PCT ?? '0.5'}% margin ROI (maker limit)`);
+console.log(`  TP       : $${process.env.TP_FIXED_USD ?? '2.00'} price move (post-only maker)`);
 console.log(`  SL       : NONE — rides to TP or liquidation (user rule)`);
 console.log(`  EXIT     : maker TP only, else ride to liquidation`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);

@@ -125,6 +125,8 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 // ─── RELATIVE SIGNAL THRESHOLDS (env-tunable, scale-free) ─────────────────────
 // Every threshold is expressed relative to price/ATR so all four symbols behave
 // identically regardless of absolute price. This is what makes XAU & DOGE trade.
+const RSI_OVERBOUGHT    = Number(process.env.RSI_OVERBOUGHT    ?? 78);    // don't buy exhausted tops (no-SL killer)
+const RSI_OVERSOLD      = Number(process.env.RSI_OVERSOLD      ?? 22);    // don't sell exhausted bottoms
 const TOUCH_CONFIRM     = Number(process.env.TOUCH_CONFIRM     ?? 0.12);  // top-of-book must lean THIS far in our direction (confirmation)
 const FLOW_AGAINST      = Number(process.env.FLOW_AGAINST      ?? 1.15);  // block if opposing 5s trade flow exceeds this ratio
 const ATR_CEIL_PCT      = Number(process.env.ATR_CEIL_PCT      ?? 0.6);   // ATR as % of price — above = too fast
@@ -283,6 +285,11 @@ function getDirection(
     if (regime === 'trend-up'   && dir === 'short') return neutral(`COUNTER-TREND: ${regReason} — no shorts`);
     if (regime === 'trend-down' && dir === 'long')  return neutral(`COUNTER-TREND: ${regReason} — no longs`);
     if (regime === 'unclear'    && conf < OB_STRONG) return neutral(`UNCLEAR regime (${regReason}) — conviction too low`);
+
+    // ── Gate 3b: Exhaustion — never chase an overbought top / oversold bottom.
+    //    This is what liquidated the no-SL long (bought RSI 79.5 blowoff top). ───
+    if (dir === 'long'  && ind.rsi >= RSI_OVERBOUGHT) return neutral(`OVERBOUGHT: RSI ${ind.rsi.toFixed(0)} ≥ ${RSI_OVERBOUGHT} — no long into blowoff`);
+    if (dir === 'short' && ind.rsi <= RSI_OVERSOLD)   return neutral(`OVERSOLD: RSI ${ind.rsi.toFixed(0)} ≤ ${RSI_OVERSOLD} — no short into capitulation`);
 
     // ── Gate 4: Momentum trap (strong momentum AGAINST the entry) ─────────────
     if (dir === 'long'  && momScore < -MOM_TRAP_ATR) return neutral(`MOM TRAP (LONG): ${momScore.toFixed(2)}ATR breaking down`);

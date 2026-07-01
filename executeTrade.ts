@@ -83,10 +83,10 @@ function getConfig(symbol: string): SymbolConfig {
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
         lossCooldownMs: 30_000,
     };
-    // Default: XAUUSDT — TP $0.05, SL $1.00
+    // Default: XAUUSDT — TP $2.00 price move, no SL
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
-        maxLeverage: 100, tpFixedUsd: 0.05, slFixedUsd: 1.00,
+        maxLeverage: 100, tpFixedUsd: 2.00, slFixedUsd: 1.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.10,
         lossCooldownMs: 30_000,
@@ -111,9 +111,8 @@ const STRATEGY = {
         return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
-    // TP is margin-ROI based: price distance = entry × (TP_ROI_PCT/100) / leverage.
-    // (No SL — positions ride on the maker TP to fill or liquidation.)
-    get TP_ROI_PCT() { return Number(process.env.TP_ROI_PCT ?? 0.5); },
+    // TP is a fixed dollar price move (per-asset config, env override). No SL.
+    get TP_FIXED_USD() { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
 
     // Maker entry should fill fast or be abandoned (keeps REST polling cheap).
     get FILL_TIMEOUT() { return Number(process.env.FILL_TIMEOUT_MS ?? 6_000); },
@@ -428,13 +427,11 @@ export function calcSize(price: number): number {
     return size;
 }
 
-// ─── TP CALCULATION (margin-ROI based) ────────────────────────────────────────
-// priceDist = entry × (TP_ROI_PCT/100) / leverage, floored to a minimum tick count
-// so the distance is never sub-tick. No SL is placed (user rule).
-function calcTpDistance(entry: number, leverage: number): number {
-    const raw   = entry * (STRATEGY.TP_ROI_PCT / 100) / leverage;
+// ─── TP CALCULATION (fixed dollar price move) ─────────────────────────────────
+// Fixed price move (gold: $2), floored to a minimum tick count. No SL is placed.
+function calcTpDistance(): number {
     const floor = _cfg.tpMinTicks * _cfg.tick;
-    return tickRound(Math.max(raw, floor));
+    return tickRound(Math.max(STRATEGY.TP_FIXED_USD, floor));
 }
 
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
@@ -559,7 +556,7 @@ export async function executeBinanceTrade(
 
         // ── Calculate TP price (0.5% margin ROI). NO stop-loss (user rule): the
         //    position rides on the maker TP until it fills, or liquidation. ──────
-        const tpDist  = calcTpDistance(actualEntry, leverage);
+        const tpDist  = calcTpDistance();
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
 
         console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | NO SL (ride to TP/liquidation) | fillTime=${fillMs}ms`);
