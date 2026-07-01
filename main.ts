@@ -510,7 +510,7 @@ const _mar = process.env.MARGIN_PER_TRADE ?? '1';
 console.log(`\n${'═'.repeat(70)}`);
 console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
 console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
-console.log(`  TP       : $${process.env.TP_FIXED_USD ?? '0.05'} fixed (maker limit)`);
+console.log(`  TP       : ${process.env.TP_ROI_PCT ?? '0.5'}% margin ROI (maker limit)`);
 console.log(`  SL       : NONE — rides to TP or liquidation (user rule)`);
 console.log(`  EXIT     : maker TP only, else ride to liquidation`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);

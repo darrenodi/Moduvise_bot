@@ -125,11 +125,11 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 // ─── RELATIVE SIGNAL THRESHOLDS (env-tunable, scale-free) ─────────────────────
 // Every threshold is expressed relative to price/ATR so all four symbols behave
 // identically regardless of absolute price. This is what makes XAU & DOGE trade.
-const TOUCH_TOL         = Number(process.env.TOUCH_TOL         ?? 0.10);  // block if top-of-book imbalance opposes by more than this
-const FLOW_AGAINST      = Number(process.env.FLOW_AGAINST      ?? 1.3);   // block if opposing 5s trade flow exceeds this ratio
+const TOUCH_CONFIRM     = Number(process.env.TOUCH_CONFIRM     ?? 0.12);  // top-of-book must lean THIS far in our direction (confirmation)
+const FLOW_AGAINST      = Number(process.env.FLOW_AGAINST      ?? 1.15);  // block if opposing 5s trade flow exceeds this ratio
 const ATR_CEIL_PCT      = Number(process.env.ATR_CEIL_PCT      ?? 0.6);   // ATR as % of price — above = too fast
 const ATR_FLOOR_PCT     = Number(process.env.ATR_FLOOR_PCT     ?? 0.02);  // ATR as % of price — below = dead
-const MOM_TRAP_ATR      = Number(process.env.MOM_TRAP_ATR      ?? 1.0);   // momentum AGAINST dir, in ATR units
+const MOM_TRAP_ATR      = Number(process.env.MOM_TRAP_ATR      ?? 0.6);   // momentum AGAINST dir, in ATR units (tighter: no SL)
 const MOM_STRONG_ATR    = Number(process.env.MOM_STRONG_ATR    ?? 0.5);   // pure-momentum entry, ATR units
 const MOM_CONFIRM_ATR   = Number(process.env.MOM_CONFIRM_ATR   ?? 0.15);  // OB+momentum confirm, ATR units
 const MOM_WEAK_ATR      = Number(process.env.MOM_WEAK_ATR      ?? 0.25);  // |mom| below this = weak
@@ -313,22 +313,26 @@ function getDirection(
         }
     }
 
-    // ── Gate 6: Top-of-book must not oppose (sets the next tick — vital for a
-    //            tiny TP). The best few levels predict the immediate move. ───────
-    if (dir === 'long'  && top < -TOUCH_TOL) return neutral(`TOUCH OPPOSES LONG: top ob ${(top*100).toFixed(0)}%`);
-    if (dir === 'short' && top >  TOUCH_TOL) return neutral(`TOUCH OPPOSES SHORT: top ob ${(top*100).toFixed(0)}%`);
+    // ── Gate 6: Top-of-book must CONFIRM the entry (sets the next tick). With no
+    //            SL, a bad-direction entry rides deep — so require the best levels
+    //            to actively lean our way, not merely "not oppose". ──────────────
+    if (dir === 'long'  && top < TOUCH_CONFIRM)  return neutral(`TOUCH not confirming LONG: top ${(top*100).toFixed(0)}% < ${(TOUCH_CONFIRM*100).toFixed(0)}%`);
+    if (dir === 'short' && top > -TOUCH_CONFIRM) return neutral(`TOUCH not confirming SHORT: top ${(top*100).toFixed(0)}% > -${(TOUCH_CONFIRM*100).toFixed(0)}%`);
 
     // ── Gate 7: Real-time trade flow must not run against us — the main cause of
-    //            a fast adverse move that blows the SL before TP. ───────────────
+    //            a fast adverse move (and, with no SL, a deep underwater ride). ──
     if (velocityState?.wsReady) {
         const b = velocityState.buyVol5s, s = velocityState.sellVol5s;
         if (dir === 'long'  && s > b * FLOW_AGAINST && s > 0) return neutral(`FLOW AGAINST LONG: sell ${s} > ${FLOW_AGAINST}× buy ${b}`);
         if (dir === 'short' && b > s * FLOW_AGAINST && b > 0) return neutral(`FLOW AGAINST SHORT: buy ${b} > ${FLOW_AGAINST}× sell ${s}`);
     }
 
-    // Confidence boost when the touch and flow actively agree with the entry.
-    const touchAgrees = dir === 'long' ? top > TOUCH_TOL : top < -TOUCH_TOL;
-    if (touchAgrees) conf = Math.min(1, conf + 0.15);
+    // Confidence boost when flow actively agrees with the entry (touch already confirmed).
+    if (velocityState?.wsReady) {
+        const b = velocityState.buyVol5s, s = velocityState.sellVol5s;
+        const flowAgrees = dir === 'long' ? b > s : s > b;
+        if (flowAgrees) conf = Math.min(1, conf + 0.15);
+    }
 
     return { direction: dir, reasoning: `[${regime}] ${reason} | top=${(top*100).toFixed(0)}%`, confidence: conf };
 }

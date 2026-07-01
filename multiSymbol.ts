@@ -34,8 +34,10 @@ interface SymbolConfig {
 // bleed on fees and are intentionally excluded.
 const SYMBOLS: SymbolConfig[] = [
     { marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt', leverage: 100, wallMinNotional: 20_000 },
-    { marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc', leverage: 100, wallMinNotional: 100_000 },
-    { marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc', leverage: 100, wallMinNotional: 50_000 },
+    // Disabled — too volatile for no-SL tiny-TP (ATR ~$96 → rides to liquidation on
+    // cross margin). Re-enable only with a stop-loss or much larger TP.
+    // { marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc', leverage: 100, wallMinNotional: 100_000 },
+    // { marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc', leverage: 100, wallMinNotional: 50_000 },
 ];
 
 // ─── PROCESS REGISTRY ─────────────────────────────────────────────────────────

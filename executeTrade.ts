@@ -111,9 +111,9 @@ const STRATEGY = {
         return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
-    // Fixed-dollar TP/SL distances (env overrides the per-asset config default).
-    get TP_FIXED_USD() { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
-    get SL_FIXED_USD() { return Number(process.env.SL_FIXED_USD ?? _cfg.slFixedUsd); },
+    // TP is margin-ROI based: price distance = entry × (TP_ROI_PCT/100) / leverage.
+    // (No SL — positions ride on the maker TP to fill or liquidation.)
+    get TP_ROI_PCT() { return Number(process.env.TP_ROI_PCT ?? 0.5); },
 
     // Maker entry should fill fast or be abandoned (keeps REST polling cheap).
     get FILL_TIMEOUT() { return Number(process.env.FILL_TIMEOUT_MS ?? 6_000); },
@@ -428,17 +428,13 @@ export function calcSize(price: number): number {
     return size;
 }
 
-// ─── TP AND SL CALCULATION (fixed dollar) ─────────────────────────────────────
-// Tiny fixed move (gold: TP $0.05, SL $1.00), floored to a minimum tick count so
-// the distance is never sub-tick (would round to zero and reject the order).
-function calcTpDistance(): number {
+// ─── TP CALCULATION (margin-ROI based) ────────────────────────────────────────
+// priceDist = entry × (TP_ROI_PCT/100) / leverage, floored to a minimum tick count
+// so the distance is never sub-tick. No SL is placed (user rule).
+function calcTpDistance(entry: number, leverage: number): number {
+    const raw   = entry * (STRATEGY.TP_ROI_PCT / 100) / leverage;
     const floor = _cfg.tpMinTicks * _cfg.tick;
-    return tickRound(Math.max(STRATEGY.TP_FIXED_USD, floor));
-}
-
-function calcSlDistance(): number {
-    const floor = _cfg.slMinTicks * _cfg.tick;
-    return tickRound(Math.max(STRATEGY.SL_FIXED_USD, floor));
+    return tickRound(Math.max(raw, floor));
 }
 
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
@@ -558,9 +554,9 @@ export async function executeBinanceTrade(
 
         const fillMs = Date.now() - fillStart;
 
-        // ── Calculate TP price (fixed dollar). NO stop-loss (user rule): the
+        // ── Calculate TP price (0.5% margin ROI). NO stop-loss (user rule): the
         //    position rides on the maker TP until it fills, or liquidation. ──────
-        const tpDist  = calcTpDistance();
+        const tpDist  = calcTpDistance(actualEntry, leverage);
         const tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
 
         console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | NO SL (ride to TP/liquidation) | fillTime=${fillMs}ms`);
