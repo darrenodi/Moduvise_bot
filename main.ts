@@ -564,7 +564,7 @@ console.log(`\n${'═'.repeat(70)}`);
 console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
 console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
 console.log(`  TP       : $${process.env.TP_FIXED_USD ?? '3.00'} price move (post-only maker)`);
-console.log(`  SL       : $${process.env.SL_FIXED_USD ?? '3.00'} stop-market (1:1 — breakeven WR ~52%)`);
+console.log(`  SL       : ${process.env.SL_ROI_PCT ?? '50'}% of margin, stop-market (~1% price at 50x — outside noise)`);
 console.log(`  GATES    : flow 5s+60s | funding | OI surge | news/weekend blackout`);
 console.log(`  EXIT     : maker TP (0 fee) or stop-market SL (bounded loss)`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);

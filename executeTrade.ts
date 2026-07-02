@@ -111,9 +111,11 @@ const STRATEGY = {
         return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
-    // TP + SL are fixed dollar price moves (per-asset config, env override).
+    // TP is a fixed dollar price move; SL is margin-ROI based (user rule: cut only
+    // when the trade is down SL_ROI_PCT of its margin — wide enough to sit outside
+    // candle noise, but fires well before liquidation so the loss stays bounded).
     get TP_FIXED_USD() { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
-    get SL_FIXED_USD() { return Number(process.env.SL_FIXED_USD ?? _cfg.slFixedUsd); },
+    get SL_ROI_PCT()   { return Number(process.env.SL_ROI_PCT ?? 50); },
 
     // Maker entry should fill fast or be abandoned (keeps REST polling cheap).
     get FILL_TIMEOUT() { return Number(process.env.FILL_TIMEOUT_MS ?? 6_000); },
@@ -465,16 +467,20 @@ export function calcSize(price: number): number {
     return size;
 }
 
-// ─── TP / SL CALCULATION (fixed dollar price moves) ───────────────────────────
-// Fixed price moves (gold: TP $2, SL $7), floored to a minimum tick count.
+// ─── TP / SL CALCULATION ──────────────────────────────────────────────────────
+// TP: fixed dollar price move (gold: $3), floored to a minimum tick count.
+// SL: margin-ROI based — priceDist = entry × (SL_ROI_PCT/100) / leverage, so at
+// 50% and 50x that's a ~1% price move (~$41 on $4100 gold): outside candle noise,
+// but still fires well before the ~2% liquidation point.
 function calcTpDistance(): number {
     const floor = _cfg.tpMinTicks * _cfg.tick;
     return tickRound(Math.max(STRATEGY.TP_FIXED_USD, floor));
 }
 
-function calcSlDistance(): number {
+function calcSlDistance(entry: number, leverage: number): number {
+    const raw   = entry * (STRATEGY.SL_ROI_PCT / 100) / leverage;
     const floor = _cfg.slMinTicks * _cfg.tick;
-    return tickRound(Math.max(STRATEGY.SL_FIXED_USD, floor));
+    return tickRound(Math.max(raw, floor));
 }
 
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
@@ -606,7 +612,7 @@ export async function executeBinanceTrade(
 
         // ── Calculate TP (maker) and SL (stop-market, caps the loss) prices ──────
         const tpDist  = calcTpDistance();
-        const slDist  = calcSlDistance();
+        const slDist  = calcSlDistance(actualEntry, leverage);
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
