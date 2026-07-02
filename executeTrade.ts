@@ -87,7 +87,7 @@ function getConfig(symbol: string): SymbolConfig {
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 2.00, slFixedUsd: 1.00,
-        entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
+        entryOffsetTicks: 7, slLimitTicks: 5, tp2OffsetTicks: 3,   // 7 ticks = $0.07 pullback
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.10,
         lossCooldownMs: 30_000,
     };
@@ -523,14 +523,14 @@ export async function executeBinanceTrade(
             await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
         } catch { /* already set */ }
 
-        // Entry price: post AGGRESSIVELY inside the spread — buy near the ask, sell
-        // near the bid — so we fill on a small move WITH us, not only when price runs
-        // against us (adverse selection). GTX (post-only) still guarantees maker: if
-        // the quote moves and this would cross, the order is cancelled, not takER'd.
-        const entryOffset = _cfg.entryOffsetTicks * _cfg.tick;
+        // PULLBACK entry — wait for a small retracement against the pre-entry move,
+        // then enter in the signal's direction: buy on a DIP (below bid), sell on a
+        // BOUNCE (above ask). We fill at a better price, positioned for the move
+        // toward TP instead of chasing. Maker via GTX (cancels if it would cross).
+        const pull = Number(process.env.ENTRY_PULLBACK_TICKS ?? _cfg.entryOffsetTicks) * _cfg.tick;
         const rawEntry   = isBuy
-            ? liveAsk - entryOffset   // just inside the ask
-            : liveBid + entryOffset;  // just inside the bid
+            ? liveBid - pull   // buy the dip
+            : liveAsk + pull;  // sell the bounce
         const entryPrice = tickRound(rawEntry);
         const size       = calcSize(entryPrice);
 

@@ -125,8 +125,8 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 // ─── RELATIVE SIGNAL THRESHOLDS (env-tunable, scale-free) ─────────────────────
 // Every threshold is expressed relative to price/ATR so all four symbols behave
 // identically regardless of absolute price. This is what makes XAU & DOGE trade.
-const RSI_OVERBOUGHT    = Number(process.env.RSI_OVERBOUGHT    ?? 78);    // don't buy exhausted tops (no-SL killer)
-const RSI_OVERSOLD      = Number(process.env.RSI_OVERSOLD      ?? 22);    // don't sell exhausted bottoms
+const RSI_OVERBOUGHT    = Number(process.env.RSI_OVERBOUGHT    ?? 75);    // don't buy exhausted tops (no-SL killer)
+const RSI_OVERSOLD      = Number(process.env.RSI_OVERSOLD      ?? 25);    // don't sell exhausted bottoms (RSI 22.2 short liquidated us)
 const TOUCH_CONFIRM     = Number(process.env.TOUCH_CONFIRM     ?? 0.12);  // top-of-book must lean THIS far in our direction (confirmation)
 const FLOW_AGAINST      = Number(process.env.FLOW_AGAINST      ?? 1.15);  // block if opposing 5s trade flow exceeds this ratio
 const ATR_CEIL_PCT      = Number(process.env.ATR_CEIL_PCT      ?? 0.6);   // ATR as % of price — above = too fast
