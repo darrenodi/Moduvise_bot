@@ -362,6 +362,10 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         await new Promise(r => setTimeout(r, 1_200));
         pos = await getOpenPositionDetails();
         if (pos.exists) return 'open';   // false alarm — still in the trade
+        // While we slept, another handler may have fully processed this close and
+        // cleared the trade. Our local `trade` would be a stale reference — using it
+        // would apply the PnL a second time (the 585/591 double-count).
+        if (getActiveTrade() !== trade) return 'none';
     }
 
     if (!pos.exists) {
