@@ -36,6 +36,7 @@ export interface TechnicalIndicators {
     spreadUsd:            number;
     obImbalance:          number;
     topObImbalance:       number;   // imbalance of the top 3 levels (next-tick predictor)
+    oiChangePct:          number;   // open-interest change over ~5min, % (0 if unknown)
     priceVsVwap:          number;
     recentSwingHigh:      number;
     recentSwingLow:       number;
@@ -90,6 +91,43 @@ export function getSession(): {
     return                         { name: 'Asia/Off-hours',   quality: 'LOW',  cycleMsMin: 9_000,  cycleMsMax: 14_000, sizePct: 1.00 };
 }
 
+// ─── TRADING BLACKOUT ─────────────────────────────────────────────────────────
+// Gold-specific microstructure + macro protection. Blocks entries when:
+//  1. The underlying market is closed (Fri 21:00 UTC → Sun 22:05 UTC): Binance's
+//     index freezes and the perp trades with no live spot anchor — thin books,
+//     mark-price EWMA, exactly where a scalper gets hurt.
+//  2. Daily settlement break (21:00–22:05 UTC weekdays), same frozen-index issue.
+//  3. Scheduled US data windows (default 12:30, 14:00, 18:00 UTC = 8:30 ET data,
+//     10:00 ET data, FOMC), ±NEWS_BLACKOUT_MIN minutes. Gold does $30 candles on
+//     CPI/NFP/Fed — no snapshot gate can see those coming; the calendar can.
+const NEWS_BLACKOUT_MIN   = Number(process.env.NEWS_BLACKOUT_MIN ?? 10);
+const NEWS_BLACKOUT_TIMES = (process.env.NEWS_BLACKOUT_TIMES ?? '12:30,14:00,18:00')
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+export function getTradingBlackout(now = new Date()): string | null {
+    const day = now.getUTCDay();            // 0=Sun … 6=Sat
+    const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
+
+    // Weekend: Fri 21:00 UTC → Sun 22:05 UTC
+    if (day === 6) return 'WEEKEND: underlying gold market closed (frozen index)';
+    if (day === 5 && mins >= 21 * 60) return 'WEEKEND: underlying gold market closed (frozen index)';
+    if (day === 0 && mins < 22 * 60 + 5) return 'WEEKEND: underlying gold market closed (frozen index)';
+
+    // Daily settlement break 21:00–22:05 UTC
+    if (mins >= 21 * 60 && mins < 22 * 60 + 5) return 'DAILY BREAK: 21:00–22:05 UTC (frozen index)';
+
+    // Scheduled news windows (weekdays)
+    for (const t of NEWS_BLACKOUT_TIMES) {
+        const [h, m] = t.split(':').map(Number);
+        if (!Number.isFinite(h)) continue;
+        const target = h * 60 + (m || 0);
+        if (Math.abs(mins - target) <= NEWS_BLACKOUT_MIN) {
+            return `NEWS WINDOW: ±${NEWS_BLACKOUT_MIN}min around ${t} UTC`;
+        }
+    }
+    return null;
+}
+
 // ─── DIP / RIP REGIME DETECTION ───────────────────────────────────────────────
 const DIP_ATR_MULT = 2.5;
 const RIP_ATR_MULT = 2.0;
@@ -127,6 +165,9 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 // identically regardless of absolute price. This is what makes XAU & DOGE trade.
 const RSI_OVERBOUGHT    = Number(process.env.RSI_OVERBOUGHT    ?? 75);    // don't buy exhausted tops (no-SL killer)
 const RSI_OVERSOLD      = Number(process.env.RSI_OVERSOLD      ?? 25);    // don't sell exhausted bottoms (RSI 22.2 short liquidated us)
+const FLOW_1M_AGAINST   = Number(process.env.FLOW_1M_AGAINST   ?? 1.3);   // block if 60s cumulative flow opposes by more than this ratio
+const FUNDING_EXTREME   = Number(process.env.FUNDING_EXTREME   ?? 0.0005);// don't join the crowded side when funding is extreme (squeeze risk)
+const OI_SURGE_PCT      = Number(process.env.OI_SURGE_PCT      ?? 2.0);   // OI +% in ~5m = new money piling in; block if momentum opposes us
 const TOUCH_CONFIRM     = Number(process.env.TOUCH_CONFIRM     ?? 0.12);  // top-of-book must lean THIS far in our direction (confirmation)
 const FLOW_AGAINST      = Number(process.env.FLOW_AGAINST      ?? 1.15);  // block if opposing 5s trade flow exceeds this ratio
 const ATR_CEIL_PCT      = Number(process.env.ATR_CEIL_PCT      ?? 0.6);   // ATR as % of price — above = too fast
@@ -239,6 +280,10 @@ function getDirection(
 ): { direction: SignalDirection; reasoning: string; confidence: number } {
     const neutral = (reasoning: string) => ({ direction: 'neutral' as SignalDirection, reasoning, confidence: 0 });
 
+    // ── Gate 0: Trading blackout (weekend frozen index, daily break, news) ─────
+    const blackout = getTradingBlackout();
+    if (blackout) return neutral(`BLACKOUT: ${blackout}`);
+
     const ob        = ind.obImbalance;
     const top       = ind.topObImbalance;                // top-of-book (next-tick) imbalance
     const atr       = ind.atr5m > 0 ? ind.atr5m : 1e-9;
@@ -291,6 +336,18 @@ function getDirection(
     if (dir === 'long'  && ind.rsi >= RSI_OVERBOUGHT) return neutral(`OVERBOUGHT: RSI ${ind.rsi.toFixed(0)} ≥ ${RSI_OVERBOUGHT} — no long into blowoff`);
     if (dir === 'short' && ind.rsi <= RSI_OVERSOLD)   return neutral(`OVERSOLD: RSI ${ind.rsi.toFixed(0)} ≤ ${RSI_OVERSOLD} — no short into capitulation`);
 
+    // ── Gate 3c: Sentiment — funding + open-interest ──────────────────────────
+    // Extreme funding = one side is crowded and paying to stay in; joining that
+    // side is squeeze bait. OI surging while momentum runs against us = new money
+    // aggressively positioned the other way.
+    const funding = ind.fundingRate ?? 0;
+    if (dir === 'long'  && funding >=  FUNDING_EXTREME) return neutral(`FUNDING CROWDED LONG: ${(funding*100).toFixed(3)}% — squeeze risk`);
+    if (dir === 'short' && funding <= -FUNDING_EXTREME) return neutral(`FUNDING CROWDED SHORT: ${(funding*100).toFixed(3)}% — squeeze risk`);
+    if (ind.oiChangePct >= OI_SURGE_PCT) {
+        if (dir === 'long'  && momScore < 0) return neutral(`OI SURGE +${ind.oiChangePct.toFixed(1)}% with momentum down — new shorts piling in`);
+        if (dir === 'short' && momScore > 0) return neutral(`OI SURGE +${ind.oiChangePct.toFixed(1)}% with momentum up — new longs piling in`);
+    }
+
     // ── Gate 4: Momentum trap (strong momentum AGAINST the entry) ─────────────
     if (dir === 'long'  && momScore < -MOM_TRAP_ATR) return neutral(`MOM TRAP (LONG): ${momScore.toFixed(2)}ATR breaking down`);
     if (dir === 'short' && momScore >  MOM_TRAP_ATR) return neutral(`MOM TRAP (SHORT): ${momScore.toFixed(2)}ATR spiking up`);
@@ -326,19 +383,21 @@ function getDirection(
     if (dir === 'long'  && top < TOUCH_CONFIRM)  return neutral(`TOUCH not confirming LONG: top ${(top*100).toFixed(0)}% < ${(TOUCH_CONFIRM*100).toFixed(0)}%`);
     if (dir === 'short' && top > -TOUCH_CONFIRM) return neutral(`TOUCH not confirming SHORT: top ${(top*100).toFixed(0)}% > -${(TOUCH_CONFIRM*100).toFixed(0)}%`);
 
-    // ── Gate 7: Real-time trade flow must not run against us — the main cause of
-    //            a fast adverse move (and, with no SL, a deep underwater ride). ──
+    // ── Gate 7: Real-time trade flow, two horizons ─────────────────────────────
+    //   5s window  = fast veto: don't step in front of an active flush/spike.
+    //   60s window = trend: sustained cumulative delta must not oppose the entry
+    //   (a 5s snapshot decays in seconds; the 1m delta actually spans our trade).
     if (velocityState?.wsReady) {
-        const b = velocityState.buyVol5s, s = velocityState.sellVol5s;
+        const b = velocityState.buyVol5s,  s  = velocityState.sellVol5s;
+        const b60 = velocityState.buyVol60s, s60 = velocityState.sellVol60s;
         if (dir === 'long'  && s > b * FLOW_AGAINST && s > 0) return neutral(`FLOW AGAINST LONG: sell ${s} > ${FLOW_AGAINST}× buy ${b}`);
         if (dir === 'short' && b > s * FLOW_AGAINST && b > 0) return neutral(`FLOW AGAINST SHORT: buy ${b} > ${FLOW_AGAINST}× sell ${s}`);
-    }
+        if (dir === 'long'  && s60 > b60 * FLOW_1M_AGAINST && s60 > 0) return neutral(`1M FLOW AGAINST LONG: sell ${s60} > ${FLOW_1M_AGAINST}× buy ${b60}`);
+        if (dir === 'short' && b60 > s60 * FLOW_1M_AGAINST && b60 > 0) return neutral(`1M FLOW AGAINST SHORT: buy ${b60} > ${FLOW_1M_AGAINST}× sell ${s60}`);
 
-    // Confidence boost when flow actively agrees with the entry (touch already confirmed).
-    if (velocityState?.wsReady) {
-        const b = velocityState.buyVol5s, s = velocityState.sellVol5s;
-        const flowAgrees = dir === 'long' ? b > s : s > b;
-        if (flowAgrees) conf = Math.min(1, conf + 0.15);
+        // Confidence boost when the 1m delta actively agrees with the entry.
+        const deltaAgrees = dir === 'long' ? velocityState.delta60s > 0 : velocityState.delta60s < 0;
+        if (deltaAgrees) conf = Math.min(1, conf + 0.15);
     }
 
     return { direction: dir, reasoning: `[${regime}] ${reason} | top=${(top*100).toFixed(0)}%`, confidence: conf };

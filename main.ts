@@ -229,6 +229,7 @@ function logTradeClose(
 // ─── MARKET DATA INGESTION ────────────────────────────────────────────────────
 let _lastKlines:  any[] = [];
 let _lastRawBook: { bids: string[][]; asks: string[][] } = { bids: [], asks: [] };
+const _oiHistory: Array<{ ts: number; oi: number }> = [];   // rolling open-interest samples (~6min)
 
 async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
     interface BinanceTicker { lastPrice: string; highPrice: string; lowPrice: string; priceChangePercent: string; }
@@ -286,6 +287,22 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
         fundingRate = Number(prem?.lastFundingRate ?? 0);
     } catch { /* non-critical */ }
 
+    // Open interest — rolling ~5min history to detect new money piling in.
+    let oiChangePct = 0;
+    try {
+        const oiRes = await fetch(`${BASE_URL}/fapi/v1/openInterest?symbol=${symbol}`).then(r => r.json()) as any;
+        const oi = Number(oiRes?.openInterest ?? 0);
+        if (oi > 0) {
+            const now = Date.now();
+            _oiHistory.push({ ts: now, oi });
+            while (_oiHistory.length > 0 && _oiHistory[0].ts < now - 6 * 60_000) _oiHistory.shift();
+            const oldest = _oiHistory[0];
+            if (oldest && oldest.oi > 0 && now - oldest.ts >= 60_000) {
+                oiChangePct = ((oi - oldest.oi) / oldest.oi) * 100;
+            }
+        }
+    } catch { /* non-critical */ }
+
     const swingHigh = Math.max(...highs.slice(-20));
     const swingLow  = Math.min(...lows.slice(-20));
     const emaTrend  = currentPrice > ema50 ? 'bullish' : 'bearish';
@@ -303,7 +320,7 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
         distanceToResistance: Math.abs(swingHigh - currentPrice),
         distanceToSupport:    Math.abs(currentPrice - swingLow),
         high24h: Number(tickerRes.highPrice), low24h: Number(tickerRes.lowPrice),
-        adx, fundingRate, spreadUsd, obImbalance, topObImbalance, priceVsVwap,
+        adx, fundingRate, spreadUsd, obImbalance, topObImbalance, oiChangePct, priceVsVwap,
         recentSwingHigh: swingHigh, recentSwingLow: swingLow,
     };
 
@@ -546,8 +563,9 @@ const _mar = process.env.MARGIN_PER_TRADE ?? '1';
 console.log(`\n${'═'.repeat(70)}`);
 console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
 console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
-console.log(`  TP       : $${process.env.TP_FIXED_USD ?? '2.00'} price move (post-only maker)`);
-console.log(`  SL       : $${process.env.SL_FIXED_USD ?? '7.00'} stop-market (taker only when it fires — caps loss)`);
+console.log(`  TP       : $${process.env.TP_FIXED_USD ?? '3.00'} price move (post-only maker)`);
+console.log(`  SL       : $${process.env.SL_FIXED_USD ?? '3.00'} stop-market (1:1 — breakeven WR ~52%)`);
+console.log(`  GATES    : flow 5s+60s | funding | OI surge | news/weekend blackout`);
 console.log(`  EXIT     : maker TP (0 fee) or stop-market SL (bounded loss)`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);
 console.log(`  STACK    : $${getStack().toFixed(4)} | BANKED: $${getBanked().toFixed(4)}`);

@@ -83,10 +83,10 @@ function getConfig(symbol: string): SymbolConfig {
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
         lossCooldownMs: 30_000,
     };
-    // Default: XAUUSDT — TP $2.00 / SL $7.00 price moves
+    // Default: XAUUSDT — TP $3.00 / SL $3.00 (1:1 — breakeven WR ~52%, not ~80%)
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
-        maxLeverage: 100, tpFixedUsd: 2.00, slFixedUsd: 7.00,
+        maxLeverage: 100, tpFixedUsd: 3.00, slFixedUsd: 3.00,
         entryOffsetTicks: 7, slLimitTicks: 5, tp2OffsetTicks: 3,   // 7 ticks = $0.07 pullback
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.10,
         lossCooldownMs: 30_000,

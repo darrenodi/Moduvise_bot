@@ -32,7 +32,8 @@ const WS_PREFIX = IS_TESTNET ? '/ws' : '/market/ws';
 // Falls back to 'xauusdt' for backwards compatibility with single-symbol runs.
 const SYMBOL_LOWER = (process.env.WS_SYMBOL ?? 'xauusdt').toLowerCase();
 
-const WINDOW_MS   = Number(process.env.VELOCITY_WINDOW_MS ?? 5_000);   // rolling window
+const WINDOW_MS   = Number(process.env.VELOCITY_WINDOW_MS ?? 5_000);   // fast window (flush/spike veto)
+const LONG_MS     = Number(process.env.VELOCITY_LONG_MS ?? 60_000);    // slow window (cumulative delta trend)
 const FLUSH_RATIO = Number(process.env.VELOCITY_FLUSH_RATIO ?? 2.0);   // sell/buy triggers flush
 const SPIKE_RATIO = Number(process.env.VELOCITY_SPIKE_RATIO ?? 2.0);   // buy/sell triggers spike
 const MIN_VOL     = Number(process.env.VELOCITY_MIN_VOL ?? 0.0001);    // min volume to count (avoid zero noise)
@@ -49,38 +50,47 @@ let   _lastTs             = 0;
 let   _wsReady            = false;
 let   _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Compact rolling state exposed to the main cycle
+// Compact rolling state exposed to the main cycle.
+// Two horizons: the 5s window is the fast veto (don't step in front of a flush);
+// the 60s cumulative delta is the direction trend (does sustained flow agree?).
 export interface VelocityState {
     buyVol5s:       number;   // quantity bought (taker) in last 5s
     sellVol5s:      number;   // quantity sold  (taker) in last 5s
+    buyVol60s:      number;   // quantity bought (taker) in last 60s
+    sellVol60s:     number;   // quantity sold  (taker) in last 60s
+    delta60s:       number;   // buyVol60s - sellVol60s (net aggressor flow, 1m)
     isBuyFlush:     boolean;  // spike: buyers aggressively hitting asks
     isSellFlush:    boolean;  // flush: sellers aggressively hitting bids
-    ratio:          number;   // sellVol / buyVol (>1 = more selling)
+    ratio:          number;   // 5s sellVol / buyVol (>1 = more selling)
     wsReady:        boolean;  // false until first message received
     staleSecs:      number;   // seconds since last tick (0 if live)
 }
 
 export function getVelocityState(): VelocityState {
-    const cutoff = Date.now() - WINDOW_MS;
+    const now        = Date.now();
+    const longCutoff = now - LONG_MS;
+    const fastCutoff = now - WINDOW_MS;
 
-    // Evict ticks older than 5s
-    while (_buffer.length > 0 && _buffer[0].ts < cutoff) _buffer.shift();
+    // Retain the long window; the fast window is a subset of it
+    while (_buffer.length > 0 && _buffer[0].ts < longCutoff) _buffer.shift();
 
-    let buyVol  = 0;
-    let sellVol = 0;
+    let buyVol = 0, sellVol = 0, buy60 = 0, sell60 = 0;
     for (const t of _buffer) {
-        if (t.isSell) sellVol += t.qty;
-        else           buyVol  += t.qty;
+        if (t.isSell) { sell60 += t.qty; if (t.ts >= fastCutoff) sellVol += t.qty; }
+        else          { buy60  += t.qty; if (t.ts >= fastCutoff) buyVol  += t.qty; }
     }
 
     const ratio       = buyVol > 0 ? sellVol / buyVol : (sellVol > 0 ? 99 : 1);
     const isSellFlush = sellVol > buyVol  * FLUSH_RATIO && sellVol > MIN_VOL;
     const isBuyFlush  = buyVol  > sellVol * SPIKE_RATIO  && buyVol  > MIN_VOL;
-    const staleSecs   = _lastTs > 0 ? Math.floor((Date.now() - _lastTs) / 1000) : 999;
+    const staleSecs   = _lastTs > 0 ? Math.floor((now - _lastTs) / 1000) : 999;
 
     return {
         buyVol5s:   Number(buyVol.toFixed(4)),
         sellVol5s:  Number(sellVol.toFixed(4)),
+        buyVol60s:  Number(buy60.toFixed(4)),
+        sellVol60s: Number(sell60.toFixed(4)),
+        delta60s:   Number((buy60 - sell60).toFixed(4)),
         isBuyFlush,
         isSellFlush,
         ratio:      Number(ratio.toFixed(2)),
