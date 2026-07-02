@@ -33,7 +33,7 @@ interface SymbolConfig {
 // charge 0.02% maker / 0.05% taker — ~4% of margin round-trip at 100x — so they
 // bleed on fees and are intentionally excluded.
 const SYMBOLS: SymbolConfig[] = [
-    { marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt', leverage: 100, wallMinNotional: 20_000 },
+    { marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt', leverage: 50, wallMinNotional: 20_000 },
     // Disabled — too volatile for no-SL tiny-TP (ATR ~$96 → rides to liquidation on
     // cross margin). Re-enable only with a stop-loss or much larger TP.
     // { marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc', leverage: 100, wallMinNotional: 100_000 },

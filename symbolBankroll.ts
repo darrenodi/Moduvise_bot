@@ -76,12 +76,13 @@ export function createBankroll(symbol: string, initialStack: number): SymbolBank
     return b;
 }
 
-// Margin to use for next trade — deploy 100% of the stack (max compounding).
-// The exchange available-balance check in main.ts caps this to real free margin,
-// and calcSize enforces the exchange MIN_NOTIONAL floor. Env MARGIN_STACK_PCT can
-// dial it back below 100% if desired.
+// Margin to use for next trade — deploy MARGIN_STACK_PCT of the stack (default 25%),
+// so a no-SL liquidation loses only that fraction, not the whole stack. This lets
+// the account survive bad trades and the banked pile actually accumulate. The
+// available-balance check in main.ts caps to real free margin; calcSize enforces
+// the exchange MIN_NOTIONAL floor.
 export function getCurrentMargin(b: SymbolBankroll): number {
-    const pct = Number(process.env.MARGIN_STACK_PCT ?? 100) / 100;
+    const pct = Number(process.env.MARGIN_STACK_PCT ?? 25) / 100;
     return b.stack * pct;
 }
 
