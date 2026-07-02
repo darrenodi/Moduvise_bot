@@ -83,10 +83,10 @@ function getConfig(symbol: string): SymbolConfig {
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
         lossCooldownMs: 30_000,
     };
-    // Default: XAUUSDT — TP $2.00 price move, no SL
+    // Default: XAUUSDT — TP $2.00 / SL $7.00 price moves
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
-        maxLeverage: 100, tpFixedUsd: 2.00, slFixedUsd: 1.00,
+        maxLeverage: 100, tpFixedUsd: 2.00, slFixedUsd: 7.00,
         entryOffsetTicks: 7, slLimitTicks: 5, tp2OffsetTicks: 3,   // 7 ticks = $0.07 pullback
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.10,
         lossCooldownMs: 30_000,
@@ -111,8 +111,9 @@ const STRATEGY = {
         return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
-    // TP is a fixed dollar price move (per-asset config, env override). No SL.
+    // TP + SL are fixed dollar price moves (per-asset config, env override).
     get TP_FIXED_USD() { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
+    get SL_FIXED_USD() { return Number(process.env.SL_FIXED_USD ?? _cfg.slFixedUsd); },
 
     // Maker entry should fill fast or be abandoned (keeps REST polling cheap).
     get FILL_TIMEOUT() { return Number(process.env.FILL_TIMEOUT_MS ?? 6_000); },
@@ -366,18 +367,18 @@ export async function cancelAllOrders(slAlgoId?: number): Promise<void> {
     }
 }
 
-// MAKER-ONLY close (user rule: never taker). Used to recover orphan/unmanaged
-// positions. Posts a reduce-only LIMIT at the touch; if it doesn't fill, it leaves
-// the position to ride (NO market/taker fallback) and alerts.
+// Safety close: try a maker limit at the touch first (free); if it doesn't fill in
+// 5s, MARKET close (taker) to guarantee flat. Used to recover orphans and to flatten
+// when the SL couldn't be placed — a guaranteed close beats carrying unbounded risk.
 export async function triggerEmergencyClose(side: 'long' | 'short', size: number, reason: string): Promise<void> {
     const closeSide = side === 'long' ? 'SELL' : 'BUY';
-    console.log(`[CLOSE] 🛑 maker ${closeSide} ${size} ${STRATEGY.SYMBOL} | ${reason}`);
+    console.log(`[CLOSE] 🛑 ${closeSide} ${size} ${STRATEGY.SYMBOL} | ${reason}`);
     await cancelAllOrders();
 
+    // 1) maker attempt (no fee)
     try {
         const ticker = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`)
             .then(r => r.json()) as any;
-        // Post on the maker side of the book (sell at ask, buy at bid) so it rests.
         const limitPrice = closeSide === 'SELL' ? Number(ticker.askPrice) : Number(ticker.bidPrice);
         const limitOrder = await privatePost('/fapi/v1/order', {
             symbol:      STRATEGY.SYMBOL,
@@ -392,22 +393,28 @@ export async function triggerEmergencyClose(side: 'long' | 'short', size: number
             const start = Date.now();
             while (Date.now() - start < 5_000) {
                 await new Promise(r => setTimeout(r, 500));
-                const check = await privateGet('/fapi/v1/order', {
-                    symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId,
-                });
+                const check = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId });
                 if (check.status === 'FILLED') {
                     console.log(`[CLOSE] ✅ Maker close filled @ $${limitPrice.toFixed(_cfg.priceDp)}`);
                     clearActiveTrade();
                     return;
                 }
             }
-            // Didn't fill — leave it resting and let the position ride (no taker).
-            console.warn(`[CLOSE] ⚠️ Maker close didn't fill — leaving position to ride (no taker)`);
-            await sendAlert(`⚠️ ${STRATEGY.SYMBOL} maker close didn't fill — position riding (no taker per rule). ${reason}`);
+            await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId }).catch(() => {});
         }
+    } catch { /* fall through to market */ }
+
+    // 2) market close (taker) — guarantee flat
+    try {
+        await privatePost('/fapi/v1/order', {
+            symbol: STRATEGY.SYMBOL, side: closeSide, type: 'MARKET',
+            quantity: size.toFixed(_cfg.qtyDp), reduceOnly: 'true',
+        });
+        console.log(`[CLOSE] ✅ Market close executed (taker)`);
+        clearActiveTrade();
     } catch (e: any) {
-        console.error(`[CLOSE] Maker close error: ${e.message}`);
-        await sendAlert(`⚠️ ${STRATEGY.SYMBOL} maker close error: ${e.message} — position riding.`);
+        console.error(`[CLOSE] Close FAILED: ${e.message}`);
+        await sendAlert(`🚨 ${STRATEGY.SYMBOL} CLOSE FAILED ${size} — CHECK NOW. ${e.message}`);
     }
 }
 
@@ -456,21 +463,25 @@ export function calcSize(price: number): number {
     return size;
 }
 
-// ─── TP CALCULATION (fixed dollar price move) ─────────────────────────────────
-// Fixed price move (gold: $2), floored to a minimum tick count. No SL is placed.
+// ─── TP / SL CALCULATION (fixed dollar price moves) ───────────────────────────
+// Fixed price moves (gold: TP $2, SL $7), floored to a minimum tick count.
 function calcTpDistance(): number {
     const floor = _cfg.tpMinTicks * _cfg.tick;
     return tickRound(Math.max(STRATEGY.TP_FIXED_USD, floor));
 }
 
+function calcSlDistance(): number {
+    const floor = _cfg.slMinTicks * _cfg.tick;
+    return tickRound(Math.max(STRATEGY.SL_FIXED_USD, floor));
+}
+
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
-// Order flow (all maker, never taker except emergency close):
-//   1. GTX limit entry        → maker, cancels if it would be taker
-//   2. GTX limit TP            → post-only maker resting order (never taker)
-//   3. Algo CONDITIONAL STOP   → maker stop-LIMIT; on trigger posts a limit (maker),
-//                                limit sits a few ticks beyond the trigger so it fills
-//   Entry + TP + SL all placed within seconds of fill.
-//   No position ever lives without both TP and SL.
+// Order flow:
+//   1. GTX limit entry           → maker, pullback; cancels if it would be taker
+//   2. GTX limit TP              → post-only maker (0 fee)
+//   3. Algo CONDITIONAL STOP_MARKET → guaranteed-fill stop; taker (~0.04%) only when
+//                                     it fires, to CAP the loss (vs riding to liquidation)
+//   Entry + TP + SL all placed within seconds of fill; no position lives without both.
 export async function executeBinanceTrade(
     signal:          GeneratedSignal,
     _tradingBalance: number,
@@ -591,12 +602,13 @@ export async function executeBinanceTrade(
 
         const fillMs = Date.now() - fillStart;
 
-        // ── Calculate TP price (0.5% margin ROI). NO stop-loss (user rule): the
-        //    position rides on the maker TP until it fills, or liquidation. ──────
+        // ── Calculate TP (maker) and SL (stop-market, caps the loss) prices ──────
         const tpDist  = calcTpDistance();
+        const slDist  = calcSlDistance();
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
+        const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
-        console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | NO SL (ride to TP/liquidation) | fillTime=${fillMs}ms`);
+        console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | SL=$${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)}) | fillTime=${fillMs}ms`);
 
         // ── 2. TP limit order — POST-ONLY (GTX), never taker ─────────────────
         // MUST succeed — no TP = uncontrolled position. If price has already run
@@ -642,15 +654,52 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'error', message: 'TP failed, emergency closed.' };
         }
 
-        // ── No stop-loss (user rule) ──────────────────────────────────────────
-        // The position rides on its resting maker TP only. A losing trade sits
-        // until price ticks back to the TP, or it liquidates. Accepted risk.
+        // ── 3. SL — Algo CONDITIONAL STOP_MARKET (caps the loss) ──────────────
+        // Guaranteed-fill stop: on trigger it market-closes (taker ~0.04%). That
+        // tiny taker cost is the price of bounding the loss to ~slDist instead of
+        // riding to a 100%-of-margin liquidation. Placed via the Algo endpoint
+        // (plain STOP on /fapi/v1/order is rejected -4120). slOrderId is an algoId.
+        let slOrderId = 0;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const slRes = await privatePost('/fapi/v1/algoOrder', {
+                    symbol:       STRATEGY.SYMBOL,
+                    side:         closeSide,
+                    algoType:     'CONDITIONAL',
+                    type:         'STOP_MARKET',
+                    quantity:     size.toFixed(_cfg.qtyDp),
+                    triggerPrice: slPrice.toFixed(_cfg.priceDp),
+                    workingType:  'MARK_PRICE',
+                    reduceOnly:   'true',
+                });
+                if (slRes?.algoId) {
+                    slOrderId = slRes.algoId;
+                    console.log(`[SL] ✅ Stop-Market trigger=$${slPrice.toFixed(_cfg.priceDp)} | algoId=${slOrderId}`);
+                    break;
+                }
+                console.error(`[SL] ❌ Attempt ${attempt}: ${JSON.stringify(slRes)}`);
+                if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));
+            } catch (e: any) {
+                console.error(`[SL] ❌ Attempt ${attempt} threw: ${e.message}`);
+                if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));
+            }
+        }
+
+        if (!slOrderId) {
+            // Can't protect the position — cancel TP and flatten (taker) rather than
+            // carry unbounded risk. Bounded loss is the whole point now.
+            console.error(`[SL] ❌ ALL ATTEMPTS FAILED — cancelling TP and closing`);
+            await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: tpOrderId }).catch(() => {});
+            await sendAlert(`🚨 ${STRATEGY.SYMBOL} SL failed — closing to avoid unbounded risk!`);
+            await triggerEmergencyClose(direction, size, 'SL placement total failure');
+            return { success: false, outcome: 'error', message: 'SL failed, closed.' };
+        }
 
         // ── Lock active trade state ───────────────────────────────────────────
         _activeTrade = {
             entryPrice:  actualEntry,
             tpPrice,
-            slPrice:     0,          // no stop-loss
+            slPrice,
             side:        direction,
             size,
             margin:      Number(process.env.MARGIN_PER_TRADE ?? STRATEGY.MARGIN_PER_TRADE),
@@ -658,13 +707,13 @@ export async function executeBinanceTrade(
             leverage,
             openedAt:    Date.now(),
             tpOrderId,
-            slOrderId:   0,          // no stop-loss
+            slOrderId,
             tp2Phase:    false,
         };
 
         await sendAlert(
             `✅ ${STRATEGY.SYMBOL} ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)}\n` +
-            `TP: $${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | NO SL (ride to TP/liquidation)\n` +
+            `TP: $${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | SL: $${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)})\n` +
             `Size: ${size} | Margin: $${Number(process.env.MARGIN_PER_TRADE ?? 1).toFixed(2)}`
         );
 
@@ -673,7 +722,7 @@ export async function executeBinanceTrade(
             outcome:     'orders_placed',
             entryPrice:  actualEntry,
             tpPrice,
-            slPrice:     0,
+            slPrice,
             grossProfit: size * tpDist,
             fillTimeMs:  fillMs,
         };
