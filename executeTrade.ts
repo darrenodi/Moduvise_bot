@@ -390,8 +390,10 @@ export async function triggerEmergencyClose(side: 'long' | 'short', size: number
             reduceOnly:  'true',
         });
         if (limitOrder?.orderId) {
+            // Give the maker close time to fill (0 fee) before any taker fallback.
+            const makerWaitMs = Number(process.env.EMERGENCY_MAKER_WAIT_MS ?? 12_000);
             const start = Date.now();
-            while (Date.now() - start < 5_000) {
+            while (Date.now() - start < makerWaitMs) {
                 await new Promise(r => setTimeout(r, 500));
                 const check = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId });
                 if (check.status === 'FILLED') {
