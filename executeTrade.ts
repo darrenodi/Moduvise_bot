@@ -14,7 +14,7 @@ const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.e
 
 // ─── PER-SYMBOL CONFIGURATION ─────────────────────────────────────────────────
 // Exchange constants + the per-asset FIXED-dollar TP/SL distances.
-// TP/SL are tiny fixed moves (e.g. gold: TP $0.05, SL $1.00), NOT ATR-scaled:
+// Gold runs a SYMMETRIC bracket (TP == SL in $ terms):
 //   long  entry E → TP = E + tpFixedUsd, SL = E − slFixedUsd
 //   short entry E → TP = E − tpFixedUsd, SL = E + slFixedUsd
 // Override per run with env TP_FIXED_USD / SL_FIXED_USD.
@@ -25,7 +25,9 @@ const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.e
 //   tp2OffsetTicks   : TP2 rescue offset from entry
 //   tpMinTicks/slMinTicks : floor so a distance is never sub-tick
 //
-// SL is a true maker Stop-Limit (type=STOP) — never Stop-Market (taker).
+// TP is a maker post-only limit (0 fee). SL is an Algo CONDITIONAL STOP_MARKET —
+// guaranteed fill, taker (~0.04%) only when it fires. Symmetric TP/SL means the
+// fee is the only thing pushing breakeven win rate above 50%.
 
 interface SymbolConfig {
     tick:             number;   // minimum price increment
@@ -84,13 +86,17 @@ function getConfig(symbol: string): SymbolConfig {
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
         lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
-    // Default: XAUUSDT — TP $1.50 price move (HFT scalp); SL is ROI-based (50% margin)
+    // Default: XAUUSDT — TP $10.00 / SL $10.00 (symmetric bracket, ~53.8% breakeven)
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
-        maxLeverage: 100, tpFixedUsd: 1.50, slFixedUsd: 3.00,
+        maxLeverage: 100, tpFixedUsd: 10.00, slFixedUsd: 10.00,
         entryOffsetTicks: 7, slLimitTicks: 5, tp2OffsetTicks: 3,   // 7 ticks = $0.07 pullback
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.10,
-        lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
+        // maxHoldMs is a hygiene backstop only now — the symmetric $10/$10 bracket
+        // already bounds risk cleanly, so this doesn't need to fire often or fast
+        // (a tight timer here just reintroduces the timer-selection-bias problem:
+        // conditioning on "still open" selects for trades drifting away from TP).
+        lossCooldownMs: 30_000, maxHoldMs: 25 * 60_000,
     };
 }
 
@@ -113,11 +119,13 @@ const STRATEGY = {
         return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
-    // TP is a fixed dollar price move; SL is margin-ROI based (user rule: cut only
-    // when the trade is down SL_ROI_PCT of its margin — wide enough to sit outside
-    // candle noise, but fires well before liquidation so the loss stays bounded).
+    // TP and SL are SYMMETRIC fixed-dollar price moves. Breakeven win rate for a
+    // symmetric bracket is just above 50% (maker TP = 0 fee, taker SL = ~0.04% fee
+    // on exit notional) — leverage-INVARIANT, since both sides scale by the same
+    // position size. This replaces the earlier asymmetric TP$1.50/SL-50%-margin
+    // design, which needed ~96% WR and pushed losses into a biased time-stop.
     get TP_FIXED_USD() { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
-    get SL_ROI_PCT()   { return Number(process.env.SL_ROI_PCT ?? 50); },
+    get SL_FIXED_USD() { return Number(process.env.SL_FIXED_USD ?? _cfg.slFixedUsd); },
 
     // Maker entry should fill fast or be abandoned (keeps REST polling cheap).
     get FILL_TIMEOUT() { return Number(process.env.FILL_TIMEOUT_MS ?? 6_000); },
@@ -469,20 +477,15 @@ export function calcSize(price: number): number {
     return size;
 }
 
-// ─── TP / SL CALCULATION ──────────────────────────────────────────────────────
-// TP: fixed dollar price move (gold: $3), floored to a minimum tick count.
-// SL: margin-ROI based — priceDist = entry × (SL_ROI_PCT/100) / leverage, so at
-// 50% and 50x that's a ~1% price move (~$41 on $4100 gold): outside candle noise,
-// but still fires well before the ~2% liquidation point.
+// ─── TP / SL CALCULATION (symmetric fixed-dollar bracket) ─────────────────────
 function calcTpDistance(): number {
     const floor = _cfg.tpMinTicks * _cfg.tick;
     return tickRound(Math.max(STRATEGY.TP_FIXED_USD, floor));
 }
 
-function calcSlDistance(entry: number, leverage: number): number {
-    const raw   = entry * (STRATEGY.SL_ROI_PCT / 100) / leverage;
+function calcSlDistance(): number {
     const floor = _cfg.slMinTicks * _cfg.tick;
-    return tickRound(Math.max(raw, floor));
+    return tickRound(Math.max(STRATEGY.SL_FIXED_USD, floor));
 }
 
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
@@ -614,7 +617,7 @@ export async function executeBinanceTrade(
 
         // ── Calculate TP (maker) and SL (stop-market, caps the loss) prices ──────
         const tpDist  = calcTpDistance();
-        const slDist  = calcSlDistance(actualEntry, leverage);
+        const slDist  = calcSlDistance();
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 

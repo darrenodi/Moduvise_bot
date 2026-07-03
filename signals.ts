@@ -166,8 +166,8 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 const RSI_OVERBOUGHT    = Number(process.env.RSI_OVERBOUGHT    ?? 75);    // don't buy exhausted tops (no-SL killer)
 const RSI_OVERSOLD      = Number(process.env.RSI_OVERSOLD      ?? 25);    // don't sell exhausted bottoms (RSI 22.2 short liquidated us)
 const FLOW_1M_AGAINST   = Number(process.env.FLOW_1M_AGAINST   ?? 1.3);   // block if 60s cumulative flow opposes by more than this ratio
-const TP_REF_USD        = Number(process.env.TP_FIXED_USD      ?? 1.5);   // must match executeTrade's TP (gold)
-const ATR_TP_MIN_RATIO  = Number(process.env.ATR_TP_MIN_RATIO  ?? 0.8);   // ATR must be ≥ this × TP or the TP is too slow to reach
+const TP_REF_USD        = Number(process.env.TP_FIXED_USD      ?? 10);    // must match executeTrade's TP (gold)
+const ATR_TP_MIN_RATIO  = Number(process.env.ATR_TP_MIN_RATIO  ?? 0.5);   // ATR must be ≥ this × TP or the TP is too slow to reach (loosened: a $10 symmetric bracket doesn't need near-instant fills like the old $1.50 TP did)
 const BLOCK_LOW_SESSIONS = (process.env.BLOCK_LOW_SESSIONS ?? 'true') === 'true'; // no entries in thin/drift hours
 const FUNDING_EXTREME   = Number(process.env.FUNDING_EXTREME   ?? 0.0005);// don't join the crowded side when funding is extreme (squeeze risk)
 const OI_SURGE_PCT      = Number(process.env.OI_SURGE_PCT      ?? 2.0);   // OI +% in ~5m = new money piling in; block if momentum opposes us
