@@ -13,11 +13,17 @@ const API_KEY    = IS_DEMO ? (process.env.BINANCE_BOT_API    ?? '') : (process.e
 const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.env.BINANCE_API_SECRET ?? '');
 
 // ─── PER-SYMBOL CONFIGURATION ─────────────────────────────────────────────────
-// Exchange constants + the per-asset FIXED-dollar TP/SL distances.
-// Gold runs a SYMMETRIC bracket (TP == SL in $ terms):
-//   long  entry E → TP = E + tpFixedUsd, SL = E − slFixedUsd
-//   short entry E → TP = E − tpFixedUsd, SL = E + slFixedUsd
-// Override per run with env TP_FIXED_USD / SL_FIXED_USD.
+// TP is a fixed dollar move (tpFixedUsd — the "win" unit). SL is NOT fixed — it's
+// DERIVED from TP so a stop-out (loss + taker fee) never costs more than
+// SL_MAX_WIN_MULTIPLE wins (default 2), while staying as WIDE as that cap allows
+// (so it doesn't get noise-tagged the way a small fixed SL did):
+//   slDist = SL_MAX_WIN_MULTIPLE × tpDist − takerFeeRate × entryPrice
+// This is computed live off the real entry price and the real account taker fee
+// rate (fetched from Binance, see getTakerFeeRate), so the "at most N wins" cap
+// holds exactly regardless of price level, leverage, or TP size.
+//   long  entry E → TP = E + tpDist, SL = E − slDist
+//   short entry E → TP = E − tpDist, SL = E + slDist
+// Override per run with env TP_FIXED_USD / SL_MAX_WIN_MULTIPLE.
 //
 // Per-asset tick-based tuning:
 //   entryOffsetTicks : how far inside bid/ask the maker entry sits
@@ -26,8 +32,7 @@ const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.e
 //   tpMinTicks/slMinTicks : floor so a distance is never sub-tick
 //
 // TP is a maker post-only limit (0 fee). SL is an Algo CONDITIONAL STOP_MARKET —
-// guaranteed fill, taker (~0.04%) only when it fires. Symmetric TP/SL means the
-// fee is the only thing pushing breakeven win rate above 50%.
+// guaranteed fill, taker (~0.04%) only when it fires.
 
 interface SymbolConfig {
     tick:             number;   // minimum price increment
@@ -36,8 +41,7 @@ interface SymbolConfig {
     priceDp:          number;   // decimal places for price
     qtyDp:            number;   // decimal places for quantity
     maxLeverage:      number;   // exchange maximum leverage
-    tpFixedUsd:       number;   // fixed TP distance in USD
-    slFixedUsd:       number;   // fixed SL distance in USD
+    tpFixedUsd:       number;   // fixed TP distance in USD (the "win" unit)
     entryOffsetTicks: number;   // ticks inside bid/ask for the maker entry
     slLimitTicks:     number;   // ticks the stop-limit price sits beyond the trigger
     tp2OffsetTicks:   number;   // TP2 rescue offset from entry, in ticks
@@ -52,21 +56,21 @@ function getConfig(symbol: string): SymbolConfig {
     const s = symbol.toUpperCase();
     if (s === 'ETHUSDT')  return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
-        maxLeverage: 100, tpFixedUsd: 0.50, slFixedUsd: 5.00,
+        maxLeverage: 100, tpFixedUsd: 0.50,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.05,
         lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
     if (s === 'BTCUSDT')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
-        maxLeverage: 100, tpFixedUsd: 5.00, slFixedUsd: 50.00,
+        maxLeverage: 100, tpFixedUsd: 5.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
         lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
     if (s === 'DOGEUSDT') return {
         tick: 0.00001, qtyStep: 1, minQty: 1, priceDp: 5, qtyDp: 0,
-        maxLeverage: 75, tpFixedUsd: 0.0001, slFixedUsd: 0.0020,
+        maxLeverage: 75, tpFixedUsd: 0.0001,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.0002,
         lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
@@ -74,14 +78,14 @@ function getConfig(symbol: string): SymbolConfig {
     // USDC-margined perps — 0% maker, so profitable to scalp like XAU.
     if (s === 'ETHUSDC')  return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
-        maxLeverage: 100, tpFixedUsd: 0.10, slFixedUsd: 2.00,
+        maxLeverage: 100, tpFixedUsd: 0.10,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.05,
         lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
     if (s === 'BTCUSDC')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
-        maxLeverage: 100, tpFixedUsd: 1.00, slFixedUsd: 20.00,
+        maxLeverage: 100, tpFixedUsd: 1.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
         lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
@@ -89,7 +93,7 @@ function getConfig(symbol: string): SymbolConfig {
     // Default: XAUUSDT — TP $10.00 / SL $10.00 (symmetric bracket, ~53.8% breakeven)
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
-        maxLeverage: 100, tpFixedUsd: 10.00, slFixedUsd: 10.00,
+        maxLeverage: 100, tpFixedUsd: 10.00,
         entryOffsetTicks: 7, slLimitTicks: 5, tp2OffsetTicks: 3,   // 7 ticks = $0.07 pullback
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.10,
         // maxHoldMs is a hygiene backstop only now — the symmetric $10/$10 bracket
@@ -119,13 +123,13 @@ const STRATEGY = {
         return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
-    // TP and SL are SYMMETRIC fixed-dollar price moves. Breakeven win rate for a
-    // symmetric bracket is just above 50% (maker TP = 0 fee, taker SL = ~0.04% fee
-    // on exit notional) — leverage-INVARIANT, since both sides scale by the same
-    // position size. This replaces the earlier asymmetric TP$1.50/SL-50%-margin
-    // design, which needed ~96% WR and pushed losses into a biased time-stop.
-    get TP_FIXED_USD() { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
-    get SL_FIXED_USD() { return Number(process.env.SL_FIXED_USD ?? _cfg.slFixedUsd); },
+    // TP is a fixed dollar move. SL is derived so (SL + taker fee) == exactly
+    // SL_MAX_WIN_MULTIPLE × TP — the hard cap on "how many wins does one loss
+    // cost" the user asked for (default 2). This replaces two earlier designs
+    // that both failed: fixed-tiny-SL (noise-tagged constantly) and
+    // margin-ROI-SL (one loss = ~30-40 wins, unbounded relative to TP).
+    get TP_FIXED_USD()       { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
+    get SL_MAX_WIN_MULTIPLE() { return Number(process.env.SL_MAX_WIN_MULTIPLE ?? 2); },
 
     // Maker entry should fill fast or be abandoned (keeps REST polling cheap).
     get FILL_TIMEOUT() { return Number(process.env.FILL_TIMEOUT_MS ?? 6_000); },
@@ -226,6 +230,32 @@ export async function privateGet(path: string, params: Record<string, string | n
         signal:  AbortSignal.timeout(10_000),
     });
     return res.json();
+}
+
+// ─── LIVE TAKER FEE RATE ──────────────────────────────────────────────────────
+// The SL-sizing formula needs the REAL taker rate to hold its "at most N wins"
+// cap exactly. Fetched once from the account's actual commission schedule (fee
+// promos can change), then cached. Falls back to a configured default if the
+// call fails, so a transient API error can't block trading.
+const TAKER_FEE_FALLBACK = Number(process.env.TAKER_FEE_FALLBACK ?? 0.0004);
+let _takerFeeRate: number | null = null;
+
+export async function getTakerFeeRate(): Promise<number> {
+    if (_takerFeeRate !== null) return _takerFeeRate;
+    try {
+        const res = await privateGet('/fapi/v1/commissionRate', { symbol: STRATEGY.SYMBOL });
+        const rate = Number(res?.takerCommissionRate);
+        if (Number.isFinite(rate) && rate >= 0) {
+            _takerFeeRate = rate;
+            console.log(`[Fee] ${STRATEGY.SYMBOL} taker=${(rate * 100).toFixed(4)}% maker=${(Number(res?.makerCommissionRate ?? 0) * 100).toFixed(4)}% (live from exchange)`);
+            return rate;
+        }
+    } catch (e: any) {
+        console.error(`[Fee] commissionRate fetch failed: ${e.message}`);
+    }
+    console.warn(`[Fee] Using fallback taker rate ${(TAKER_FEE_FALLBACK * 100).toFixed(4)}% — could not verify live rate`);
+    _takerFeeRate = TAKER_FEE_FALLBACK;
+    return _takerFeeRate;
 }
 
 export async function privatePost(path: string, params: Record<string, string | number> = {}): Promise<any> {
@@ -477,15 +507,25 @@ export function calcSize(price: number): number {
     return size;
 }
 
-// ─── TP / SL CALCULATION (symmetric fixed-dollar bracket) ─────────────────────
+// ─── TP / SL CALCULATION ────────────────────────────────────────────────────
+// SL is solved EXACTLY from: slDist + takerFeeRate × entryPrice == multiple × tpDist
+// i.e. "loss + fee costs at most `multiple` wins" — holds precisely (not
+// approximately) because it uses the real entry price and the real account
+// taker rate, not assumed constants. Widened right up to that cap (not below
+// it), so it's as noise-resistant as the multiple allows.
 function calcTpDistance(): number {
     const floor = _cfg.tpMinTicks * _cfg.tick;
     return tickRound(Math.max(STRATEGY.TP_FIXED_USD, floor));
 }
 
-function calcSlDistance(): number {
+function calcSlDistance(tpDist: number, entryPrice: number, takerFeeRate: number): number {
+    const feePerUnit = takerFeeRate * entryPrice;          // $ fee per unit qty, exit leg
+    const raw   = STRATEGY.SL_MAX_WIN_MULTIPLE * tpDist - feePerUnit;
     const floor = _cfg.slMinTicks * _cfg.tick;
-    return tickRound(Math.max(STRATEGY.SL_FIXED_USD, floor));
+    if (raw < floor) {
+        console.warn(`[SL] ⚠️ Fee-adjusted SL ($${raw.toFixed(4)}) below tick floor — using floor. TP may be too small relative to fees.`);
+    }
+    return tickRound(Math.max(raw, floor));
 }
 
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
@@ -615,13 +655,15 @@ export async function executeBinanceTrade(
 
         const fillMs = Date.now() - fillStart;
 
-        // ── Calculate TP (maker) and SL (stop-market, caps the loss) prices ──────
+        // ── Calculate TP (maker) and SL (stop-market, capped at N wins) prices ────
+        const takerFeeRate = await getTakerFeeRate();
         const tpDist  = calcTpDistance();
-        const slDist  = calcSlDistance();
+        const slDist  = calcSlDistance(tpDist, actualEntry, takerFeeRate);
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
-        console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | SL=$${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)}) | fillTime=${fillMs}ms`);
+        const realizedLossWins = (slDist + takerFeeRate * actualEntry) / tpDist;
+        console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | SL=$${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)}, ${realizedLossWins.toFixed(2)}x wins incl. fee) | fillTime=${fillMs}ms`);
 
         // ── 2. TP limit order — POST-ONLY (GTX), never taker ─────────────────
         // MUST succeed — no TP = uncontrolled position. If price has already run
