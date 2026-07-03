@@ -508,23 +508,39 @@ export function calcSize(price: number): number {
 }
 
 // ─── TP / SL CALCULATION ────────────────────────────────────────────────────
+// TP is ADAPTIVE to live volatility: TP ≈ TP_ATR_MULT × current 5m ATR, clamped
+// to [TP_MIN_USD, TP_MAX_USD]. A fixed TP is either unreachable when the market
+// goes quiet (blocks all trading — the bug that emptied the pipeline) or leaves
+// easy money on the table when it's fast. Scaling with ATR keeps the target
+// "always about one normal candle away" so trades resolve quickly at any pace.
+//
 // SL is solved EXACTLY from: slDist + takerFeeRate × entryPrice == multiple × tpDist
 // i.e. "loss + fee costs at most `multiple` wins" — holds precisely (not
 // approximately) because it uses the real entry price and the real account
-// taker rate, not assumed constants. Widened right up to that cap (not below
-// it), so it's as noise-resistant as the multiple allows.
-function calcTpDistance(): number {
-    const floor = _cfg.tpMinTicks * _cfg.tick;
-    return tickRound(Math.max(STRATEGY.TP_FIXED_USD, floor));
+// taker rate, not assumed constants.
+//
+// IMPORTANT: the taker fee is a fixed $ amount per unit qty (rate × price), NOT
+// scaled by TP. If TP is small enough that fee alone exceeds (multiple-1)×TP,
+// the equation above has no non-negative solution — capping the loss at exactly
+// `multiple` wins becomes mathematically impossible with any real stop. So TP
+// has a FEE-AWARE floor: TP ≥ feePerUnit / (multiple − 1), which guarantees
+// SL comes out ≥ TP (never small, never a token tick-floor stub) and the
+// multiple-wins cap always holds exactly, no matter how quiet the market is.
+function calcTpDistance(atr5m: number, feePerUnit: number): number {
+    const mult      = Number(process.env.TP_ATR_MULT ?? 1.0);
+    const configMin = Number(process.env.TP_MIN_USD   ?? 0.30);
+    const maxUsd    = Number(process.env.TP_MAX_USD   ?? 15.00);
+    const multiple  = STRATEGY.SL_MAX_WIN_MULTIPLE;
+    const feeAwareMin = multiple > 1 ? feePerUnit / (multiple - 1) : feePerUnit;
+    const floor = Math.max(configMin, feeAwareMin, _cfg.tpMinTicks * _cfg.tick);
+    const atrBased = atr5m > 0 ? atr5m * mult : STRATEGY.TP_FIXED_USD;
+    const clamped  = Math.min(Math.max(atrBased, floor), maxUsd);
+    return tickRound(clamped);
 }
 
-function calcSlDistance(tpDist: number, entryPrice: number, takerFeeRate: number): number {
-    const feePerUnit = takerFeeRate * entryPrice;          // $ fee per unit qty, exit leg
+function calcSlDistance(tpDist: number, feePerUnit: number): number {
     const raw   = STRATEGY.SL_MAX_WIN_MULTIPLE * tpDist - feePerUnit;
-    const floor = _cfg.slMinTicks * _cfg.tick;
-    if (raw < floor) {
-        console.warn(`[SL] ⚠️ Fee-adjusted SL ($${raw.toFixed(4)}) below tick floor — using floor. TP may be too small relative to fees.`);
-    }
+    const floor = _cfg.slMinTicks * _cfg.tick;   // defensive only — the fee-aware TP floor above means this should never bind
     return tickRound(Math.max(raw, floor));
 }
 
@@ -655,14 +671,16 @@ export async function executeBinanceTrade(
 
         const fillMs = Date.now() - fillStart;
 
-        // ── Calculate TP (maker) and SL (stop-market, capped at N wins) prices ────
+        // ── Calculate TP (maker, ATR-adaptive) and SL (stop-market, capped at N
+        //    wins) prices ──────────────────────────────────────────────────────
         const takerFeeRate = await getTakerFeeRate();
-        const tpDist  = calcTpDistance();
-        const slDist  = calcSlDistance(tpDist, actualEntry, takerFeeRate);
+        const feePerUnit = takerFeeRate * actualEntry;
+        const tpDist  = calcTpDistance(signal.atr5m, feePerUnit);
+        const slDist  = calcSlDistance(tpDist, feePerUnit);
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
-        const realizedLossWins = (slDist + takerFeeRate * actualEntry) / tpDist;
+        const realizedLossWins = (slDist + feePerUnit) / tpDist;
         console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | SL=$${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)}, ${realizedLossWins.toFixed(2)}x wins incl. fee) | fillTime=${fillMs}ms`);
 
         // ── 2. TP limit order — POST-ONLY (GTX), never taker ─────────────────
