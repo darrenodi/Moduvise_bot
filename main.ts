@@ -595,7 +595,7 @@ const _slMult = process.env.SL_MAX_WIN_MULTIPLE ?? '2';
 console.log(`  TP       : ATR-adaptive (${process.env.TP_ATR_MULT ?? '1.0'}× live 5m ATR, floor=max($${process.env.TP_MIN_USD ?? '0.30'}, fee/(mult−1)), ceil=$${process.env.TP_MAX_USD ?? '15.00'}), post-only maker, 0 fee`);
 console.log(`  SL       : DERIVED live so (loss + taker fee) == ${_slMult}x TP exactly — as wide as that cap allows`);
 console.log(`  BREAKEVEN: ${_slMult}/(1+${_slMult}) = ${(100*Number(_slMult)/(1+Number(_slMult))).toFixed(1)}% WR (leverage-invariant; one loss costs exactly ${_slMult} wins incl. fee)`);
-console.log(`  GATES    : flow 5s+60s | funding | OI surge | news/weekend blackout | ATR≥${process.env.ATR_TP_MIN_RATIO ?? '0.5'}×TP`);
+console.log(`  GATES    : flow 5s+60s | funding | OI surge | daily break + news blackout | weekend trading ALLOWED`);
 console.log(`  EXIT     : maker TP or stop-market SL resolve the bracket | time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min (hygiene only)`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);
 console.log(`  STACK    : $${getStack().toFixed(4)} | BANKED: $${getBanked().toFixed(4)}`);

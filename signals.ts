@@ -92,12 +92,16 @@ export function getSession(): {
 }
 
 // ─── TRADING BLACKOUT ─────────────────────────────────────────────────────────
-// Gold-specific microstructure + macro protection. Blocks entries when:
-//  1. The underlying market is closed (Fri 21:00 UTC → Sun 22:05 UTC): Binance's
-//     index freezes and the perp trades with no live spot anchor — thin books,
-//     mark-price EWMA, exactly where a scalper gets hurt.
-//  2. Daily settlement break (21:00–22:05 UTC weekdays), same frozen-index issue.
-//  3. Scheduled US data windows (default 12:30, 14:00, 18:00 UTC = 8:30 ET data,
+// Weekend trading is ALLOWED — the perp keeps trading (thinner, slower) even
+// while the underlying spot/COMEX market is shut, so a blanket weekend block was
+// leaving real (if smaller) opportunity on the table. Thin/flat weekend stretches
+// are instead filtered organically by the existing gates: ATR_FLOOR_PCT ("DEAD
+// MARKET") skips genuinely flat periods, the fee-aware TP floor in executeTrade
+// keeps any weekend TP honest, and BLOCK_LOW_SESSIONS still applies (session
+// quality is hour-of-day only, not day-of-week, so the usual low-liquidity hours
+// stay filtered on weekends too). Blocks entries only when:
+//  1. Daily settlement break (21:00–22:05 UTC, every day) — frozen-index window.
+//  2. Scheduled US data windows (default 12:30, 14:00, 18:00 UTC = 8:30 ET data,
 //     10:00 ET data, FOMC), ±NEWS_BLACKOUT_MIN minutes. Gold does $30 candles on
 //     CPI/NFP/Fed — no snapshot gate can see those coming; the calendar can.
 const NEWS_BLACKOUT_MIN   = Number(process.env.NEWS_BLACKOUT_MIN ?? 10);
@@ -105,15 +109,9 @@ const NEWS_BLACKOUT_TIMES = (process.env.NEWS_BLACKOUT_TIMES ?? '12:30,14:00,18:
     .split(',').map(s => s.trim()).filter(Boolean);
 
 export function getTradingBlackout(now = new Date()): string | null {
-    const day = now.getUTCDay();            // 0=Sun … 6=Sat
     const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
 
-    // Weekend: Fri 21:00 UTC → Sun 22:05 UTC
-    if (day === 6) return 'WEEKEND: underlying gold market closed (frozen index)';
-    if (day === 5 && mins >= 21 * 60) return 'WEEKEND: underlying gold market closed (frozen index)';
-    if (day === 0 && mins < 22 * 60 + 5) return 'WEEKEND: underlying gold market closed (frozen index)';
-
-    // Daily settlement break 21:00–22:05 UTC
+    // Daily settlement break 21:00–22:05 UTC (applies every day, incl. weekends)
     if (mins >= 21 * 60 && mins < 22 * 60 + 5) return 'DAILY BREAK: 21:00–22:05 UTC (frozen index)';
 
     // Scheduled news windows (weekdays)
