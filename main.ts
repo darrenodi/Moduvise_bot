@@ -563,7 +563,7 @@ const _mar = process.env.MARGIN_PER_TRADE ?? '1';
 console.log(`\n${'═'.repeat(70)}`);
 console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
 console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
-console.log(`  TP       : $${process.env.TP_FIXED_USD ?? '3.00'} price move (post-only maker)`);
+console.log(`  TP       : $${process.env.TP_FIXED_USD ?? '1.50'} price move (post-only maker) | needs ATR ≥ ${process.env.ATR_TP_MIN_RATIO ?? '0.8'}× TP`);
 console.log(`  SL       : ${process.env.SL_ROI_PCT ?? '50'}% of margin, stop-market (~1% price at 50x — outside noise)`);
 console.log(`  GATES    : flow 5s+60s | funding | OI surge | news/weekend blackout`);
 console.log(`  EXIT     : maker TP (0 fee) or stop-market SL (bounded loss)`);

@@ -166,6 +166,8 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 const RSI_OVERBOUGHT    = Number(process.env.RSI_OVERBOUGHT    ?? 75);    // don't buy exhausted tops (no-SL killer)
 const RSI_OVERSOLD      = Number(process.env.RSI_OVERSOLD      ?? 25);    // don't sell exhausted bottoms (RSI 22.2 short liquidated us)
 const FLOW_1M_AGAINST   = Number(process.env.FLOW_1M_AGAINST   ?? 1.3);   // block if 60s cumulative flow opposes by more than this ratio
+const TP_REF_USD        = Number(process.env.TP_FIXED_USD      ?? 1.5);   // must match executeTrade's TP (gold)
+const ATR_TP_MIN_RATIO  = Number(process.env.ATR_TP_MIN_RATIO  ?? 0.8);   // ATR must be ≥ this × TP or the TP is too slow to reach
 const FUNDING_EXTREME   = Number(process.env.FUNDING_EXTREME   ?? 0.0005);// don't join the crowded side when funding is extreme (squeeze risk)
 const OI_SURGE_PCT      = Number(process.env.OI_SURGE_PCT      ?? 2.0);   // OI +% in ~5m = new money piling in; block if momentum opposes us
 const TOUCH_CONFIRM     = Number(process.env.TOUCH_CONFIRM     ?? 0.12);  // top-of-book must lean THIS far in our direction (confirmation)
@@ -294,6 +296,13 @@ function getDirection(
     // ── Gate 2: ATR window — too fast (trap) or too dead (TP never reached) ────
     if (atrPct > ATR_CEIL_PCT) return neutral(`TOO FAST: ATR ${atrPct.toFixed(2)}% > ${ATR_CEIL_PCT}% ceiling`);
     if (atrPct < ATR_FLOOR_PCT) return neutral(`DEAD MARKET: ATR ${atrPct.toFixed(3)}% < ${ATR_FLOOR_PCT}% floor`);
+
+    // ── Gate 2b: TP reachability — the TP must be hittable within minutes, not
+    //    hours. The 174-min losing short entered at ATR $1.82 with a TP 1.65×ATR
+    //    away; exposure time is the real risk at 50x. Wins fast, or don't enter.
+    if (atr < TP_REF_USD * ATR_TP_MIN_RATIO) {
+        return neutral(`TP UNREACHABLE: ATR $${atr.toFixed(2)} < ${ATR_TP_MIN_RATIO}× TP $${TP_REF_USD} — too slow, skip`);
+    }
 
     // ── Regime: decides which directions are even allowed ─────────────────────
     const osc                       = isSafeOscillation(klines, atr);
