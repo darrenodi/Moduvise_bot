@@ -32,9 +32,9 @@ const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 const IS_TESTNET  = ENVIRONMENT !== 'live';
 const BASE_URL    = IS_TESTNET ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
 
-// Per-asset loss cooldown (from executeTrade getConfig). No exit timeouts — the
-// position rides on its maker TP + maker SL until one fills or liquidation.
-const { lossCooldownMs: LOSS_COOLDOWN_MS } = ASSET_TIMING;
+// Per-asset timing (from executeTrade getConfig, NOT env): loss cooldown + the
+// time-stop — if the TP hasn't filled within maxHoldMs, the scalp thesis failed.
+const { lossCooldownMs: LOSS_COOLDOWN_MS, maxHoldMs: MAX_HOLD_MS } = ASSET_TIMING;
 
 // Below this available balance, stop trying to trade (don't force doomed orders).
 const MIN_STACK = Number(process.env.MIN_STACK ?? 0.60);
@@ -435,10 +435,38 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
 
     if (!trade) return 'open';
 
-    // Position is open with its maker TP + maker SL stop-limit resting. Per user
-    // rule: NO taker exits. Let it ride until the maker TP or maker SL fills — or
-    // liquidation if the SL gaps and can't fill as maker. No timeout/scratch/
-    // backstop/fail-safe.
+    // ── Time-stop ─────────────────────────────────────────────────────────────
+    // The scalp thesis is "TP fills in seconds-to-minutes". If it hasn't filled
+    // after maxHoldMs, the thesis failed — scratch NOW at a small loss instead of
+    // sitting 72 minutes underwater waiting for a reversal that may never come
+    // (or the -50%-margin stop). Maker close first, market fallback.
+    const ageMs = Date.now() - trade.openedAt;
+    if (ageMs >= MAX_HOLD_MS) {
+        if (_closeInProgress) return 'open';
+        _closeInProgress = true;
+        try {
+            console.log(`[TimeStop] ⏱ ${(ageMs / 60_000).toFixed(1)}min without TP — scratching`);
+            await cancelAllOrders(trade.slOrderId);
+            await triggerEmergencyClose(trade.side, trade.size, `time-stop ${(ageMs / 60_000).toFixed(0)}min`);
+            const real = await getRealizedPnlSince(trade.openedAt - 2_000);
+            const pnl  = real ? real.pnl : 0;
+            const outcome = pnl >= 0 ? 'tp' : 'sl';
+            if (outcome === 'tp') stats.tpHits++; else { stats.slHits++; _lastLossAt = Date.now(); }
+            stats.fills++;
+            await applyTradeResult(pnl);
+            if (_currentTradeId) {
+                logTradeClose(_currentTradeId, outcome, pos.currentPrice, pnl, 'timestop', false, true);
+                _currentTradeId = null;
+            }
+            clearActiveTrade();
+            await sendAlert(`⏱ ${_symbol} time-stop @ ${(ageMs / 60_000).toFixed(0)}min | ${trade.side.toUpperCase()} | PnL: $${pnl.toFixed(4)}`);
+            return outcome;
+        } finally {
+            _closeInProgress = false;
+        }
+    }
+
+    // Otherwise the position rests on its maker TP + stop-market SL.
     return 'open';
 }
 
@@ -566,7 +594,7 @@ console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
 console.log(`  TP       : $${process.env.TP_FIXED_USD ?? '1.50'} price move (post-only maker) | needs ATR ≥ ${process.env.ATR_TP_MIN_RATIO ?? '0.8'}× TP`);
 console.log(`  SL       : ${process.env.SL_ROI_PCT ?? '50'}% of margin, stop-market (~1% price at 50x — outside noise)`);
 console.log(`  GATES    : flow 5s+60s | funding | OI surge | news/weekend blackout`);
-console.log(`  EXIT     : maker TP (0 fee) or stop-market SL (bounded loss)`);
+console.log(`  EXIT     : maker TP (0 fee) | time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min | stop-market SL (disaster cap)`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);
 console.log(`  STACK    : $${getStack().toFixed(4)} | BANKED: $${getBanked().toFixed(4)}`);
 console.log(`  LOG      : ${TRADE_LOG_FILE}`);

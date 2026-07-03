@@ -43,6 +43,7 @@ interface SymbolConfig {
     slMinTicks:       number;   // minimum SL distance in ticks (sub-tick floor)
     maxSpreadUsd:     number;   // skip entry if bid/ask spread exceeds this (price units)
     lossCooldownMs:   number;   // pause after a loss before next entry (per-asset, NOT env)
+    maxHoldMs:        number;   // time-stop: scratch if TP unfilled after this (per-asset, NOT env)
 }
 
 function getConfig(symbol: string): SymbolConfig {
@@ -52,21 +53,21 @@ function getConfig(symbol: string): SymbolConfig {
         maxLeverage: 100, tpFixedUsd: 0.50, slFixedUsd: 5.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.05,
-        lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
     if (s === 'BTCUSDT')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 5.00, slFixedUsd: 50.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
-        lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
     if (s === 'DOGEUSDT') return {
         tick: 0.00001, qtyStep: 1, minQty: 1, priceDp: 5, qtyDp: 0,
         maxLeverage: 75, tpFixedUsd: 0.0001, slFixedUsd: 0.0020,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.0002,
-        lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
     // USDC-margined perps — 0% maker, so profitable to scalp like XAU.
     if (s === 'ETHUSDC')  return {
@@ -74,14 +75,14 @@ function getConfig(symbol: string): SymbolConfig {
         maxLeverage: 100, tpFixedUsd: 0.10, slFixedUsd: 2.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.05,
-        lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
     if (s === 'BTCUSDC')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 1.00, slFixedUsd: 20.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
-        lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
     // Default: XAUUSDT — TP $1.50 price move (HFT scalp); SL is ROI-based (50% margin)
     return {
@@ -89,7 +90,7 @@ function getConfig(symbol: string): SymbolConfig {
         maxLeverage: 100, tpFixedUsd: 1.50, slFixedUsd: 3.00,
         entryOffsetTicks: 7, slLimitTicks: 5, tp2OffsetTicks: 3,   // 7 ticks = $0.07 pullback
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.10,
-        lossCooldownMs: 30_000,
+        lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
 }
 
@@ -98,6 +99,7 @@ const _cfg = getConfig(MARKET_SYMBOL);
 // Per-asset trading timing for the current symbol — imported by main.ts (no env).
 export const ASSET_TIMING = {
     lossCooldownMs: _cfg.lossCooldownMs,
+    maxHoldMs:      _cfg.maxHoldMs,
 };
 
 // ─── STRATEGY PARAMETERS ──────────────────────────────────────────────────────

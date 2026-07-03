@@ -168,6 +168,7 @@ const RSI_OVERSOLD      = Number(process.env.RSI_OVERSOLD      ?? 25);    // don
 const FLOW_1M_AGAINST   = Number(process.env.FLOW_1M_AGAINST   ?? 1.3);   // block if 60s cumulative flow opposes by more than this ratio
 const TP_REF_USD        = Number(process.env.TP_FIXED_USD      ?? 1.5);   // must match executeTrade's TP (gold)
 const ATR_TP_MIN_RATIO  = Number(process.env.ATR_TP_MIN_RATIO  ?? 0.8);   // ATR must be ≥ this × TP or the TP is too slow to reach
+const BLOCK_LOW_SESSIONS = (process.env.BLOCK_LOW_SESSIONS ?? 'true') === 'true'; // no entries in thin/drift hours
 const FUNDING_EXTREME   = Number(process.env.FUNDING_EXTREME   ?? 0.0005);// don't join the crowded side when funding is extreme (squeeze risk)
 const OI_SURGE_PCT      = Number(process.env.OI_SURGE_PCT      ?? 2.0);   // OI +% in ~5m = new money piling in; block if momentum opposes us
 const TOUCH_CONFIRM     = Number(process.env.TOUCH_CONFIRM     ?? 0.12);  // top-of-book must lean THIS far in our direction (confirmation)
@@ -285,6 +286,13 @@ function getDirection(
     // ── Gate 0: Trading blackout (weekend frozen index, daily break, news) ─────
     const blackout = getTradingBlackout();
     if (blackout) return neutral(`BLACKOUT: ${blackout}`);
+
+    // ── Gate 0b: Session quality — no entries in thin/drift hours. Both live
+    //    losses (174min ride, 72min ride) entered during Asia/off-hours; the
+    //    wins-fast scalp thesis needs active liquidity behind it. ───────────────
+    if (BLOCK_LOW_SESSIONS && getSession().quality === 'LOW') {
+        return neutral(`LOW SESSION (${getSession().name}) — thin hours, no scalping edge`);
+    }
 
     const ob        = ind.obImbalance;
     const top       = ind.topObImbalance;                // top-of-book (next-tick) imbalance
