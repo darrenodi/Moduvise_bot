@@ -164,7 +164,15 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 const RSI_OVERBOUGHT    = Number(process.env.RSI_OVERBOUGHT    ?? 75);    // don't buy exhausted tops (no-SL killer)
 const RSI_OVERSOLD      = Number(process.env.RSI_OVERSOLD      ?? 25);    // don't sell exhausted bottoms (RSI 22.2 short liquidated us)
 const FLOW_1M_AGAINST   = Number(process.env.FLOW_1M_AGAINST   ?? 1.3);   // block if 60s cumulative flow opposes by more than this ratio
-const BLOCK_LOW_SESSIONS = (process.env.BLOCK_LOW_SESSIONS ?? 'true') === 'true'; // no entries in thin/drift hours
+// Was 'true' by default (blocks Asia/off-hours + NY-close, i.e. ~14h/day) from
+// back when a bad drift trade could ride to liquidation. That risk is now fixed
+// structurally: SL is hard-capped at exactly SL_MAX_WIN_MULTIPLE x whatever TP is
+// (see executeTrade calcSlDistance), and TP itself is ATR-adaptive to the actual
+// (quieter) volatility of those hours — so a low-liquidity-hour trade is already
+// sized down and loss-capped, not exposed the way it was when this gate was added.
+// Blocking all LOW hours now just costs trading time without addressing a live
+// risk. Default OFF; set BLOCK_LOW_SESSIONS=true to restore the old behavior.
+const BLOCK_LOW_SESSIONS = (process.env.BLOCK_LOW_SESSIONS ?? 'false') === 'true';
 const FUNDING_EXTREME   = Number(process.env.FUNDING_EXTREME   ?? 0.0005);// don't join the crowded side when funding is extreme (squeeze risk)
 const OI_SURGE_PCT      = Number(process.env.OI_SURGE_PCT      ?? 2.0);   // OI +% in ~5m = new money piling in; block if momentum opposes us
 const TOUCH_CONFIRM     = Number(process.env.TOUCH_CONFIRM     ?? 0.12);  // top-of-book must lean THIS far in our direction (confirmation)
