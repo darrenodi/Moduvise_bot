@@ -94,12 +94,12 @@ export function getSession(): {
 // ─── TRADING BLACKOUT ─────────────────────────────────────────────────────────
 // Weekend trading is ALLOWED — the perp keeps trading (thinner, slower) even
 // while the underlying spot/COMEX market is shut, so a blanket weekend block was
-// leaving real (if smaller) opportunity on the table. Thin/flat weekend stretches
-// are instead filtered organically by the existing gates: ATR_FLOOR_PCT ("DEAD
-// MARKET") skips genuinely flat periods, the fee-aware TP floor in executeTrade
-// keeps any weekend TP honest, and BLOCK_LOW_SESSIONS still applies (session
-// quality is hour-of-day only, not day-of-week, so the usual low-liquidity hours
-// stay filtered on weekends too). Blocks entries only when:
+// leaving real (if smaller) opportunity on the table. Thin/quiet weekend
+// stretches are handled by the fee-aware TP floor in executeTrade (which sizes
+// the TP honestly no matter how quiet it gets), not a blanket calendar/ATR rule
+// — both the old LOW-session block and the ATR "dead market" floor were found
+// to over-block genuinely tradeable quiet periods and have been removed.
+// Blocks entries only when:
 //  1. Daily settlement break (21:00–22:05 UTC, every day) — frozen-index window.
 //  2. Scheduled US data windows (default 12:30, 14:00, 18:00 UTC = 8:30 ET data,
 //     10:00 ET data, FOMC), ±NEWS_BLACKOUT_MIN minutes. Gold does $30 candles on
@@ -178,7 +178,6 @@ const OI_SURGE_PCT      = Number(process.env.OI_SURGE_PCT      ?? 2.0);   // OI 
 const TOUCH_CONFIRM     = Number(process.env.TOUCH_CONFIRM     ?? 0.12);  // top-of-book must lean THIS far in our direction (confirmation)
 const FLOW_AGAINST      = Number(process.env.FLOW_AGAINST      ?? 1.15);  // block if opposing 5s trade flow exceeds this ratio
 const ATR_CEIL_PCT      = Number(process.env.ATR_CEIL_PCT      ?? 0.6);   // ATR as % of price — above = too fast
-const ATR_FLOOR_PCT     = Number(process.env.ATR_FLOOR_PCT     ?? 0.02);  // ATR as % of price — below = dead
 const MOM_TRAP_ATR      = Number(process.env.MOM_TRAP_ATR      ?? 0.6);   // momentum AGAINST dir, in ATR units (tighter: no SL)
 const MOM_STRONG_ATR    = Number(process.env.MOM_STRONG_ATR    ?? 0.5);   // pure-momentum entry, ATR units
 const MOM_CONFIRM_ATR   = Number(process.env.MOM_CONFIRM_ATR   ?? 0.15);  // OB+momentum confirm, ATR units
@@ -305,12 +304,14 @@ function getDirection(
     const atrPct    = ind.atrPct * 100;                  // ATR as % of price
     // (Spread is gated per-asset at execution time in executeTrade, not here.)
 
-    // ── Gate 2: ATR window — too fast (trap) or too dead to bother ─────────────
-    // (No separate "TP reachability" gate needed: TP is now ATR-adaptive in
-    // executeTrade — it scales with volatility instead of being fixed, so it
-    // can't go "unreachable" the way a fixed TP could when the market went quiet.)
+    // ── Gate 2: ATR ceiling only — too fast (trap/parabolic) ───────────────────
+    // No floor here. TP is ATR-adaptive in executeTrade and floored there by the
+    // FEE economics (TP >= feePerUnit/(multiple-1)), which is the real answer to
+    // "is this too quiet to trade" — a hardcoded %-of-price floor was blocking
+    // genuinely tradeable quiet stretches (ATR $0.38, well above the fee-safe
+    // TP floor of ~$1.67) for 10+ minutes straight. Let it trade; the fee floor
+    // sizes the TP correctly either way.
     if (atrPct > ATR_CEIL_PCT) return neutral(`TOO FAST: ATR ${atrPct.toFixed(2)}% > ${ATR_CEIL_PCT}% ceiling`);
-    if (atrPct < ATR_FLOOR_PCT) return neutral(`DEAD MARKET: ATR ${atrPct.toFixed(3)}% < ${ATR_FLOOR_PCT}% floor`);
 
     // ── Regime: decides which directions are even allowed ─────────────────────
     const osc                       = isSafeOscillation(klines, atr);
