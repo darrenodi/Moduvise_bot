@@ -99,11 +99,17 @@ function getConfig(symbol: string): SymbolConfig {
         // unfilled while price ran away, retrying every cycle with zero fills.
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.10,
-        // maxHoldMs is a hygiene backstop only now — the symmetric $10/$10 bracket
-        // already bounds risk cleanly, so this doesn't need to fire often or fast
-        // (a tight timer here just reintroduces the timer-selection-bias problem:
-        // conditioning on "still open" selects for trades drifting away from TP).
-        lossCooldownMs: 30_000, maxHoldMs: 25 * 60_000,
+        // maxHoldMs is a hygiene backstop only — the SL already bounds risk exactly
+        // to 2x TP incl. fee, so this must NOT be the primary exit. Live evidence
+        // it was too tight: with TP/SL both fee-floored at ~$1.67 (quiet market),
+        // 4/4 trades timed out at 25min in a choppy/rangebound stretch and got
+        // force-closed as MARKET (taker) — paying a fee they shouldn't AND
+        // bypassing the exact loss-cap (a time-stop exit realizes whatever price
+        // the market is at, not the designed 2x-TP formula). Lengthened so the
+        // free maker TP/SL get real room to resolve naturally first; a tight timer
+        // also reintroduces timer-selection-bias (conditioning on "still open"
+        // selects for trades drifting away from TP).
+        lossCooldownMs: 30_000, maxHoldMs: 90 * 60_000,
     };
 }
 
