@@ -667,7 +667,36 @@ export async function executeBinanceTrade(
                 if (postCancel?.status === 'FILLED') {
                     filled = true; actualEntry = Number(postCancel.avgPrice ?? entryPrice);
                 } else {
-                    return { success: false, outcome: 'skipped', message: 'Entry not filled within timeout.' };
+                    // Pullback never got touched (static book — the bid/ask didn't move
+                    // enough within FILL_TIMEOUT). Rather than give up for the whole
+                    // cycle, make ONE bounded follow-up attempt right at the current
+                    // touch — still GTX/maker (cancels if it would cross), just no
+                    // retracement required. This is what actually gets fills in a quiet
+                    // book instead of retrying the same unreachable price every cycle.
+                    const bt = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
+                    const touchPrice = tickRound(isBuy ? Number(bt.bidPrice) : Number(bt.askPrice));
+                    const retryOrder = await privatePost('/fapi/v1/order', {
+                        symbol: STRATEGY.SYMBOL, side, type: 'LIMIT', timeInForce: 'GTX',
+                        price: touchPrice.toFixed(_cfg.priceDp), quantity: size.toFixed(_cfg.qtyDp),
+                    });
+                    if (!retryOrder?.orderId) {
+                        return { success: false, outcome: 'skipped', message: 'Entry not filled within timeout.' };
+                    }
+                    console.log(`[Entry] ⏱ Pullback unfilled — retrying at touch $${touchPrice.toFixed(_cfg.priceDp)} | id=${retryOrder.orderId}`);
+                    const retryStart = Date.now();
+                    const retryWaitMs = Number(process.env.ENTRY_RETRY_WAIT_MS ?? 4_000);
+                    while (Date.now() - retryStart < retryWaitMs) {
+                        await new Promise(r => setTimeout(r, STRATEGY.FILL_POLL_MS));
+                        const retryCheck = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: retryOrder.orderId });
+                        if (retryCheck.status === 'FILLED') { filled = true; actualEntry = Number(retryCheck.avgPrice ?? touchPrice); break; }
+                        if (retryCheck.status === 'CANCELED' || retryCheck.status === 'EXPIRED') break;
+                    }
+                    if (!filled) {
+                        await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: retryOrder.orderId }).catch(() => {});
+                        const retryFinal = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: retryOrder.orderId }).catch(() => null);
+                        if (retryFinal?.status === 'FILLED') { filled = true; actualEntry = Number(retryFinal.avgPrice ?? touchPrice); }
+                        else return { success: false, outcome: 'skipped', message: 'Entry not filled within timeout (incl. touch retry).' };
+                    }
                 }
             }
         }
