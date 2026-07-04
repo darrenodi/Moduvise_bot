@@ -90,11 +90,14 @@ function getConfig(symbol: string): SymbolConfig {
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
         lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
-    // Default: XAUUSDT — TP $10.00 / SL $10.00 (symmetric bracket, ~53.8% breakeven)
+    // Default: XAUUSDT — TP is ATR-adaptive, SL derived to exactly SL_MAX_WIN_MULTIPLE x TP
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 10.00,
-        entryOffsetTicks: 7, slLimitTicks: 5, tp2OffsetTicks: 3,   // 7 ticks = $0.07 pullback
+        // 1 tick = $0.01 pullback. A wider pullback (was 7 ticks = $0.07) sat too
+        // far below the touch in a trending market — the entry kept timing out
+        // unfilled while price ran away, retrying every cycle with zero fills.
+        entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.10,
         // maxHoldMs is a hygiene backstop only now — the symmetric $10/$10 bracket
         // already bounds risk cleanly, so this doesn't need to fire often or fast
