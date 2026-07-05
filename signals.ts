@@ -304,13 +304,21 @@ function getDirection(
     const atrPct    = ind.atrPct * 100;                  // ATR as % of price
     // (Spread is gated per-asset at execution time in executeTrade, not here.)
 
-    // ── Gate 2: ATR ceiling only — too fast (trap/parabolic) ───────────────────
-    // No floor here. TP is ATR-adaptive in executeTrade and floored there by the
-    // FEE economics (TP >= feePerUnit/(multiple-1)), which is the real answer to
-    // "is this too quiet to trade" — a hardcoded %-of-price floor was blocking
-    // genuinely tradeable quiet stretches (ATR $0.38, well above the fee-safe
-    // TP floor of ~$1.67) for 10+ minutes straight. Let it trade; the fee floor
-    // sizes the TP correctly either way.
+    // ── Gate 2: ATR ceiling + fee-floor-pinned floor ───────────────────────────
+    // Data reversal (2026-07-05): removing the ATR floor entirely (previous fix)
+    // let the bot trade when ATR was so low that TP/SL get pinned at the fee-aware
+    // minimum (~$1.67) instead of tracking real volatility. Two-day audit: those
+    // fee-floor-pinned trades resolve slowly and, when they don't resolve via the
+    // real TP/SL before the time-stop, close at a loss 84% of the time (21/25
+    // time-stop exits were losses) — a timer-selection bias (trades still open
+    // after a long wait are disproportionately the ones drifting against us).
+    // So: still no arbitrary %-of-price floor, but DO skip when ATR is so low the
+    // TP would be fee-floor-pinned rather than ATR-driven — that specific
+    // condition is what the data shows behaves badly, not "quiet" in general.
+    const ATR_MIN_USD = Number(process.env.ATR_MIN_USD ?? 2.50);   // comfortably above the ~$1.67 fee floor
+    if (atr < ATR_MIN_USD) {
+        return neutral(`FEE-FLOOR RISK: ATR $${atr.toFixed(2)} < $${ATR_MIN_USD} — TP would be fee-pinned, skip`);
+    }
     if (atrPct > ATR_CEIL_PCT) return neutral(`TOO FAST: ATR ${atrPct.toFixed(2)}% > ${ATR_CEIL_PCT}% ceiling`);
 
     // ── Regime: decides which directions are even allowed ─────────────────────

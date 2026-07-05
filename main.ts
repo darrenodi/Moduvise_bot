@@ -400,7 +400,10 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                     await applyTradeResult(real.pnl);
                     await cancelAllOrders(trade.slOrderId);
                     if (_currentTradeId) {
-                        logTradeClose(_currentTradeId, outcome, pos.currentPrice, real.pnl, 'tp1', false, false);
+                        // exitPhase must reflect what ACTUALLY closed it — this was
+                        // hardcoded 'tp1' even on real algo-SL fills, mislabeling
+                        // genuine stop-loss hits as TP hits in the trade log.
+                        logTradeClose(_currentTradeId, outcome, pos.currentPrice, real.pnl, outcome === 'tp' ? 'tp1' : 'sl', false, false);
                         // Gemini post-mortem on SL hits
                         if (outcome === 'sl') {
                             try {
