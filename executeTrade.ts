@@ -518,30 +518,28 @@ export function calcSize(price: number): number {
 
 // ─── TP / SL CALCULATION ────────────────────────────────────────────────────
 // TP is ADAPTIVE to live volatility: TP ≈ TP_ATR_MULT × current 5m ATR, clamped
-// to [TP_MIN_USD, TP_MAX_USD]. A fixed TP is either unreachable when the market
-// goes quiet (blocks all trading — the bug that emptied the pipeline) or leaves
-// easy money on the table when it's fast. Scaling with ATR keeps the target
-// "always about one normal candle away" so trades resolve quickly at any pace.
+// to [TP_MIN_USD, TP_MAX_USD]. Scaling with ATR keeps the target "about one
+// normal candle away" so trades resolve quickly at any pace — including quiet
+// ones, which is the point: this is a HIGH-FREQUENCY scalper, and it must keep
+// trading through calm stretches, not go dark waiting for volatility.
 //
-// SL is solved EXACTLY from: slDist + takerFeeRate × entryPrice == multiple × tpDist
-// i.e. "loss + fee costs at most `multiple` wins" — holds precisely (not
-// approximately) because it uses the real entry price and the real account
-// taker rate, not assumed constants.
-//
-// IMPORTANT: the taker fee is a fixed $ amount per unit qty (rate × price), NOT
-// scaled by TP. If TP is small enough that fee alone exceeds (multiple-1)×TP,
-// the equation above has no non-negative solution — capping the loss at exactly
-// `multiple` wins becomes mathematically impossible with any real stop. So TP
-// has a FEE-AWARE floor: TP ≥ feePerUnit / (multiple − 1), which guarantees
-// SL comes out ≥ TP (never small, never a token tick-floor stub) and the
-// multiple-wins cap always holds exactly, no matter how quiet the market is.
-function calcTpDistance(atr5m: number, feePerUnit: number): number {
+// FREQUENCY-VS-CAP TRADE-OFF (explicit user decision, 2026-07-05): the taker fee
+// is a fixed $ amount per unit qty (rate × price), NOT scaled by TP. When TP is
+// genuinely tiny (quiet market), fee alone can exceed (multiple-1)×TP, so
+// "loss+fee == exactly `multiple` wins" has no valid solution — a version of
+// this code used to force TP UP to preserve that exact ratio, which made the
+// bot sit idle for hours whenever the market was calm (defeats "high-frequency
+// scalping"). User chose frequency: TP is now allowed to shrink to its real
+// tick floor in calm markets, and the realized loss-per-win ratio FLOATS ABOVE
+// `multiple` specifically in those low-TP trades (observed ~3-4x at a $0.50 TP
+// on gold, vs. exactly 2x when TP is large enough that the fee is negligible
+// by comparison). This is disclosed, bounded by TP_MIN_USD (not unbounded), and
+// intentional — do not reintroduce a fee-aware TP floor without asking first.
+function calcTpDistance(atr5m: number): number {
     const mult      = Number(process.env.TP_ATR_MULT ?? 1.0);
-    const configMin = Number(process.env.TP_MIN_USD   ?? 0.30);
+    const configMin = Number(process.env.TP_MIN_USD   ?? 0.50);
     const maxUsd    = Number(process.env.TP_MAX_USD   ?? 15.00);
-    const multiple  = STRATEGY.SL_MAX_WIN_MULTIPLE;
-    const feeAwareMin = multiple > 1 ? feePerUnit / (multiple - 1) : feePerUnit;
-    const floor = Math.max(configMin, feeAwareMin, _cfg.tpMinTicks * _cfg.tick);
+    const floor = Math.max(configMin, _cfg.tpMinTicks * _cfg.tick);
     const atrBased = atr5m > 0 ? atr5m * mult : STRATEGY.TP_FIXED_USD;
     const clamped  = Math.min(Math.max(atrBased, floor), maxUsd);
     return tickRound(clamped);
@@ -549,7 +547,7 @@ function calcTpDistance(atr5m: number, feePerUnit: number): number {
 
 function calcSlDistance(tpDist: number, feePerUnit: number): number {
     const raw   = STRATEGY.SL_MAX_WIN_MULTIPLE * tpDist - feePerUnit;
-    const floor = _cfg.slMinTicks * _cfg.tick;   // defensive only — the fee-aware TP floor above means this should never bind
+    const floor = _cfg.slMinTicks * _cfg.tick;   // BINDS routinely now when TP is small — that's the accepted trade-off above
     return tickRound(Math.max(raw, floor));
 }
 
@@ -713,7 +711,7 @@ export async function executeBinanceTrade(
         //    wins) prices ──────────────────────────────────────────────────────
         const takerFeeRate = await getTakerFeeRate();
         const feePerUnit = takerFeeRate * actualEntry;
-        const tpDist  = calcTpDistance(signal.atr5m, feePerUnit);
+        const tpDist  = calcTpDistance(signal.atr5m);
         const slDist  = calcSlDistance(tpDist, feePerUnit);
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
