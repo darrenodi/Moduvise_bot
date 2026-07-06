@@ -600,7 +600,7 @@ console.log(`  TP       : FIXED $${_tpUsd.toFixed(2)} price move, post-only make
 console.log(`  SL       : NONE — position rides until TP fills, the 90min time-stop scratches it, or liquidation. User's explicit instruction, 2026-07-06.`);
 console.log(`  RISK     : ⚠️  unbounded per-trade loss at ${_lev}x — this is the exact shape that liquidated the account 3x before this was reinstated`);
 console.log(`  GATES    : flow 5s+60s | funding | OI surge | daily break + news blackout | weekend trading ALLOWED`);
-console.log(`  EXIT     : maker TP or stop-market SL resolve the bracket | time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min (hygiene only)`);
+console.log(`  EXIT     : maker TP fills, OR time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min scratches it — no price-based stop exists`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);
 console.log(`  STACK    : $${getStack().toFixed(4)} | BANKED: $${getBanked().toFixed(4)}`);
 console.log(`  LOG      : ${TRADE_LOG_FILE}`);
