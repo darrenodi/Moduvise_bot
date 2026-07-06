@@ -580,9 +580,21 @@ export async function executeBinanceTrade(
         // (the trading stack) — never the banked profit sitting in the wallet. This
         // is what makes "banked money is protected" actually true (cross margin uses
         // the whole wallet, incl. banked, as collateral). Set only while flat.
-        try {
-            await privatePost('/fapi/v1/marginType', { symbol: STRATEGY.SYMBOL, marginType: process.env.MARGIN_TYPE ?? 'ISOLATED' });
-        } catch { /* -4046: already set */ }
+        //
+        // BUG FIXED 2026-07-06: privatePost never throws on a Binance error response
+        // (fetch doesn't throw on 4xx/5xx, and res.json() parses fine either way) — so
+        // this try/catch was structurally incapable of ever catching a real rejection.
+        // Live audit found the account sitting on CROSS margin (not isolated) with an
+        // open, unprotected position, because a -4047 ("cannot change margin type with
+        // open orders") was being silently discarded exactly like the harmless -4046
+        // ("already isolated") case. With no SL now in place, an un-isolated position
+        // exposes the WHOLE wallet to liquidation, not just this trade's margin — this
+        // must be loud, not swallowed.
+        const marginRes = await privatePost('/fapi/v1/marginType', { symbol: STRATEGY.SYMBOL, marginType: process.env.MARGIN_TYPE ?? 'ISOLATED' });
+        if (marginRes?.code && marginRes.code !== -4046) {
+            console.error(`[Margin] ⚠️ Failed to set ISOLATED margin: ${JSON.stringify(marginRes)} — position will be CROSS (whole wallet at risk)`);
+            await sendAlert(`⚠️ ${STRATEGY.SYMBOL} could not set ISOLATED margin (${marginRes.msg}) — this trade will be on CROSS margin, exposing the full wallet.`);
+        }
 
         // Set leverage
         try {
