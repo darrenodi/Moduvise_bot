@@ -594,10 +594,13 @@ const _mar = process.env.MARGIN_PER_TRADE ?? '1';
 console.log(`\n${'═'.repeat(70)}`);
 console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
 console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
-const _slRoi = process.env.SL_ROI_PCT ?? '70';
-console.log(`  TP       : FIXED $${process.env.TP_MIN_USD ?? '0.50'} price move (no ATR scaling), post-only maker, 0 fee`);
-console.log(`  SL       : FIXED ${_slRoi}% of margin (independent of TP), stop-market, taker fee only when it fires — at ${_lev}x that's a ${(Number(_slRoi)/Number(_lev)).toFixed(2)}% price move`);
-console.log(`  BREAKEVEN: depends on avg win/loss $ realized, not a fixed ratio — TP is tiny ($0.50) and SL is wide (${_slRoi}% margin), so this needs a high win rate to be profitable; monitor realized WR closely`);
+const _tpUsd = Number(process.env.TP_MIN_USD ?? 4.00);
+const _slUsd = Number(process.env.SL_FIXED_USD ?? 1.00);
+const _feeEst = 1.67;   // ~takerFeeRate x gold price, for the banner estimate only
+const _breakeven = (_slUsd + _feeEst) / (_tpUsd + _slUsd + _feeEst) * 100;
+console.log(`  TP       : FIXED $${_tpUsd.toFixed(2)} price move, post-only maker, 0 fee`);
+console.log(`  SL       : FIXED $${_slUsd.toFixed(2)} price move, stop-market, taker fee only when it fires`);
+console.log(`  BREAKEVEN: ~${_breakeven.toFixed(1)}% WR (reward:risk ${(_tpUsd/_slUsd).toFixed(1)}:1 chosen so this sits below the bot's measured ~44-50% signal WR)`);
 console.log(`  GATES    : flow 5s+60s | funding | OI surge | daily break + news blackout | weekend trading ALLOWED`);
 console.log(`  EXIT     : maker TP or stop-market SL resolve the bracket | time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min (hygiene only)`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);

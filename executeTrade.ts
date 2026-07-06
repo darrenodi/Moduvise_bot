@@ -512,32 +512,27 @@ export function calcSize(price: number): number {
 }
 
 // ─── TP / SL CALCULATION ────────────────────────────────────────────────────
-// TP is a FIXED $0.50 price move on gold (user decision, 2026-07-06 — ATR-adaptive
-// scaling let TP (and therefore the derived SL) balloon during volatile stretches,
-// producing double-digit % margin swings mid-trade that the user rejected outright
-// ("nauseating ... just target $0.5 price change"). No ATR multiplier, no ceiling
-// to chase — every trade targets the same $0.50 move, so risk stays predictable
-// trade-to-trade regardless of how fast gold is moving. Env `TP_MIN_USD` still
-// overrides the constant if it ever needs tuning.
+// TP/SL GEOMETRY (2026-07-06, commit after 0394863) — chosen from the breakeven
+// math, not guessed: breakeven WR = (SL+fee)/(TP+SL+fee). Every shape tried this
+// week computed HIGHER than the bot's actual measured win rate (~44-50% across a
+// 34-trade audit, flat across regime/imbalance/trend-alignment — signal quality is
+// the real ceiling, not bracket shape): $10/$10 -> 53.8%, old 2x-TP-cap -> 66.7%,
+// $0.50/$0.50 (fee-dominated) -> 81.3%, and the 70%-margin-SL config -> 98.4% (at
+// 100x, ~$29 SL vs $0.50 TP — mathematically unwinnable, should have been flagged
+// before deploying it). TP=$4/SL=$1 is the first shape where breakeven (~40%) sits
+// BELOW the measured win rate, i.e. reward:risk does the work instead of needing a
+// win rate the signal doesn't have. Leverage (100x) does not affect this math at
+// all — it's a margin-risk-% knob, not a win-rate knob.
 function calcTpDistance(_atr5m: number): number {
-    const fixedUsd = Number(process.env.TP_MIN_USD ?? 0.50);
+    const fixedUsd = Number(process.env.TP_MIN_USD ?? 4.00);
     const floor    = Math.max(fixedUsd, _cfg.tpMinTicks * _cfg.tick);
     return tickRound(floor);
 }
 
-// SL is now a fixed MARGIN-ROI stop (user decision, 2026-07-06), decoupled from TP
-// entirely: `entry * (SL_ROI_PCT/100) / leverage`, env `SL_ROI_PCT` default 70 — i.e.
-// the stop fires at a 70% loss of the trade's margin. At 100x leverage that's a
-// 0.7% price move (~$29 on $4180 gold): wide enough to ride out normal noise around
-// the $0.50 TP (the earlier TP-derived SL floor collapsed to as little as $0.05 in
-// the fee-dominated case, which is what caused the instant noise-stops fixed above),
-// while still stopping well short of liquidation (100x liquidates near -100% margin).
-function calcSlDistance(entry: number): number {
-    const roiPct   = Number(process.env.SL_ROI_PCT ?? 70);
-    const leverage = STRATEGY.LEVERAGE;
-    const raw      = entry * (roiPct / 100) / leverage;
+function calcSlDistance(_entry: number): number {
+    const fixedUsd = Number(process.env.SL_FIXED_USD ?? 1.00);
     const floor    = _cfg.slMinTicks * _cfg.tick;
-    return tickRound(Math.max(raw, floor));
+    return tickRound(Math.max(fixedUsd, floor));
 }
 
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
