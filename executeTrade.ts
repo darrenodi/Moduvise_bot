@@ -545,8 +545,16 @@ function calcTpDistance(atr5m: number): number {
 }
 
 function calcSlDistance(tpDist: number, feePerUnit: number): number {
-    const raw   = STRATEGY.SL_MAX_WIN_MULTIPLE * tpDist - feePerUnit;
-    const floor = _cfg.slMinTicks * _cfg.tick;   // BINDS routinely now when TP is small — that's the accepted trade-off above
+    const raw = STRATEGY.SL_MAX_WIN_MULTIPLE * tpDist - feePerUnit;
+    // When the fixed-$ fee exceeds multiple×TP (calm market, TP near its floor), `raw`
+    // goes negative. Falling through to the bare tick floor (_cfg.slMinTicks*tick, e.g.
+    // $0.05 on gold) put the stop inside normal bid/ask noise — a 34-trade audit on
+    // 2026-07-06 found 7/20 losses (35%) closing in 3-20s at exactly that floor, on a
+    // $0.50 TP: not bad signals, just a stop too tight to survive a tick of noise.
+    // Floor at tpDist instead (never tighter than the target itself); loss-ratio still
+    // floats above SL_MAX_WIN_MULTIPLE here (≈4x at $0.50 TP with a $1.67 fee), matching
+    // the originally observed/intended "~3-4x on small TP" behavior documented above.
+    const floor = Math.max(_cfg.slMinTicks * _cfg.tick, tpDist);
     return tickRound(Math.max(raw, floor));
 }
 
