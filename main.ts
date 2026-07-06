@@ -181,7 +181,7 @@ function logTradeEntry(
         id, phase: 'entry', symbol: md.symbol, direction: signal.direction,
         entrySignalAt: new Date().toISOString(), entryPrice, tpPrice, slPrice,
         tpMove: +Math.abs(tpPrice - entryPrice).toFixed(4),
-        slMove: +Math.abs(slPrice - entryPrice).toFixed(4),
+        slMove: slPrice ? +Math.abs(slPrice - entryPrice).toFixed(4) : 0,   // slPrice=0 means "no SL" — don't compute a bogus distance to price 0
         spotPrice: md.price, bid: md.bid, ask: md.ask,
         spread: +ind.spreadUsd.toFixed(3), atr5m: +ind.atr5m.toFixed(4),
         rsi: +ind.rsi.toFixed(1), adx: +ind.adx.toFixed(1),
