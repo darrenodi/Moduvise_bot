@@ -595,12 +595,10 @@ console.log(`\n${'═'.repeat(70)}`);
 console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
 console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
 const _tpUsd = Number(process.env.TP_MIN_USD ?? 4.00);
-const _slUsd = Number(process.env.SL_FIXED_USD ?? 1.00);
-const _feeEst = 1.67;   // ~takerFeeRate x gold price, for the banner estimate only
-const _breakeven = (_slUsd + _feeEst) / (_tpUsd + _slUsd + _feeEst) * 100;
+console.log(`  ENTRY    : TAKER/MARKET, follows momentum immediately (~0.04% fee every trade)`);
 console.log(`  TP       : FIXED $${_tpUsd.toFixed(2)} price move, post-only maker, 0 fee`);
-console.log(`  SL       : FIXED $${_slUsd.toFixed(2)} price move, stop-market, taker fee only when it fires`);
-console.log(`  BREAKEVEN: ~${_breakeven.toFixed(1)}% WR (reward:risk ${(_tpUsd/_slUsd).toFixed(1)}:1 chosen so this sits below the bot's measured ~44-50% signal WR)`);
+console.log(`  SL       : NONE — position rides until TP fills, the 90min time-stop scratches it, or liquidation. User's explicit instruction, 2026-07-06.`);
+console.log(`  RISK     : ⚠️  unbounded per-trade loss at ${_lev}x — this is the exact shape that liquidated the account 3x before this was reinstated`);
 console.log(`  GATES    : flow 5s+60s | funding | OI surge | daily break + news blackout | weekend trading ALLOWED`);
 console.log(`  EXIT     : maker TP or stop-market SL resolve the bracket | time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min (hygiene only)`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);

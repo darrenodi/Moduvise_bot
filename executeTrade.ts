@@ -13,24 +13,21 @@ const API_KEY    = IS_DEMO ? (process.env.BINANCE_BOT_API    ?? '') : (process.e
 const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.env.BINANCE_API_SECRET ?? '');
 
 // ─── PER-SYMBOL CONFIGURATION ─────────────────────────────────────────────────
-// TP is a fixed $0.50 price move (TP_MIN_USD — the "win" unit, see calcTpDistance).
-// SL is a fixed MARGIN-ROI stop, independent of TP (user decision, 2026-07-06):
-//   slDist = entry × (SL_ROI_PCT/100) / leverage     [default SL_ROI_PCT=70]
-// i.e. the stop fires at a 70% loss of the trade's margin, regardless of price
-// level or TP size — wide enough to ride out normal noise around the tiny TP,
-// short of the ~100% liquidation threshold. See calcSlDistance.
-//   long  entry E → TP = E + tpDist, SL = E − slDist
-//   short entry E → TP = E − tpDist, SL = E + slDist
-// Override per run with env TP_MIN_USD / SL_ROI_PCT.
+// TP is a fixed $4 price move (TP_MIN_USD — the "win" unit, see calcTpDistance).
+// There is NO stop loss (user's explicit, repeated instruction, 2026-07-06) —
+// entry is a TAKER market order (follows momentum immediately, guaranteed fill),
+// exit is a maker post-only TP; a losing position rides until TP fills, the
+// 90min time-stop scratches it, or Binance liquidates it. See the order-flow
+// comment above executeBinanceTrade for the full risk disclosure.
+//   long  entry E → TP = E + tpDist
+//   short entry E → TP = E − tpDist
+// Override per run with env TP_MIN_USD.
 //
 // Per-asset tick-based tuning:
-//   entryOffsetTicks : how far inside bid/ask the maker entry sits
-//   slLimitTicks     : how far the stop-limit LIMIT price sits beyond the trigger
+//   entryOffsetTicks : unused now (taker entry has no pullback); kept for reference
+//   slLimitTicks     : unused now (no SL order)
 //   tp2OffsetTicks   : TP2 rescue offset from entry
 //   tpMinTicks/slMinTicks : floor so a distance is never sub-tick
-//
-// TP is a maker post-only limit (0 fee). SL is an Algo CONDITIONAL STOP_MARKET —
-// guaranteed fill, taker (~0.04%) only when it fires.
 
 interface SymbolConfig {
     tick:             number;   // minimum price increment
@@ -88,7 +85,7 @@ function getConfig(symbol: string): SymbolConfig {
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
         lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
-    // Default: XAUUSDT — TP fixed $0.50, SL fixed at SL_ROI_PCT% of margin (see calcSlDistance)
+    // Default: XAUUSDT — TP fixed $4, TAKER entry, NO SL (see calcTpDistance / executeBinanceTrade)
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 10.00,
@@ -511,37 +508,35 @@ export function calcSize(price: number): number {
     return size;
 }
 
-// ─── TP / SL CALCULATION ────────────────────────────────────────────────────
-// TP/SL GEOMETRY (2026-07-06, commit after 0394863) — chosen from the breakeven
-// math, not guessed: breakeven WR = (SL+fee)/(TP+SL+fee). Every shape tried this
-// week computed HIGHER than the bot's actual measured win rate (~44-50% across a
-// 34-trade audit, flat across regime/imbalance/trend-alignment — signal quality is
-// the real ceiling, not bracket shape): $10/$10 -> 53.8%, old 2x-TP-cap -> 66.7%,
-// $0.50/$0.50 (fee-dominated) -> 81.3%, and the 70%-margin-SL config -> 98.4% (at
-// 100x, ~$29 SL vs $0.50 TP — mathematically unwinnable, should have been flagged
-// before deploying it). TP=$4/SL=$1 is the first shape where breakeven (~40%) sits
-// BELOW the measured win rate, i.e. reward:risk does the work instead of needing a
-// win rate the signal doesn't have. Leverage (100x) does not affect this math at
-// all — it's a margin-risk-% knob, not a win-rate knob.
+// ─── TP CALCULATION ──────────────────────────────────────────────────────────
+// TP is a fixed $4 price move (env TP_MIN_USD). NO SL exists (user's explicit,
+// repeated instruction, 2026-07-06) — see the order-flow comment below for the
+// full risk disclosure. Breakeven here isn't a fixed ratio: every winning trade
+// nets ~$4 minus the taker entry fee; every losing trade rides until either TP
+// eventually fills, the 90min time-stop scratches it, or Binance liquidates the
+// position — there's no bounded per-trade loss to compute a breakeven WR from.
 function calcTpDistance(_atr5m: number): number {
     const fixedUsd = Number(process.env.TP_MIN_USD ?? 4.00);
     const floor    = Math.max(fixedUsd, _cfg.tpMinTicks * _cfg.tick);
     return tickRound(floor);
 }
 
-function calcSlDistance(_entry: number): number {
-    const fixedUsd = Number(process.env.SL_FIXED_USD ?? 1.00);
-    const floor    = _cfg.slMinTicks * _cfg.tick;
-    return tickRound(Math.max(fixedUsd, floor));
-}
-
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
-// Order flow:
-//   1. GTX limit entry           → maker, pullback; cancels if it would be taker
-//   2. GTX limit TP              → post-only maker (0 fee)
-//   3. Algo CONDITIONAL STOP_MARKET → guaranteed-fill stop; taker (~0.04%) only when
-//                                     it fires, to CAP the loss (vs riding to liquidation)
-//   Entry + TP + SL all placed within seconds of fill; no position lives without both.
+// Order flow (user decision, 2026-07-06 — "follow momentum and enter as taker...
+// exit at $4 price move in gold and no stop loss at all"):
+//   1. MARKET entry   → TAKER, fills instantly in the signal's direction (no chase,
+//                       no missed-fill risk — the tradeoff is the ~0.04% entry fee,
+//                       paid on every trade, win or lose)
+//   2. GTX limit TP   → post-only maker (0 fee), fixed $4 price move
+//   3. NO STOP LOSS   → the position rides until TP fills. Nothing bounds the loss
+//                       on an adverse move except Binance's own liquidation at
+//                       ~-100% margin. This is the exact shape that liquidated the
+//                       account 3x before (see [[tp-sl-margin-roi-decision]],
+//                       "LIQUIDATION 2026-07-01" / "STOP-LOSS RESTORED") — reinstated
+//                       here on the user's explicit, repeated instruction. The
+//                       90min time-stop (maxHoldMs) is the only remaining backstop,
+//                       and it only helps a slow-drifting loss — a fast adverse move
+//                       liquidates before the timer ever gets a chance to fire.
 export async function executeBinanceTrade(
     signal:          GeneratedSignal,
     _tradingBalance: number,
@@ -594,91 +589,42 @@ export async function executeBinanceTrade(
             await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
         } catch { /* already set */ }
 
-        // CHASE-TO-FILL entry — data showed the old "one pullback + one retry"
-        // approach (≤10s total) had only a ~6% fill rate (741 attempts, 44 fills)
-        // in a fast-moving market: passive orders simply didn't get enough chances
-        // to be touched. Fix: keep re-quoting at the CURRENT best bid/ask (never
-        // crossing — always GTX/maker) for a bounded total time budget, instead of
-        // giving up after one or two tries. First quote still uses the preferred
-        // small pullback (better price if it lands); every quote after that joins
-        // the live touch directly so it has a real chance of being hit.
-        const pull = Number(process.env.ENTRY_PULLBACK_TICKS ?? _cfg.entryOffsetTicks) * _cfg.tick;
-        const rawEntry   = isBuy
-            ? liveBid - pull   // buy the dip
-            : liveAsk + pull;  // sell the bounce
-        const firstPrice = tickRound(rawEntry);
-        const size       = calcSize(firstPrice);
+        // TAKER MARKET entry — follows momentum immediately in the signal's direction,
+        // no chase/no-fill risk, at the cost of a guaranteed ~0.04% entry fee.
+        const estPrice = isBuy ? liveAsk : liveBid;
+        const size     = calcSize(estPrice);
 
-        console.log(`[Entry] 🟢 ${STRATEGY.SYMBOL} ${direction.toUpperCase()} | entry=$${firstPrice.toFixed(_cfg.priceDp)} size=${size} | bid=$${liveBid.toFixed(_cfg.priceDp)} ask=$${liveAsk.toFixed(_cfg.priceDp)}`);
+        console.log(`[Entry] 🟢 ${STRATEGY.SYMBOL} ${direction.toUpperCase()} (TAKER/MARKET) | size=${size} | bid=$${liveBid.toFixed(_cfg.priceDp)} ask=$${liveAsk.toFixed(_cfg.priceDp)}`);
 
-        // Places one GTX quote and waits up to waitMs for it to fill, with the
-        // fill-race-safe cancel pattern (re-check before AND after cancelling so
-        // we never orphan a fill that landed right at the boundary).
-        async function quoteAndWait(price: number): Promise<{ filled: boolean; avgPrice?: number; rejectedCode?: number }> {
-            const order = await privatePost('/fapi/v1/order', {
-                symbol: STRATEGY.SYMBOL, side, type: 'LIMIT', timeInForce: 'GTX',
-                price: price.toFixed(_cfg.priceDp), quantity: size.toFixed(_cfg.qtyDp),
-            });
-            if (!order?.orderId) return { filled: false, rejectedCode: order?.code };
-
-            const waitMs = Number(process.env.ENTRY_CHASE_POLL_MS ?? 1_500);
-            const start  = Date.now();
-            while (Date.now() - start < waitMs) {
-                await new Promise(r => setTimeout(r, STRATEGY.FILL_POLL_MS));
-                const check = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId });
-                if (check.status === 'FILLED') return { filled: true, avgPrice: Number(check.avgPrice ?? price) };
-                if (check.status === 'CANCELED' || check.status === 'EXPIRED') break;
+        const fillStart = Date.now();
+        const order = await privatePost('/fapi/v1/order', {
+            symbol: STRATEGY.SYMBOL, side, type: 'MARKET', quantity: size.toFixed(_cfg.qtyDp),
+        });
+        if (!order?.orderId) {
+            if (order?.code === -2019) {
+                return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${JSON.stringify(order)}` };
             }
-            const finalCheck = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId }).catch(() => null);
-            if (finalCheck?.status === 'FILLED') return { filled: true, avgPrice: Number(finalCheck.avgPrice ?? price) };
-            await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId }).catch(() => {});
-            const postCancel = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId }).catch(() => null);
-            if (postCancel?.status === 'FILLED') return { filled: true, avgPrice: Number(postCancel.avgPrice ?? price) };
-            return { filled: false };
+            return { success: false, outcome: 'skipped', message: `TAKER entry rejected: ${JSON.stringify(order)}` };
         }
 
-        const fillStart      = Date.now();
-        const chaseTotalMs    = Number(process.env.ENTRY_CHASE_TOTAL_MS ?? 20_000);
-        let   filled          = false;
-        let   actualEntry     = firstPrice;
-        let   requotes        = 0;
-
-        let result = await quoteAndWait(firstPrice);
-        if (result.filled) { filled = true; actualEntry = result.avgPrice ?? firstPrice; }
-        if (!filled && result.rejectedCode === -2019) {
-            return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${JSON.stringify(result)}` };
+        let actualEntry = Number(order.avgPrice) || 0;
+        for (let i = 0; i < 5 && !actualEntry; i++) {
+            await new Promise(r => setTimeout(r, 300));
+            const check = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId });
+            if (check.status === 'FILLED') actualEntry = Number(check.avgPrice);
         }
-
-        while (!filled && Date.now() - fillStart < chaseTotalMs) {
-            requotes++;
-            const bt = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
-            const touchPrice = tickRound(isBuy ? Number(bt.bidPrice) : Number(bt.askPrice));
-            if (requotes === 1) console.log(`[Entry] ⏱ Chasing touch $${touchPrice.toFixed(_cfg.priceDp)} (budget ${((chaseTotalMs - (Date.now() - fillStart)) / 1000).toFixed(0)}s left)`);
-            result = await quoteAndWait(touchPrice);
-            if (result.filled) { filled = true; actualEntry = result.avgPrice ?? touchPrice; }
-            if (!filled && result.rejectedCode === -2019) {
-                return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${JSON.stringify(result)}` };
-            }
+        if (!actualEntry) {
+            return { success: false, outcome: 'error', message: `Market entry placed (orderId=${order.orderId}) but avgPrice never resolved.` };
         }
-
-        if (!filled) {
-            return { success: false, outcome: 'skipped', message: `Entry not filled after ${requotes} requotes over ${((Date.now() - fillStart) / 1000).toFixed(0)}s.` };
-        }
-
         const fillMs = Date.now() - fillStart;
-        if (requotes > 0) console.log(`[Entry] ✅ Filled after ${requotes} requote(s)`);
 
-        // ── Calculate TP (maker, ATR-adaptive) and SL (stop-market, capped at N
-        //    wins) prices ──────────────────────────────────────────────────────
+        // ── Calculate TP (maker, fixed $4 price move) — NO SL ────────────────────
         const takerFeeRate = await getTakerFeeRate();
         const feePerUnit = takerFeeRate * actualEntry;
         const tpDist  = calcTpDistance(signal.atr5m);
-        const slDist  = calcSlDistance(actualEntry);
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
-        const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
-        const realizedLossWins = (slDist + feePerUnit) / tpDist;
-        console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | SL=$${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)}, ${realizedLossWins.toFixed(2)}x wins incl. fee) | fillTime=${fillMs}ms`);
+        console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | NO SL | entry fee≈$${feePerUnit.toFixed(4)}/unit | fillTime=${fillMs}ms`);
 
         // ── 2. TP limit order — POST-ONLY (GTX), never taker ─────────────────
         // MUST succeed — no TP = uncontrolled position. If price has already run
@@ -724,52 +670,14 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'error', message: 'TP failed, emergency closed.' };
         }
 
-        // ── 3. SL — Algo CONDITIONAL STOP_MARKET (caps the loss) ──────────────
-        // Guaranteed-fill stop: on trigger it market-closes (taker ~0.04%). That
-        // tiny taker cost is the price of bounding the loss to ~slDist instead of
-        // riding to a 100%-of-margin liquidation. Placed via the Algo endpoint
-        // (plain STOP on /fapi/v1/order is rejected -4120). slOrderId is an algoId.
-        let slOrderId = 0;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-            try {
-                const slRes = await privatePost('/fapi/v1/algoOrder', {
-                    symbol:       STRATEGY.SYMBOL,
-                    side:         closeSide,
-                    algoType:     'CONDITIONAL',
-                    type:         'STOP_MARKET',
-                    quantity:     size.toFixed(_cfg.qtyDp),
-                    triggerPrice: slPrice.toFixed(_cfg.priceDp),
-                    workingType:  'MARK_PRICE',
-                    reduceOnly:   'true',
-                });
-                if (slRes?.algoId) {
-                    slOrderId = slRes.algoId;
-                    console.log(`[SL] ✅ Stop-Market trigger=$${slPrice.toFixed(_cfg.priceDp)} | algoId=${slOrderId}`);
-                    break;
-                }
-                console.error(`[SL] ❌ Attempt ${attempt}: ${JSON.stringify(slRes)}`);
-                if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));
-            } catch (e: any) {
-                console.error(`[SL] ❌ Attempt ${attempt} threw: ${e.message}`);
-                if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));
-            }
-        }
-
-        if (!slOrderId) {
-            // Can't protect the position — cancel TP and flatten (taker) rather than
-            // carry unbounded risk. Bounded loss is the whole point now.
-            console.error(`[SL] ❌ ALL ATTEMPTS FAILED — cancelling TP and closing`);
-            await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: tpOrderId }).catch(() => {});
-            await sendAlert(`🚨 ${STRATEGY.SYMBOL} SL failed — closing to avoid unbounded risk!`);
-            await triggerEmergencyClose(direction, size, 'SL placement total failure');
-            return { success: false, outcome: 'error', message: 'SL failed, closed.' };
-        }
-
-        // ── Lock active trade state ───────────────────────────────────────────
+        // ── Lock active trade state — NO SL (user's explicit instruction) ────────
+        // slPrice/slOrderId kept as 0/undefined for type compatibility; downstream
+        // outcome detection (checkPositionHealth in main.ts) determines tp/sl by
+        // realized PnL sign, not by these fields, so this is safe.
         _activeTrade = {
             entryPrice:  actualEntry,
             tpPrice,
-            slPrice,
+            slPrice:     0,
             side:        direction,
             size,
             margin:      Number(process.env.MARGIN_PER_TRADE ?? STRATEGY.MARGIN_PER_TRADE),
@@ -777,13 +685,13 @@ export async function executeBinanceTrade(
             leverage,
             openedAt:    Date.now(),
             tpOrderId,
-            slOrderId,
+            slOrderId:   undefined,
             tp2Phase:    false,
         };
 
         await sendAlert(
-            `✅ ${STRATEGY.SYMBOL} ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)}\n` +
-            `TP: $${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | SL: $${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)})\n` +
+            `✅ ${STRATEGY.SYMBOL} ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} (TAKER)\n` +
+            `TP: $${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | NO SL\n` +
             `Size: ${size} | Margin: $${Number(process.env.MARGIN_PER_TRADE ?? 1).toFixed(2)}`
         );
 
@@ -792,7 +700,7 @@ export async function executeBinanceTrade(
             outcome:     'orders_placed',
             entryPrice:  actualEntry,
             tpPrice,
-            slPrice,
+            slPrice:     0,
             grossProfit: size * tpDist,
             fillTimeMs:  fillMs,
         };
