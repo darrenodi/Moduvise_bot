@@ -516,32 +516,17 @@ export function calcSize(price: number): number {
 }
 
 // ─── TP / SL CALCULATION ────────────────────────────────────────────────────
-// TP is ADAPTIVE to live volatility: TP ≈ TP_ATR_MULT × current 5m ATR, clamped
-// to [TP_MIN_USD, TP_MAX_USD]. Scaling with ATR keeps the target "about one
-// normal candle away" so trades resolve quickly at any pace — including quiet
-// ones, which is the point: this is a HIGH-FREQUENCY scalper, and it must keep
-// trading through calm stretches, not go dark waiting for volatility.
-//
-// FREQUENCY-VS-CAP TRADE-OFF (explicit user decision, 2026-07-05): the taker fee
-// is a fixed $ amount per unit qty (rate × price), NOT scaled by TP. When TP is
-// genuinely tiny (quiet market), fee alone can exceed (multiple-1)×TP, so
-// "loss+fee == exactly `multiple` wins" has no valid solution — a version of
-// this code used to force TP UP to preserve that exact ratio, which made the
-// bot sit idle for hours whenever the market was calm (defeats "high-frequency
-// scalping"). User chose frequency: TP is now allowed to shrink to its real
-// tick floor in calm markets, and the realized loss-per-win ratio FLOATS ABOVE
-// `multiple` specifically in those low-TP trades (observed ~3-4x at a $0.50 TP
-// on gold, vs. exactly 2x when TP is large enough that the fee is negligible
-// by comparison). This is disclosed, bounded by TP_MIN_USD (not unbounded), and
-// intentional — do not reintroduce a fee-aware TP floor without asking first.
-function calcTpDistance(atr5m: number): number {
-    const mult      = Number(process.env.TP_ATR_MULT ?? 1.0);
-    const configMin = Number(process.env.TP_MIN_USD   ?? 0.50);
-    const maxUsd    = Number(process.env.TP_MAX_USD   ?? 15.00);
-    const floor = Math.max(configMin, _cfg.tpMinTicks * _cfg.tick);
-    const atrBased = atr5m > 0 ? atr5m * mult : STRATEGY.TP_FIXED_USD;
-    const clamped  = Math.min(Math.max(atrBased, floor), maxUsd);
-    return tickRound(clamped);
+// TP is a FIXED $0.50 price move on gold (user decision, 2026-07-06 — ATR-adaptive
+// scaling let TP (and therefore the derived SL) balloon during volatile stretches,
+// producing double-digit % margin swings mid-trade that the user rejected outright
+// ("nauseating ... just target $0.5 price change"). No ATR multiplier, no ceiling
+// to chase — every trade targets the same $0.50 move, so risk stays predictable
+// trade-to-trade regardless of how fast gold is moving. Env `TP_MIN_USD` still
+// overrides the constant if it ever needs tuning.
+function calcTpDistance(_atr5m: number): number {
+    const fixedUsd = Number(process.env.TP_MIN_USD ?? 0.50);
+    const floor    = Math.max(fixedUsd, _cfg.tpMinTicks * _cfg.tick);
+    return tickRound(floor);
 }
 
 function calcSlDistance(tpDist: number, feePerUnit: number): number {
