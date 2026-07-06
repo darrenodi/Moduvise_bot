@@ -140,9 +140,8 @@ const STRATEGY = {
     get TP_FIXED_USD()       { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
     get SL_MAX_WIN_MULTIPLE() { return Number(process.env.SL_MAX_WIN_MULTIPLE ?? 2); },
 
-    // Maker entry should fill fast or be abandoned (keeps REST polling cheap).
-    get FILL_TIMEOUT() { return Number(process.env.FILL_TIMEOUT_MS ?? 6_000); },
-    get FILL_POLL_MS() { return Number(process.env.FILL_POLL_MS    ?? 1_000); },
+    // Fill-poll interval used by the chase-to-fill entry loop below.
+    get FILL_POLL_MS() { return Number(process.env.FILL_POLL_MS ?? 1_000); },
     MIN_NOTIONAL: 5.0,
 };
 
@@ -610,102 +609,79 @@ export async function executeBinanceTrade(
             await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
         } catch { /* already set */ }
 
-        // PULLBACK entry — wait for a small retracement against the pre-entry move,
-        // then enter in the signal's direction: buy on a DIP (below bid), sell on a
-        // BOUNCE (above ask). We fill at a better price, positioned for the move
-        // toward TP instead of chasing. Maker via GTX (cancels if it would cross).
+        // CHASE-TO-FILL entry — data showed the old "one pullback + one retry"
+        // approach (≤10s total) had only a ~6% fill rate (741 attempts, 44 fills)
+        // in a fast-moving market: passive orders simply didn't get enough chances
+        // to be touched. Fix: keep re-quoting at the CURRENT best bid/ask (never
+        // crossing — always GTX/maker) for a bounded total time budget, instead of
+        // giving up after one or two tries. First quote still uses the preferred
+        // small pullback (better price if it lands); every quote after that joins
+        // the live touch directly so it has a real chance of being hit.
         const pull = Number(process.env.ENTRY_PULLBACK_TICKS ?? _cfg.entryOffsetTicks) * _cfg.tick;
         const rawEntry   = isBuy
             ? liveBid - pull   // buy the dip
             : liveAsk + pull;  // sell the bounce
-        const entryPrice = tickRound(rawEntry);
-        const size       = calcSize(entryPrice);
+        const firstPrice = tickRound(rawEntry);
+        const size       = calcSize(firstPrice);
 
-        console.log(`[Entry] 🟢 ${STRATEGY.SYMBOL} ${direction.toUpperCase()} | entry=$${entryPrice.toFixed(_cfg.priceDp)} size=${size} | bid=$${liveBid.toFixed(_cfg.priceDp)} ask=$${liveAsk.toFixed(_cfg.priceDp)}`);
+        console.log(`[Entry] 🟢 ${STRATEGY.SYMBOL} ${direction.toUpperCase()} | entry=$${firstPrice.toFixed(_cfg.priceDp)} size=${size} | bid=$${liveBid.toFixed(_cfg.priceDp)} ask=$${liveAsk.toFixed(_cfg.priceDp)}`);
 
-        // ── 1. GTX maker entry ────────────────────────────────────────────────
-        const entryOrder = await privatePost('/fapi/v1/order', {
-            symbol:      STRATEGY.SYMBOL,
-            side,
-            type:        'LIMIT',
-            timeInForce: 'GTX',   // Post-Only: cancels if would be taker
-            price:       entryPrice.toFixed(_cfg.priceDp),
-            quantity:    size.toFixed(_cfg.qtyDp),
-        });
+        // Places one GTX quote and waits up to waitMs for it to fill, with the
+        // fill-race-safe cancel pattern (re-check before AND after cancelling so
+        // we never orphan a fill that landed right at the boundary).
+        async function quoteAndWait(price: number): Promise<{ filled: boolean; avgPrice?: number; rejectedCode?: number }> {
+            const order = await privatePost('/fapi/v1/order', {
+                symbol: STRATEGY.SYMBOL, side, type: 'LIMIT', timeInForce: 'GTX',
+                price: price.toFixed(_cfg.priceDp), quantity: size.toFixed(_cfg.qtyDp),
+            });
+            if (!order?.orderId) return { filled: false, rejectedCode: order?.code };
 
-        if (!entryOrder?.orderId) {
-            const msg = JSON.stringify(entryOrder);
-            if (entryOrder?.code === -2019) return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${msg}` };
-            if (entryOrder?.code === -5022) return { success: false, outcome: 'skipped', message: `GTX cancelled (would be taker)` };
-            return { success: false, outcome: 'error', message: `Entry rejected: ${msg}` };
+            const waitMs = Number(process.env.ENTRY_CHASE_POLL_MS ?? 1_500);
+            const start  = Date.now();
+            while (Date.now() - start < waitMs) {
+                await new Promise(r => setTimeout(r, STRATEGY.FILL_POLL_MS));
+                const check = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId });
+                if (check.status === 'FILLED') return { filled: true, avgPrice: Number(check.avgPrice ?? price) };
+                if (check.status === 'CANCELED' || check.status === 'EXPIRED') break;
+            }
+            const finalCheck = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId }).catch(() => null);
+            if (finalCheck?.status === 'FILLED') return { filled: true, avgPrice: Number(finalCheck.avgPrice ?? price) };
+            await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId }).catch(() => {});
+            const postCancel = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId }).catch(() => null);
+            if (postCancel?.status === 'FILLED') return { filled: true, avgPrice: Number(postCancel.avgPrice ?? price) };
+            return { filled: false };
         }
 
-        // Poll for fill (bounded by FILL_TIMEOUT — short, to keep REST cheap)
-        const fillStart   = Date.now();
-        let   filled      = false;
-        let   actualEntry = entryPrice;
-        while (Date.now() - fillStart < STRATEGY.FILL_TIMEOUT) {
-            await new Promise(r => setTimeout(r, STRATEGY.FILL_POLL_MS));
-            const check = await privateGet('/fapi/v1/order', {
-                symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId,
-            });
-            if (check.status === 'FILLED') {
-                filled      = true;
-                actualEntry = Number(check.avgPrice ?? entryPrice);
-                break;
+        const fillStart      = Date.now();
+        const chaseTotalMs    = Number(process.env.ENTRY_CHASE_TOTAL_MS ?? 20_000);
+        let   filled          = false;
+        let   actualEntry     = firstPrice;
+        let   requotes        = 0;
+
+        let result = await quoteAndWait(firstPrice);
+        if (result.filled) { filled = true; actualEntry = result.avgPrice ?? firstPrice; }
+        if (!filled && result.rejectedCode === -2019) {
+            return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${JSON.stringify(result)}` };
+        }
+
+        while (!filled && Date.now() - fillStart < chaseTotalMs) {
+            requotes++;
+            const bt = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
+            const touchPrice = tickRound(isBuy ? Number(bt.bidPrice) : Number(bt.askPrice));
+            if (requotes === 1) console.log(`[Entry] ⏱ Chasing touch $${touchPrice.toFixed(_cfg.priceDp)} (budget ${((chaseTotalMs - (Date.now() - fillStart)) / 1000).toFixed(0)}s left)`);
+            result = await quoteAndWait(touchPrice);
+            if (result.filled) { filled = true; actualEntry = result.avgPrice ?? touchPrice; }
+            if (!filled && result.rejectedCode === -2019) {
+                return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${JSON.stringify(result)}` };
             }
-            if (check.status === 'CANCELED' || check.status === 'EXPIRED') break;
         }
 
         if (!filled) {
-            // The order may have filled right at the buzzer. Re-query authoritatively
-            // BEFORE giving up — otherwise we'd cancel a filled order and leave a
-            // naked position with no TP/SL.
-            const finalCheck = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }).catch(() => null);
-            if (finalCheck?.status === 'FILLED') {
-                filled = true; actualEntry = Number(finalCheck.avgPrice ?? entryPrice);
-            } else {
-                await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }).catch(() => {});
-                // The cancel itself can race a fill — verify once more after cancelling.
-                const postCancel = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: entryOrder.orderId }).catch(() => null);
-                if (postCancel?.status === 'FILLED') {
-                    filled = true; actualEntry = Number(postCancel.avgPrice ?? entryPrice);
-                } else {
-                    // Pullback never got touched (static book — the bid/ask didn't move
-                    // enough within FILL_TIMEOUT). Rather than give up for the whole
-                    // cycle, make ONE bounded follow-up attempt right at the current
-                    // touch — still GTX/maker (cancels if it would cross), just no
-                    // retracement required. This is what actually gets fills in a quiet
-                    // book instead of retrying the same unreachable price every cycle.
-                    const bt = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
-                    const touchPrice = tickRound(isBuy ? Number(bt.bidPrice) : Number(bt.askPrice));
-                    const retryOrder = await privatePost('/fapi/v1/order', {
-                        symbol: STRATEGY.SYMBOL, side, type: 'LIMIT', timeInForce: 'GTX',
-                        price: touchPrice.toFixed(_cfg.priceDp), quantity: size.toFixed(_cfg.qtyDp),
-                    });
-                    if (!retryOrder?.orderId) {
-                        return { success: false, outcome: 'skipped', message: 'Entry not filled within timeout.' };
-                    }
-                    console.log(`[Entry] ⏱ Pullback unfilled — retrying at touch $${touchPrice.toFixed(_cfg.priceDp)} | id=${retryOrder.orderId}`);
-                    const retryStart = Date.now();
-                    const retryWaitMs = Number(process.env.ENTRY_RETRY_WAIT_MS ?? 4_000);
-                    while (Date.now() - retryStart < retryWaitMs) {
-                        await new Promise(r => setTimeout(r, STRATEGY.FILL_POLL_MS));
-                        const retryCheck = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: retryOrder.orderId });
-                        if (retryCheck.status === 'FILLED') { filled = true; actualEntry = Number(retryCheck.avgPrice ?? touchPrice); break; }
-                        if (retryCheck.status === 'CANCELED' || retryCheck.status === 'EXPIRED') break;
-                    }
-                    if (!filled) {
-                        await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: retryOrder.orderId }).catch(() => {});
-                        const retryFinal = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: retryOrder.orderId }).catch(() => null);
-                        if (retryFinal?.status === 'FILLED') { filled = true; actualEntry = Number(retryFinal.avgPrice ?? touchPrice); }
-                        else return { success: false, outcome: 'skipped', message: 'Entry not filled within timeout (incl. touch retry).' };
-                    }
-                }
-            }
+            return { success: false, outcome: 'skipped', message: `Entry not filled after ${requotes} requotes over ${((Date.now() - fillStart) / 1000).toFixed(0)}s.` };
         }
 
         const fillMs = Date.now() - fillStart;
+        if (requotes > 0) console.log(`[Entry] ✅ Filled after ${requotes} requote(s)`);
 
         // ── Calculate TP (maker, ATR-adaptive) and SL (stop-market, capped at N
         //    wins) prices ──────────────────────────────────────────────────────
