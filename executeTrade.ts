@@ -13,17 +13,15 @@ const API_KEY    = IS_DEMO ? (process.env.BINANCE_BOT_API    ?? '') : (process.e
 const API_SECRET = IS_DEMO ? (process.env.BINANCE_BOT_SECRET ?? '') : (process.env.BINANCE_API_SECRET ?? '');
 
 // ─── PER-SYMBOL CONFIGURATION ─────────────────────────────────────────────────
-// TP is a fixed dollar move (tpFixedUsd — the "win" unit). SL is NOT fixed — it's
-// DERIVED from TP so a stop-out (loss + taker fee) never costs more than
-// SL_MAX_WIN_MULTIPLE wins (default 2), while staying as WIDE as that cap allows
-// (so it doesn't get noise-tagged the way a small fixed SL did):
-//   slDist = SL_MAX_WIN_MULTIPLE × tpDist − takerFeeRate × entryPrice
-// This is computed live off the real entry price and the real account taker fee
-// rate (fetched from Binance, see getTakerFeeRate), so the "at most N wins" cap
-// holds exactly regardless of price level, leverage, or TP size.
+// TP is a fixed $0.50 price move (TP_MIN_USD — the "win" unit, see calcTpDistance).
+// SL is a fixed MARGIN-ROI stop, independent of TP (user decision, 2026-07-06):
+//   slDist = entry × (SL_ROI_PCT/100) / leverage     [default SL_ROI_PCT=70]
+// i.e. the stop fires at a 70% loss of the trade's margin, regardless of price
+// level or TP size — wide enough to ride out normal noise around the tiny TP,
+// short of the ~100% liquidation threshold. See calcSlDistance.
 //   long  entry E → TP = E + tpDist, SL = E − slDist
 //   short entry E → TP = E − tpDist, SL = E + slDist
-// Override per run with env TP_FIXED_USD / SL_MAX_WIN_MULTIPLE.
+// Override per run with env TP_MIN_USD / SL_ROI_PCT.
 //
 // Per-asset tick-based tuning:
 //   entryOffsetTicks : how far inside bid/ask the maker entry sits
@@ -90,7 +88,7 @@ function getConfig(symbol: string): SymbolConfig {
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
         lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
-    // Default: XAUUSDT — TP is ATR-adaptive, SL derived to exactly SL_MAX_WIN_MULTIPLE x TP
+    // Default: XAUUSDT — TP fixed $0.50, SL fixed at SL_ROI_PCT% of margin (see calcSlDistance)
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
         maxLeverage: 100, tpFixedUsd: 10.00,
@@ -132,13 +130,11 @@ const STRATEGY = {
         return IS_DEMO ? Math.min(raw, 10) : Math.min(raw, cap);
     },
 
-    // TP is a fixed dollar move. SL is derived so (SL + taker fee) == exactly
-    // SL_MAX_WIN_MULTIPLE × TP — the hard cap on "how many wins does one loss
-    // cost" the user asked for (default 2). This replaces two earlier designs
-    // that both failed: fixed-tiny-SL (noise-tagged constantly) and
-    // margin-ROI-SL (one loss = ~30-40 wins, unbounded relative to TP).
+    // TP is a fixed $0.50 price move; SL is a fixed 70%-of-margin ROI stop, set
+    // independently (user decision, 2026-07-06, with 100x leverage). Loss-per-win
+    // ratio is large and floating by design here — the user explicitly traded
+    // "capped loss ratio" for "simple, predictable, wide-enough-to-avoid-noise SL".
     get TP_FIXED_USD()       { return Number(process.env.TP_FIXED_USD ?? _cfg.tpFixedUsd); },
-    get SL_MAX_WIN_MULTIPLE() { return Number(process.env.SL_MAX_WIN_MULTIPLE ?? 2); },
 
     // Fill-poll interval used by the chase-to-fill entry loop below.
     get FILL_POLL_MS() { return Number(process.env.FILL_POLL_MS ?? 1_000); },
@@ -529,17 +525,18 @@ function calcTpDistance(_atr5m: number): number {
     return tickRound(floor);
 }
 
-function calcSlDistance(tpDist: number, feePerUnit: number): number {
-    const raw = STRATEGY.SL_MAX_WIN_MULTIPLE * tpDist - feePerUnit;
-    // When the fixed-$ fee exceeds multiple×TP (calm market, TP near its floor), `raw`
-    // goes negative. Falling through to the bare tick floor (_cfg.slMinTicks*tick, e.g.
-    // $0.05 on gold) put the stop inside normal bid/ask noise — a 34-trade audit on
-    // 2026-07-06 found 7/20 losses (35%) closing in 3-20s at exactly that floor, on a
-    // $0.50 TP: not bad signals, just a stop too tight to survive a tick of noise.
-    // Floor at tpDist instead (never tighter than the target itself); loss-ratio still
-    // floats above SL_MAX_WIN_MULTIPLE here (≈4x at $0.50 TP with a $1.67 fee), matching
-    // the originally observed/intended "~3-4x on small TP" behavior documented above.
-    const floor = Math.max(_cfg.slMinTicks * _cfg.tick, tpDist);
+// SL is now a fixed MARGIN-ROI stop (user decision, 2026-07-06), decoupled from TP
+// entirely: `entry * (SL_ROI_PCT/100) / leverage`, env `SL_ROI_PCT` default 70 — i.e.
+// the stop fires at a 70% loss of the trade's margin. At 100x leverage that's a
+// 0.7% price move (~$29 on $4180 gold): wide enough to ride out normal noise around
+// the $0.50 TP (the earlier TP-derived SL floor collapsed to as little as $0.05 in
+// the fee-dominated case, which is what caused the instant noise-stops fixed above),
+// while still stopping well short of liquidation (100x liquidates near -100% margin).
+function calcSlDistance(entry: number): number {
+    const roiPct   = Number(process.env.SL_ROI_PCT ?? 70);
+    const leverage = STRATEGY.LEVERAGE;
+    const raw      = entry * (roiPct / 100) / leverage;
+    const floor    = _cfg.slMinTicks * _cfg.tick;
     return tickRound(Math.max(raw, floor));
 }
 
@@ -681,7 +678,7 @@ export async function executeBinanceTrade(
         const takerFeeRate = await getTakerFeeRate();
         const feePerUnit = takerFeeRate * actualEntry;
         const tpDist  = calcTpDistance(signal.atr5m);
-        const slDist  = calcSlDistance(tpDist, feePerUnit);
+        const slDist  = calcSlDistance(actualEntry);
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
