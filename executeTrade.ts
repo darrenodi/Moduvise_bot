@@ -369,6 +369,14 @@ export async function getRealizedPnlSince(sinceMs: number): Promise<{ pnl: numbe
             startTime: sinceMs,
             limit:     50,
         });
+        // realizedPnl on userTrades EXCLUDES commission (it's a separate field per
+        // fill). With maker-everything that was fine (0 fee); with taker entries
+        // every trade pays ~0.04% that was silently missing from logged PnL — the
+        // bot credited wins ~40% larger than the wallet actually received, and the
+        // bankroll compounded numbers that didn't exist (found 2026-07-07: log said
+        // +$0.083 while the wallet dropped $0.12 over the same 19 trades).
+        const netPnl = (rows: any[]) => rows.reduce((s: number, t: any) =>
+            s + Number(t.realizedPnl ?? 0) - (t.commissionAsset === 'USDT' ? Number(t.commission ?? 0) : 0), 0);
         if (!Array.isArray(data) || !data.length) {
             // Retry with broader window for clock skew
             const data2 = await privateGet('/fapi/v1/userTrades', {
@@ -377,12 +385,12 @@ export async function getRealizedPnlSince(sinceMs: number): Promise<{ pnl: numbe
                 limit:     50,
             });
             if (!Array.isArray(data2) || !data2.length) return null;
-            const pnl2 = data2.reduce((s: number, t: any) => s + Number(t.realizedPnl ?? 0), 0);
-            console.log(`[PnL] ${data2.length} trades (broad) | PnL: $${pnl2.toFixed(6)}`);
+            const pnl2 = netPnl(data2);
+            console.log(`[PnL] ${data2.length} trades (broad) | PnL net of fees: $${pnl2.toFixed(6)}`);
             return { pnl: pnl2, trades: data2.length };
         }
-        const pnl = data.reduce((s: number, t: any) => s + Number(t.realizedPnl ?? 0), 0);
-        console.log(`[PnL] ${data.length} trades | PnL: $${pnl.toFixed(6)}`);
+        const pnl = netPnl(data);
+        console.log(`[PnL] ${data.length} trades | PnL net of fees: $${pnl.toFixed(6)}`);
         return { pnl, trades: data.length };
     } catch (e: any) {
         console.error(`[PnL] Failed: ${e.message}`);
