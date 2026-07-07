@@ -164,6 +164,7 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 const RSI_OVERBOUGHT    = Number(process.env.RSI_OVERBOUGHT    ?? 75);    // don't buy exhausted tops (no-SL killer)
 const RSI_OVERSOLD      = Number(process.env.RSI_OVERSOLD      ?? 25);    // don't sell exhausted bottoms (RSI 22.2 short liquidated us)
 const FLOW_1M_AGAINST   = Number(process.env.FLOW_1M_AGAINST   ?? 1.3);   // block if 60s cumulative flow opposes by more than this ratio
+const VWAP_EXT_MAX_PCT  = Number(process.env.VWAP_EXT_MAX_PCT  ?? 0.0);   // max % price may be stretched PAST VWAP in the trade's direction (0 = enter at/behind value only)
 // Was 'true' by default (blocks Asia/off-hours + NY-close, i.e. ~14h/day) from
 // back when a bad drift trade could ride to liquidation. That risk is now fixed
 // structurally: SL is hard-capped at exactly SL_MAX_WIN_MULTIPLE x whatever TP is
@@ -358,6 +359,22 @@ function getDirection(
     //    This is what liquidated the no-SL long (bought RSI 79.5 blowoff top). ───
     if (dir === 'long'  && ind.rsi >= RSI_OVERBOUGHT) return neutral(`OVERBOUGHT: RSI ${ind.rsi.toFixed(0)} ≥ ${RSI_OVERBOUGHT} — no long into blowoff`);
     if (dir === 'short' && ind.rsi <= RSI_OVERSOLD)   return neutral(`OVERSOLD: RSI ${ind.rsi.toFixed(0)} ≤ ${RSI_OVERSOLD} — no short into capitulation`);
+
+    // ── Gate 3b2: VWAP extension — enter at value, never chase past it. ────────
+    // MAE path audit 2026-07-07 (90 trades, drawdown reconstructed from 1m
+    // candles): 82% of entries took ≥$1.50 heat before resolving — the signal
+    // direction was fine but the TIMING was late, firing after the move was
+    // already stretched. The one variable that cleanly separated "straight to
+    // TP" entries (9 trades, 100% win, ≤$0.50 heat) from divers: VWAP side.
+    // Clean entries were at/below VWAP (longs) — extension ≤ +0.17%, mostly
+    // negative. Divers were 77% extended past VWAP. Gating at 0.0 (enter longs
+    // only at-or-below VWAP, shorts only at-or-above) kept 26/90 trades:
+    // WR 56→62%, avg MAE $4.43→$3.01, net PnL −$0.13→+$0.03. Costs ~⅔ of
+    // frequency — that's the price of not buying the top of every micro-swing.
+    const vwapExt = dir === 'long' ? ind.priceVsVwap : -ind.priceVsVwap;   // % stretched in OUR direction
+    if (vwapExt > VWAP_EXT_MAX_PCT) {
+        return neutral(`CHASING: ${Math.abs(ind.priceVsVwap).toFixed(2)}% past VWAP in trade direction (max ${VWAP_EXT_MAX_PCT}) — wait for value side`);
+    }
 
     // ── Gate 3c: Sentiment — funding + open-interest ──────────────────────────
     // Extreme funding = one side is crowded and paying to stay in; joining that
