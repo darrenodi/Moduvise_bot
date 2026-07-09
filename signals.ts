@@ -371,9 +371,21 @@ function getDirection(
     // only at-or-below VWAP, shorts only at-or-above) kept 26/90 trades:
     // WR 56→62%, avg MAE $4.43→$3.01, net PnL −$0.13→+$0.03. Costs ~⅔ of
     // frequency — that's the price of not buying the top of every micro-swing.
-    const vwapExt = dir === 'long' ? ind.priceVsVwap : -ind.priceVsVwap;   // % stretched in OUR direction
-    if (vwapExt > VWAP_EXT_MAX_PCT) {
-        return neutral(`CHASING: ${Math.abs(ind.priceVsVwap).toFixed(2)}% past VWAP in trade direction (max ${VWAP_EXT_MAX_PCT}) — wait for value side`);
+    // REGIME-SCOPED (fixed 2026-07-09): applying this gate in trend regimes
+    // deadlocked the bot for a full day — in a downtrend only shorts are allowed
+    // (regime filter) but price sits below VWAP nearly continuously, so the gate
+    // blocked every short and the bot went dark all of Jul 8 (fourth over-blocking
+    // gate; the memory file warned about exactly this pattern). Per-regime re-run
+    // of the same 90-trade MAE sweep: in RANGE/UNCLEAR the 0.0 gate is the best
+    // config tested (WR 55→64%, net −$0.23→+$0.06); in TREND regimes it keeps
+    // 1/28 trades while ungated with-trend entries were the most profitable bucket
+    // of all (57% WR, +$0.11) — extension past VWAP is normal in a trend. So:
+    // value-side entry discipline in ranges only; trends rely on the regime filter.
+    if (regime === 'ranging' || regime === 'unclear') {
+        const vwapExt = dir === 'long' ? ind.priceVsVwap : -ind.priceVsVwap;   // % stretched in OUR direction
+        if (vwapExt > VWAP_EXT_MAX_PCT) {
+            return neutral(`CHASING: ${Math.abs(ind.priceVsVwap).toFixed(2)}% past VWAP in trade direction (max ${VWAP_EXT_MAX_PCT}) — wait for value side`);
+        }
     }
 
     // ── Gate 3c: Sentiment — funding + open-interest ──────────────────────────
