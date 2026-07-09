@@ -22,6 +22,7 @@ import {
     sendAlert,
     getAvailableBalance,
     hasOpenOrders,
+    adoptOrphanPosition,
     transferBankedToSpot,
     ASSET_TIMING,
 } from './executeTrade.js';
@@ -364,7 +365,11 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     // entry is mid-flight (guarded by _entryInProgress).
     if (pos.exists && !trade && !isEntryInProgress()) {
         if (await hasOpenOrders()) {
-            return 'open';   // has a resting TP — let it ride
+            // Adopt it as the active trade so TP detection, the time-stop, PnL
+            // logging and bankroll updates all apply — an unadopted orphan had no
+            // time-stop and could block new entries forever (seen live 2026-07-09).
+            await adoptOrphanPosition({ side: pos.side as 'long' | 'short', size: pos.size, entryPrice: pos.entryPrice });
+            return 'open';
         }
         console.error(`[Health] 🛑 NAKED ${pos.side} position ${pos.size} (no TP) — maker recover`);
         await sendAlert(`🛑 ${_symbol} naked position (no TP) — maker close ${pos.side} ${pos.size}`);

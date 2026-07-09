@@ -361,6 +361,50 @@ export async function getOpenPositionDetails(): Promise<{
     }
 }
 
+// Adopt an orphaned position (exists at the exchange, no in-memory trade — e.g.
+// after a restart or state wipe) as the active trade, so the normal exit machinery
+// applies to it: TP fill detection, the 90min time-stop, PnL logging and bankroll
+// update. Without adoption, the orphan-net "let it ride" path had NO time-stop
+// (that requires a trade object), so a single underwater orphan could block all
+// new entries indefinitely while carrying unbounded no-SL risk — observed live
+// 2026-07-09: the pre-reset short rode 7h+ frozen, $16 underwater, bot dark.
+// openedAt uses the position's updateTime when available so an already-old orphan
+// time-stops immediately instead of getting a fresh 90 minutes.
+export async function adoptOrphanPosition(pos: { side: 'long' | 'short'; size: number; entryPrice: number }): Promise<boolean> {
+    if (_activeTrade) return false;
+    try {
+        const [orders, positions] = await Promise.all([
+            privateGet('/fapi/v1/openOrders', { symbol: STRATEGY.SYMBOL }),
+            privateGet('/fapi/v3/positionRisk', { symbol: STRATEGY.SYMBOL }),
+        ]);
+        const tp = Array.isArray(orders)
+            ? orders.find((o: any) => o.type === 'LIMIT' && (o.reduceOnly === true || o.reduceOnly === 'true'))
+            : null;
+        if (!tp) return false;   // naked orphans stay with the emergency-close path
+        const raw = Array.isArray(positions) ? positions.find((p: any) => Math.abs(Number(p.positionAmt ?? 0)) > 0) : null;
+        const openedAt = Number(raw?.updateTime) > 0 ? Number(raw.updateTime) : Date.now();
+        _activeTrade = {
+            entryPrice: pos.entryPrice,
+            tpPrice:    Number(tp.price),
+            slPrice:    0,
+            side:       pos.side,
+            size:       pos.size,
+            margin:     Number(process.env.MARGIN_PER_TRADE ?? STRATEGY.MARGIN_PER_TRADE),
+            posVal:     pos.size * pos.entryPrice,
+            leverage:   STRATEGY.LEVERAGE,
+            openedAt,
+            tpOrderId:  Number(tp.orderId) || undefined,
+            slOrderId:  undefined,
+            tp2Phase:   false,
+        };
+        console.log(`[Adopt] 🤝 Orphan ${pos.side} ${pos.size} @ $${pos.entryPrice.toFixed(_cfg.priceDp)} adopted | TP=$${Number(tp.price).toFixed(_cfg.priceDp)} | age=${((Date.now() - openedAt) / 60_000).toFixed(0)}min — time-stop now applies`);
+        return true;
+    } catch (e: any) {
+        console.error(`[Adopt] Failed: ${e.message}`);
+        return false;
+    }
+}
+
 export async function getRealizedPnlSince(sinceMs: number): Promise<{ pnl: number; trades: number } | null> {
     try {
         await new Promise(r => setTimeout(r, 1_500));
