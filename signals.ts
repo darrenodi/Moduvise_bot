@@ -165,6 +165,8 @@ const RSI_OVERBOUGHT    = Number(process.env.RSI_OVERBOUGHT    ?? 75);    // don
 const RSI_OVERSOLD      = Number(process.env.RSI_OVERSOLD      ?? 25);    // don't sell exhausted bottoms (RSI 22.2 short liquidated us)
 const FLOW_1M_AGAINST   = Number(process.env.FLOW_1M_AGAINST   ?? 1.3);   // block if 60s cumulative flow opposes by more than this ratio
 const VWAP_EXT_MAX_PCT  = Number(process.env.VWAP_EXT_MAX_PCT  ?? 0.0);   // max % price may be stretched PAST VWAP in the trade's direction (0 = enter at/behind value only)
+const RANGING_ONLY      = (process.env.RANGING_ONLY ?? 'true') === 'true'; // user spec 2026-07-11: trade only when regime classifies as 'ranging'
+const MOM_ALIGN         = (process.env.MOM_ALIGN    ?? 'true') === 'true'; // user spec 2026-07-11: 5m momentum must already point in the trade's direction
 // Was 'true' by default (blocks Asia/off-hours + NY-close, i.e. ~14h/day) from
 // back when a bad drift trade could ride to liquidation. That risk is now fixed
 // structurally: SL is hard-capped at exactly SL_MAX_WIN_MULTIPLE x whatever TP is
@@ -354,6 +356,21 @@ function getDirection(
     if (regime === 'trend-up'   && dir === 'short') return neutral(`COUNTER-TREND: ${regReason} — no shorts`);
     if (regime === 'trend-down' && dir === 'long')  return neutral(`COUNTER-TREND: ${regReason} — no longs`);
     if (regime === 'unclear'    && conf < OB_STRONG) return neutral(`UNCLEAR regime (${regReason}) — conviction too low`);
+
+    // ── Gate 3a2: RANGING ONLY (user spec 2026-07-11: "only enter... when market
+    //    is ranging"). Data agrees: 2026-07-10 sample ran ~80% WR in ranging vs
+    //    ~64% in unclear and worse in trends. Cuts frequency; that's the point. ──
+    if (RANGING_ONLY && regime !== 'ranging') {
+        return neutral(`NOT RANGING: regime=${regime} (${regReason}) — ranging-only mode`);
+    }
+
+    // ── Gate 3a3: MOMENTUM ALIGNMENT (user spec 2026-07-11: "only enter when
+    //    price is going in my direction"). OB-led entries may fire against the
+    //    live 5m move; require the tape to already lean our way. ────────────────
+    if (MOM_ALIGN) {
+        if (dir === 'long'  && momScore <= 0) return neutral(`MOM NOT ALIGNED: ${momScore.toFixed(2)}ATR ≤ 0 — price not moving up yet`);
+        if (dir === 'short' && momScore >= 0) return neutral(`MOM NOT ALIGNED: ${momScore.toFixed(2)}ATR ≥ 0 — price not moving down yet`);
+    }
 
     // ── Gate 3b: Exhaustion — never chase an overbought top / oversold bottom.
     //    This is what liquidated the no-SL long (bought RSI 79.5 blowoff top). ───

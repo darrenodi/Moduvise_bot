@@ -605,7 +605,7 @@ console.log(`  ENTRY    : TAKER/MARKET, follows momentum immediately (~0.04% fee
 console.log(`  TP       : FIXED $${_tpUsd.toFixed(2)} price move, post-only maker, 0 fee`);
 console.log(`  SL       : FIXED $${_slUsd.toFixed(2)} price move, Algo stop-market, taker fee only when it fires (user spec 2026-07-09)`);
 console.log(`  BREAKEVEN: win ≈ +$${(_tpUsd - 1.65).toFixed(2)}/unit, stop-out ≈ -$${(_slUsd + 3.3).toFixed(2)}/unit incl. fees → 1 loss ≈ ${((_slUsd + 3.3) / (_tpUsd - 1.65)).toFixed(1)} wins, breakeven ≈ ${(((_slUsd + 3.3) / (_slUsd + 3.3 + _tpUsd - 1.65)) * 100).toFixed(0)}% WR (disclosed to user)`);
-console.log(`  GATES    : flow 5s+60s | funding | OI surge | VWAP value-side (range only) | daily break + news blackout | weekend trading ALLOWED`);
+console.log(`  GATES    : RANGING-ONLY | momentum-aligned | flow 5s+60s | funding | OI surge | VWAP value-side | daily break + news blackout`);
 console.log(`  EXIT     : maker TP, stop-market SL, or time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min (hygiene)`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);
 console.log(`  STACK    : $${getStack().toFixed(4)} | BANKED: $${getBanked().toFixed(4)}`);
