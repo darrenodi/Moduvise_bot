@@ -573,9 +573,22 @@ function calcTpDistance(_atr5m: number): number {
     return tickRound(floor);
 }
 
-function calcSlDistance(): number {
+// SL is either a fixed $ move (SL_FIXED_USD) or a % of margin (SL_ROI_PCT), the
+// latter added for the 2026-07-12 dual-bot spec ("stop losses should be -15%").
+// SL_ROI_PCT wins when set, since it's leverage-aware:
+//   slDist = entry × (roiPct/100) / leverage
+// At 50x, -15% of margin = a ~$1.24 price move on gold — see the MAE warning in
+// multiSymbol.ts: that distance sits INSIDE gold's normal noise (median adverse
+// excursion $2.97), so it stops out ~73% of trades. Kept because the user chose
+// it with the data in hand; the structural fix would be lower leverage.
+function calcSlDistance(entry: number): number {
+    const roiPct = Number(process.env.SL_ROI_PCT ?? 0);
+    const floor  = _cfg.slMinTicks * _cfg.tick;
+    if (roiPct > 0) {
+        const raw = entry * (roiPct / 100) / STRATEGY.LEVERAGE;
+        return tickRound(Math.max(raw, floor));
+    }
     const fixedUsd = Number(process.env.SL_FIXED_USD ?? 10.00);
-    const floor    = _cfg.slMinTicks * _cfg.tick;
     return tickRound(Math.max(fixedUsd, floor));
 }
 
@@ -652,40 +665,95 @@ export async function executeBinanceTrade(
             await privatePost('/fapi/v1/leverage', { symbol: STRATEGY.SYMBOL, leverage });
         } catch { /* already set */ }
 
-        // TAKER MARKET entry — follows momentum immediately in the signal's direction,
-        // no chase/no-fill risk, at the cost of a guaranteed ~0.04% entry fee.
+        // ── ENTRY: taker MARKET or maker chase-to-fill (env ENTRY_TAKER) ─────────
+        // ENTRY_TAKER=true  → MARKET order: instant fill, ~0.04% fee every trade.
+        // ENTRY_TAKER=false → GTX post-only, re-quoted at the live touch for a
+        //   bounded budget: 0 fee, but it only fills when price comes TO us (the
+        //   adverse-selection the user flagged), and it can miss entirely.
+        // The 2026-07-12 dual-bot spec is maker on both bots.
+        const ENTRY_TAKER = (process.env.ENTRY_TAKER ?? 'true') === 'true';
         const estPrice = isBuy ? liveAsk : liveBid;
         const size     = calcSize(estPrice);
-
-        console.log(`[Entry] 🟢 ${STRATEGY.SYMBOL} ${direction.toUpperCase()} (TAKER/MARKET) | size=${size} | bid=$${liveBid.toFixed(_cfg.priceDp)} ask=$${liveAsk.toFixed(_cfg.priceDp)}`);
-
         const fillStart = Date.now();
-        const order = await privatePost('/fapi/v1/order', {
-            symbol: STRATEGY.SYMBOL, side, type: 'MARKET', quantity: size.toFixed(_cfg.qtyDp),
-        });
-        if (!order?.orderId) {
-            if (order?.code === -2019) {
-                return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${JSON.stringify(order)}` };
-            }
-            return { success: false, outcome: 'skipped', message: `TAKER entry rejected: ${JSON.stringify(order)}` };
-        }
+        let actualEntry = 0;
 
-        let actualEntry = Number(order.avgPrice) || 0;
-        for (let i = 0; i < 5 && !actualEntry; i++) {
-            await new Promise(r => setTimeout(r, 300));
-            const check = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId });
-            if (check.status === 'FILLED') actualEntry = Number(check.avgPrice);
-        }
-        if (!actualEntry) {
-            return { success: false, outcome: 'error', message: `Market entry placed (orderId=${order.orderId}) but avgPrice never resolved.` };
+        if (ENTRY_TAKER) {
+            console.log(`[Entry] 🟢 ${STRATEGY.SYMBOL} ${direction.toUpperCase()} (TAKER/MARKET) | size=${size} | bid=$${liveBid.toFixed(_cfg.priceDp)} ask=$${liveAsk.toFixed(_cfg.priceDp)}`);
+            const order = await privatePost('/fapi/v1/order', {
+                symbol: STRATEGY.SYMBOL, side, type: 'MARKET', quantity: size.toFixed(_cfg.qtyDp),
+            });
+            if (!order?.orderId) {
+                if (order?.code === -2019) {
+                    return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${JSON.stringify(order)}` };
+                }
+                return { success: false, outcome: 'skipped', message: `TAKER entry rejected: ${JSON.stringify(order)}` };
+            }
+            actualEntry = Number(order.avgPrice) || 0;
+            for (let i = 0; i < 5 && !actualEntry; i++) {
+                await new Promise(r => setTimeout(r, 300));
+                const check = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId });
+                if (check.status === 'FILLED') actualEntry = Number(check.avgPrice);
+            }
+            if (!actualEntry) {
+                return { success: false, outcome: 'error', message: `Market entry placed (orderId=${order.orderId}) but avgPrice never resolved.` };
+            }
+        } else {
+            // MAKER chase-to-fill: re-quote GTX at the live touch until filled or
+            // the time budget runs out. Never crosses, so it's always maker (0 fee).
+            console.log(`[Entry] 🟢 ${STRATEGY.SYMBOL} ${direction.toUpperCase()} (MAKER/GTX) | size=${size} | bid=$${liveBid.toFixed(_cfg.priceDp)} ask=$${liveAsk.toFixed(_cfg.priceDp)}`);
+
+            const quoteAndWait = async (price: number): Promise<{ filled: boolean; avgPrice?: number; rejectedCode?: number }> => {
+                const order = await privatePost('/fapi/v1/order', {
+                    symbol: STRATEGY.SYMBOL, side, type: 'LIMIT', timeInForce: 'GTX',
+                    price: price.toFixed(_cfg.priceDp), quantity: size.toFixed(_cfg.qtyDp),
+                });
+                if (!order?.orderId) return { filled: false, rejectedCode: order?.code };
+                const waitMs = Number(process.env.ENTRY_CHASE_POLL_MS ?? 1_500);
+                const start  = Date.now();
+                while (Date.now() - start < waitMs) {
+                    await new Promise(r => setTimeout(r, STRATEGY.FILL_POLL_MS));
+                    const check = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId });
+                    if (check.status === 'FILLED') return { filled: true, avgPrice: Number(check.avgPrice ?? price) };
+                    if (check.status === 'CANCELED' || check.status === 'EXPIRED') break;
+                }
+                // Fill-race-safe cancel: re-check before AND after cancelling.
+                const pre = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId }).catch(() => null);
+                if (pre?.status === 'FILLED') return { filled: true, avgPrice: Number(pre.avgPrice ?? price) };
+                await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId }).catch(() => {});
+                const post = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: order.orderId }).catch(() => null);
+                if (post?.status === 'FILLED') return { filled: true, avgPrice: Number(post.avgPrice ?? price) };
+                return { filled: false };
+            };
+
+            const chaseTotalMs = Number(process.env.ENTRY_CHASE_TOTAL_MS ?? 20_000);
+            let requotes = 0;
+            let result = await quoteAndWait(tickRound(isBuy ? liveBid : liveAsk));
+            if (result.filled) actualEntry = result.avgPrice ?? 0;
+            if (!actualEntry && result.rejectedCode === -2019) {
+                return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${JSON.stringify(result)}` };
+            }
+            while (!actualEntry && Date.now() - fillStart < chaseTotalMs) {
+                requotes++;
+                const bt = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
+                const touch = tickRound(isBuy ? Number(bt.bidPrice) : Number(bt.askPrice));
+                result = await quoteAndWait(touch);
+                if (result.filled) actualEntry = result.avgPrice ?? touch;
+                if (!actualEntry && result.rejectedCode === -2019) {
+                    return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${JSON.stringify(result)}` };
+                }
+            }
+            if (!actualEntry) {
+                return { success: false, outcome: 'skipped', message: `Maker entry not filled after ${requotes} requotes over ${((Date.now() - fillStart) / 1000).toFixed(0)}s.` };
+            }
+            if (requotes > 0) console.log(`[Entry] ✅ Maker filled after ${requotes} requote(s)`);
         }
         const fillMs = Date.now() - fillStart;
 
-        // ── Calculate TP (maker, fixed $4) and SL (stop-market, fixed $10) ───────
+        // ── Calculate TP (maker) and SL (stop-market; fixed-$ or %-of-margin) ────
         const takerFeeRate = await getTakerFeeRate();
         const feePerUnit = takerFeeRate * actualEntry;
         const tpDist  = calcTpDistance(signal.atr5m);
-        const slDist  = calcSlDistance();
+        const slDist  = calcSlDistance(actualEntry);
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 

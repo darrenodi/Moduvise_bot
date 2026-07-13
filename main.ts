@@ -42,8 +42,12 @@ const MIN_STACK = Number(process.env.MIN_STACK ?? 0.60);
 // Binance min order notional (matches executeTrade STRATEGY.MIN_NOTIONAL).
 const STRATEGY_MIN_NOTIONAL = Number(process.env.MIN_NOTIONAL ?? 5);
 
-// ─── PER-SYMBOL STATE ─────────────────────────────────────────────────────────
-const _symbol   = process.env.MARKET_SYMBOL ?? 'XAUUSDT';
+// ─── PER-BOT STATE ────────────────────────────────────────────────────────────
+// Keyed by BOT_ID, not the market symbol: the 2026-07-12 dual-bot split runs two
+// bots on the SAME symbol (XAU-A directional, XAU-B micro-scalp) with completely
+// separate bankrolls, stats and trade logs. Falls back to the symbol when BOT_ID
+// is absent (single-bot / legacy runs).
+const _symbol   = process.env.BOT_ID ?? process.env.MARKET_SYMBOL ?? 'XAUUSDT';
 const startTime = Date.now();
 let _bankroll: SymbolBankroll | null = null;
 function getStack():  number { return _bankroll?.stack  ?? 0; }

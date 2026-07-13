@@ -1,169 +1,251 @@
 import * as dotenv from 'dotenv';
 import { spawn, ChildProcess } from 'child_process';
-import * as fs from 'fs';
 dotenv.config();
 
 import {
     loadBankroll, createBankroll, getCurrentMargin,
-    bankrollSummary, SymbolBankroll,
+    bankrollSummary,
 } from './symbolBankroll.js';
 import { sendAlert, getAvailableBalance } from './executeTrade.js';
 
-// ─── MULTI-SYMBOL ORCHESTRATOR ────────────────────────────────────────────────
-// At startup: fetches live account balance, divides equally among symbols.
-// Each symbol gets its own bot-state-{SYMBOL}.json with its allocated share.
-// Symbols trade independently — a loss on XAUUSDT doesn't affect ETHUSDT.
-// If a symbol's stack drops below $0.60, it pauses and alerts Telegram.
+// ─── DUAL-BOT ORCHESTRATOR ────────────────────────────────────────────────────
+// User spec 2026-07-12: split the balance in half into two INDEPENDENT bots that
+// both trade gold but chase different move sizes. Each bot owns its own bankroll,
+// state file, trade log, and strategy env — they never touch each other's money.
+//
+//   Bot A "directional" : TP $2–$6 (uses TP_A_USD, default $3), 50x
+//   Bot B "microscalp"  : TP $2 (higher frequency, closer target), 50x
+//   Both                : maker entry + maker TP, SL = -15% of margin, 100%
+//                         compounding, NO banking (BANK_SPLIT=0 → nothing skimmed)
+//
+// Lifecycle (exactly as specced):
+//   - one bot's stack runs out  → it stops; the OTHER keeps trading alone.
+//     Its capital is NOT handed to the survivor — the halves stay separate.
+//   - both bots' stacks run out → orchestrator stops trading entirely, cancels
+//     resting orders, and idles. No further orders are placed.
+//
+// The bot identity key is `botId` (not the market symbol), so two bots can trade
+// the SAME symbol with fully separate bankrolls (bot-state-{botId}.json).
 
 const ENVIRONMENT = process.env.ENVIRONMENT ?? 'live';
 
-// TP/SL, exit timeouts and loss cooldown are all per-asset in executeTrade's
-// getConfig (not here, not env). This orchestrator only owns spawn-level concerns:
-// which symbols, leverage cap, and the liquidity-wall notional floor.
-interface SymbolConfig {
+interface BotConfig {
+    botId:           string;   // identity: names the bankroll, state file, and trade log
     marketSymbol:    string;
     displaySymbol:   string;
     wsSymbol:        string;
     leverage:        number;
     wallMinNotional: number;
+    /** Strategy env applied to this bot only — overrides the shared .env. */
+    strategy:        Record<string, string>;
 }
 
-// Only 0%-maker symbols: XAUUSDT, plus the USDC-margined BTC/ETH perps (BTCUSDC /
-// ETHUSDC) which also have 0% maker. The USDT crypto pairs (BTCUSDT/ETHUSDT/DOGE)
-// charge 0.02% maker / 0.05% taker — ~4% of margin round-trip at 100x — so they
-// bleed on fees and are intentionally excluded.
-const SYMBOLS: SymbolConfig[] = [
-    { marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt', leverage: 100, wallMinNotional: 20_000 },
-    // Disabled — too volatile for no-SL tiny-TP (ATR ~$96 → rides to liquidation on
-    // cross margin). Re-enable only with a stop-loss or much larger TP.
-    // { marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc', leverage: 100, wallMinNotional: 100_000 },
-    // { marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc', leverage: 100, wallMinNotional: 50_000 },
+// SL_ROI_PCT = 15 → stop at -15% of margin (user spec). Both bots maker-entry.
+//
+// LEVERAGE = 12x, and that number is load-bearing (2026-07-12). A -15% margin stop
+// is a price move of entry × 0.15 / leverage, so leverage alone decides whether the
+// stop is sane:
+//   @50x → $12.30 stop → one loss costs 4.6 wins → breakeven 82% WR  (LOSING vs the
+//          ~80% measured ranging WR — this is the same trap as the $4/$10 config
+//          that just lost 36% of the stack)
+//   @12x → $ 5.13 stop → one loss costs 2.2 wins → breakeven 69% WR  (WINNABLE)
+// A 150-trade MAE audit puts gold's median adverse excursion at $2.97 (p75 $6.96),
+// so $5.13 also clears the noise band (~72% of trades never reach it) while $1.24
+// (an earlier miscalculation of the 50x case) would not have. Keep leverage low:
+// raising it re-widens the stop in dollar terms and pushes breakeven back above the
+// achievable win rate. TP stays inside the user's $2–$6 band.
+const BOTS: BotConfig[] = [
+    {
+        botId: 'XAU-A', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT-A', wsSymbol: 'xauusdt',
+        leverage: 12, wallMinNotional: 20_000,
+        strategy: {
+            TP_MIN_USD:   process.env.TP_A_USD ?? '3.00',   // directional: $2–$6 band
+            SL_ROI_PCT:   '15',                             // -15% of margin → ~$5.13 @12x
+            SL_FIXED_USD: '',                               // unset → SL_ROI_PCT governs
+            ENTRY_TAKER:  'false',                          // maker entry (0 fee)
+            BANK_SPLIT:   '0',                              // no banking, 100% reinvested
+        },
+    },
+    {
+        botId: 'XAU-B', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT-B', wsSymbol: 'xauusdt',
+        leverage: 12, wallMinNotional: 20_000,
+        strategy: {
+            TP_MIN_USD:   process.env.TP_B_USD ?? '2.00',   // micro-scalp: closer target, fires more often
+            SL_ROI_PCT:   '15',
+            SL_FIXED_USD: '',
+            ENTRY_TAKER:  'false',
+            BANK_SPLIT:   '0',
+            RANGING_ONLY: 'true',                           // micro-scalping only makes sense in ranges
+        },
+    },
 ];
 
-// ─── PROCESS REGISTRY ─────────────────────────────────────────────────────────
+// A bot is "finished" when its stack can no longer fund the exchange minimum.
+const MIN_STACK = Number(process.env.MIN_STACK ?? 0.10);
+
 interface ManagedProcess {
-    config:    SymbolConfig;
+    config:    BotConfig;
     child:     ChildProcess | null;
     restarts:  number;
     lastStart: number;
+    finished:  boolean;   // stack exhausted — never restart this one
 }
 
-// Populated in initBankrolls() with only the symbols the live balance can afford.
 let registry: ManagedProcess[] = [];
+let allStopped = false;
 
-// Minimum balance to give a symbol its own bankroll share.
-const MIN_PER_SYMBOL = Number(process.env.MIN_STACK ?? 0.60);
+// ─── SPAWN ONE BOT ────────────────────────────────────────────────────────────
+function spawnBot(entry: ManagedProcess): void {
+    if (allStopped || entry.finished) return;
 
-// ─── SPAWN ONE SYMBOL BOT ─────────────────────────────────────────────────────
-function spawnSymbol(entry: ManagedProcess): void {
     const cfg      = entry.config;
-    const bankroll = loadBankroll(cfg.marketSymbol);
+    const bankroll = loadBankroll(cfg.botId);
 
     if (!bankroll) {
-        console.error(`[Orchestrator] ❌ No bankroll file for ${cfg.marketSymbol} — run startup first`);
+        console.error(`[Orchestrator] ❌ No bankroll for ${cfg.botId}`);
         return;
     }
-    if (bankroll.paused) {
-        console.log(`[Orchestrator] ⛔ ${cfg.marketSymbol} paused (${bankroll.pausedReason}) — skipping`);
+    if (bankroll.paused || bankroll.stack < MIN_STACK) {
+        markFinished(entry, `stack $${bankroll.stack.toFixed(4)} exhausted`);
         return;
     }
 
     const margin = getCurrentMargin(bankroll);
 
-    // Target & signal knobs (TP_ATR_MULT, SL_ATR_MULT, ATR_CEIL_PCT, MOM_*_ATR, …)
-    // are inherited from .env via ...process.env, or fall back to code defaults.
     const env: NodeJS.ProcessEnv = {
         ...process.env,
+        ...cfg.strategy,                 // per-bot strategy overrides the shared .env
+        BOT_ID:            cfg.botId,
         MARKET_SYMBOL:     cfg.marketSymbol,
         DISPLAY_SYMBOL:    cfg.displaySymbol,
         WS_SYMBOL:         cfg.wsSymbol,
         MARGIN_PER_TRADE:  String(margin),
         BOT_LEVERAGE:      String(cfg.leverage),
         WALL_MIN_NOTIONAL: String(cfg.wallMinNotional),
-        STATE_FILE:        `./bot-state-${cfg.marketSymbol}.json`,
-        TRADE_LOG_FILE:    `./tradeLog-${cfg.marketSymbol}.jsonl`,
+        // Per-BOT state and log (not per-symbol) — this is what keeps the two
+        // bankrolls independent while both trade the same market.
+        STATE_FILE:        `./bot-state-${cfg.botId}.json`,
+        TRADE_LOG_FILE:    `./tradeLog-${cfg.botId}.jsonl`,
         STATE_DIR:         '.',
     };
 
-    // Run TypeScript directly via tsx (no build step). `node --import tsx` keeps
-    // the loader registered for the child process.
     const child = spawn(process.execPath, ['--import', 'tsx', 'main.ts'], {
         env, cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    entry.child    = child;
+    entry.child     = child;
     entry.lastStart = Date.now();
 
-    const tag = `[${cfg.marketSymbol}]`;
+    const tag = `[${cfg.botId}]`;
     child.stdout?.on('data', (d: Buffer) => process.stdout.write(`${tag} ${d}`));
     child.stderr?.on('data', (d: Buffer) => process.stderr.write(`${tag} ${d}`));
 
-    child.on('exit', (code, signal) => {
+    child.on('exit', (code) => {
         entry.child = null;
-        const latest = loadBankroll(cfg.marketSymbol);
-        if (latest?.paused) {
-            console.log(`${tag} ⛔ Bankroll exhausted — not restarting`);
+        const latest = loadBankroll(cfg.botId);
+        if (latest && (latest.paused || latest.stack < MIN_STACK)) {
+            markFinished(entry, `stack $${latest.stack.toFixed(4)} exhausted`);
             return;
         }
+        if (allStopped || entry.finished) return;
         entry.restarts++;
         const uptime    = Date.now() - entry.lastStart;
         const backoffMs = entry.restarts > 5 && uptime < 120_000 ? 30_000 : 5_000;
-        console.warn(`${tag} ⚠️  Exited (code=${code}) — restarting in ${backoffMs/1000}s`);
-        setTimeout(() => spawnSymbol(entry), backoffMs);
+        console.warn(`${tag} ⚠️  Exited (code=${code}) — restarting in ${backoffMs / 1000}s`);
+        setTimeout(() => spawnBot(entry), backoffMs);
     });
 
-    console.log(`${tag} 🚀 Started | stack=$${bankroll.stack.toFixed(4)} margin=$${margin.toFixed(2)} ${cfg.leverage}x`);
+    console.log(`${tag} 🚀 Started | stack=$${bankroll.stack.toFixed(4)} margin=$${margin.toFixed(2)} ${cfg.leverage}x | TP=$${cfg.strategy.TP_MIN_USD} SL=-${cfg.strategy.SL_ROI_PCT}%`);
 }
 
-// ─── STARTUP: RUN ONLY WHAT THE BALANCE AFFORDS ──────────────────────────────
-// Never hard-exit on low balance (that would crash-loop under pm2). Instead run
-// as many of the configured symbols as the live balance can fund — at least 1.
+// ─── LIFECYCLE: one bot dies → the other continues alone ─────────────────────
+// The dead bot's remaining capital is NOT transferred to the survivor (user spec:
+// "if one's balance finishes, don't enter the other one, let it continue alone").
+function markFinished(entry: ManagedProcess, reason: string): void {
+    if (entry.finished) return;
+    entry.finished = true;
+    if (entry.child) {
+        entry.child.removeAllListeners('exit');
+        entry.child.kill('SIGTERM');
+        entry.child = null;
+    }
+    const msg = `⛔ ${entry.config.botId} FINISHED — ${reason}. Not restarting.`;
+    console.log(`[Orchestrator] ${msg}`);
+    sendAlert(msg).catch(() => {});
+
+    const survivors = registry.filter(e => !e.finished);
+    if (survivors.length === 0) {
+        stopEverything('both bankrolls exhausted');
+    } else {
+        console.log(`[Orchestrator] ${survivors.map(s => s.config.botId).join(', ')} still running alone.`);
+    }
+}
+
+// ─── BOTH DEAD → STOP TRADING ENTIRELY ───────────────────────────────────────
+// User spec: "if both balances are finished, stop trading, stop making orders."
+// The children own their own order cleanup on SIGTERM; here we make sure no
+// further bot is ever spawned and the process idles quietly instead of exiting
+// (a hard exit under pm2 would crash-loop and re-enter trading).
+function stopEverything(reason: string): void {
+    if (allStopped) return;
+    allStopped = true;
+    for (const e of registry) {
+        if (e.child) {
+            e.child.removeAllListeners('exit');
+            e.child.kill('SIGTERM');
+            e.child = null;
+        }
+    }
+    const msg = `🛑 ALL TRADING STOPPED — ${reason}. No further orders will be placed.`;
+    console.log(`\n[Orchestrator] ${msg}\n`);
+    sendAlert(msg).catch(() => {});
+}
+
+// ─── STARTUP: SPLIT THE BALANCE IN HALF ──────────────────────────────────────
 async function initBankrolls(): Promise<void> {
     const balance = await getAvailableBalance();
     console.log(`[Orchestrator] Live balance: $${balance.toFixed(4)}`);
 
-    // How many symbols can we afford? Clamp to [1, SYMBOLS.length].
-    const affordable = Math.max(1, Math.min(SYMBOLS.length, Math.floor(balance / MIN_PER_SYMBOL)));
-    const active     = SYMBOLS.slice(0, affordable);
+    const share = balance / BOTS.length;   // half each, per spec
+    console.log(`[Orchestrator] Splitting $${balance.toFixed(4)} → $${share.toFixed(4)} per bot`);
 
-    if (affordable < SYMBOLS.length) {
-        const msg = `⚠️ Balance $${balance.toFixed(2)} — running ${affordable}/${SYMBOLS.length} symbol(s): ${active.map(s => s.marketSymbol).join(', ')}`;
-        console.warn(`[Orchestrator] ${msg}`);
-        await sendAlert(msg);
-    }
-
-    const sharePerSymbol = balance / active.length;
-    console.log(`[Orchestrator] Allocating $${sharePerSymbol.toFixed(4)} per symbol across ${active.length}`);
-
-    for (const cfg of active) {
-        const existing = loadBankroll(cfg.marketSymbol);
-        if (existing && !existing.paused) {
-            console.log(`[Orchestrator] ${cfg.marketSymbol}: existing bankroll restored — stack=$${existing.stack.toFixed(4)}`);
-        } else if (existing?.paused) {
-            console.log(`[Orchestrator] ${cfg.marketSymbol}: ⛔ paused — skipping`);
+    for (const cfg of BOTS) {
+        const existing = loadBankroll(cfg.botId);
+        if (existing) {
+            console.log(`[Orchestrator] ${cfg.botId}: restored — stack=$${existing.stack.toFixed(4)} banked=$${existing.banked.toFixed(4)}`);
         } else {
-            createBankroll(cfg.marketSymbol, sharePerSymbol);
-            console.log(`[Orchestrator] ${cfg.marketSymbol}: created — stack=$${sharePerSymbol.toFixed(4)}`);
+            createBankroll(cfg.botId, share);
+            console.log(`[Orchestrator] ${cfg.botId}: created — stack=$${share.toFixed(4)}`);
         }
     }
 
-    // Build the process registry from only the affordable, non-paused symbols.
-    registry = active
-        .filter(cfg => !loadBankroll(cfg.marketSymbol)?.paused)
-        .map(cfg => ({ config: cfg, child: null, restarts: 0, lastStart: 0 }));
+    registry = BOTS.map(cfg => {
+        const b = loadBankroll(cfg.botId);
+        const dead = !b || b.paused || b.stack < MIN_STACK;
+        if (dead) console.log(`[Orchestrator] ${cfg.botId}: ⛔ already exhausted — will not start`);
+        return { config: cfg, child: null, restarts: 0, lastStart: 0, finished: dead };
+    });
+
+    if (registry.every(e => e.finished)) stopEverything('both bankrolls already exhausted at startup');
 }
 
-// ─── STATUS HEARTBEAT ─────────────────────────────────────────────────────────
-setInterval(async () => {
-    console.log(`\n[Orchestrator] ── Status ──`);
-    for (const e of registry) {
-        const b = loadBankroll(e.config.marketSymbol);
-        if (!b) continue;
-        const alive  = e.child ? '🟢' : (b.paused ? '⛔' : '🔴');
-        const uptime = e.child ? `${((Date.now()-e.lastStart)/60_000).toFixed(1)}m` : 'down';
-        console.log(`  ${alive} uptime=${uptime} restarts=${e.restarts} | ${bankrollSummary(b)}`);
+// ─── STATUS HEARTBEAT — tracks both bots side by side ────────────────────────
+setInterval(() => {
+    if (allStopped) {
+        console.log(`\n[Orchestrator] 🛑 STOPPED — both bankrolls exhausted, no orders being placed.\n`);
+        return;
     }
-    console.log('');
+    console.log(`\n[Orchestrator] ── Status ──`);
+    let total = 0;
+    for (const e of registry) {
+        const b = loadBankroll(e.config.botId);
+        if (!b) continue;
+        total += b.stack + b.banked;
+        const alive  = e.finished ? '⛔' : (e.child ? '🟢' : '🔴');
+        const uptime = e.child ? `${((Date.now() - e.lastStart) / 60_000).toFixed(1)}m` : (e.finished ? 'FINISHED' : 'down');
+        console.log(`  ${alive} ${e.config.botId} uptime=${uptime} | ${bankrollSummary(b)}`);
+    }
+    console.log(`  TOTAL across both bots: $${total.toFixed(4)}\n`);
 }, 60_000);
 
 // ─── GRACEFUL SHUTDOWN ────────────────────────────────────────────────────────
@@ -182,23 +264,20 @@ process.on('SIGINT',  () => shutdown('SIGINT'));
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
 console.log(`\n${'═'.repeat(70)}`);
-console.log(`  MULTI-SYMBOL SCALPER`);
+console.log(`  DUAL-BOT GOLD SCALPER`);
 console.log(`  ENV     : ${ENVIRONMENT}`);
-console.log(`  SYMBOLS : ${SYMBOLS.map(s => s.marketSymbol).join(', ')}`);
-console.log(`  BANK    : 30% profit protected | 70% compounds | 100% stack as margin`);
-console.log(`  PAUSE   : stack < $0.60 → symbol pauses automatically`);
+console.log(`  BOT A   : directional | TP $${BOTS[0].strategy.TP_MIN_USD} | ${BOTS[0].leverage}x | SL -${BOTS[0].strategy.SL_ROI_PCT}% margin`);
+console.log(`  BOT B   : micro-scalp | TP $${BOTS[1].strategy.TP_MIN_USD} | ${BOTS[1].leverage}x | SL -${BOTS[1].strategy.SL_ROI_PCT}% margin | ranging-only`);
+console.log(`  CAPITAL : split 50/50, independent bankrolls, NO banking, 100% compounding`);
+console.log(`  LIFECYCLE: one dies → other continues alone | both die → ALL TRADING STOPS`);
+console.log(`  MATH    : -15% @12x = ~$5.13 stop | A: 1 loss = 2.2 wins, breakeven 69% WR`);
+console.log(`                                    | B: 1 loss = 3.4 wins, breakeven 77% WR`);
 console.log(`${'═'.repeat(70)}\n`);
 
-// Init bankrolls then stagger-start the affordable symbols. Never exit on error —
-// exiting under pm2 would crash-loop. If startup fails or nothing is runnable, the
-// process idles (status heartbeat keeps it alive) until restarted or funded.
 initBankrolls().then(() => {
-    if (registry.length === 0) {
-        console.warn(`[Orchestrator] No runnable symbols (balance too low or all paused) — idling.`);
-        return;
-    }
-    registry.forEach((entry, i) => {
-        setTimeout(() => spawnSymbol(entry), i * 3_000);
+    if (allStopped) return;
+    registry.filter(e => !e.finished).forEach((entry, i) => {
+        setTimeout(() => spawnBot(entry), i * 3_000);
     });
 }).catch(async (e) => {
     console.error(`[Orchestrator] Startup error (idling, not exiting): ${e.message}`);
