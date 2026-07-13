@@ -40,43 +40,52 @@ interface BotConfig {
     strategy:        Record<string, string>;
 }
 
-// SL_ROI_PCT = 15 → stop at -15% of margin (user spec). Both bots maker-entry, 100x.
+// TWO SYMBOLS, NOT TWO BOTS ON ONE SYMBOL (2026-07-12). Binance keeps ONE net
+// position per symbol per account, so two bots on XAUUSDT would corrupt each other
+// (B's stop could close A's position). Hedge mode could split LONG/SHORT sides, but
+// it forces each bot single-direction. Running two SYMBOLS is cleaner: no collision,
+// both bots free to go long or short, and the bankrolls stay independent.
 //
-// The leverage↔stop relationship is counter-intuitive and I got it backwards twice
-// on 2026-07-12, so it is written out here once, correctly, and verified:
-//   a -15%-of-margin loss = a price move of  entry × 0.15 / leverage
-//   because position size = margin × leverage / entry, so a SMALLER position (lower
-//   leverage) needs a BIGGER price move to lose the same fraction of margin.
-//     @ 12x → $51.25 stop  (one loss = 17.6 wins vs a $3 TP — catastrophic)
-//     @ 50x → $12.30 stop  (one loss = 4.6 wins)
-//     @100x → $ 6.15 stop  (one loss = 1.3 wins vs a $6 TP → breakeven 57%)
-// So HIGH leverage is what makes a %-of-margin stop tight in dollar terms. 100x also
-// clears gold's noise: a 150-trade MAE audit puts the median adverse excursion at
-// $2.97 (p75 $6.96), and $6.15 sits above the median.
-//   Bot A: TP $6 → 1 loss ≈ 1.3 wins → breakeven ~57% WR  (measured ranging WR ~80%)
-//   Bot B: TP $2 → 1 loss ≈ 3.9 wins → breakeven ~80% WR  (marginal, at the line)
+// Symbol choice is driven by the fee table (checked live 2026-07-12):
+//   XAUUSDT  maker 0.000%  taker 0.040%   ← the zero-maker edge this bot is built on
+//   ETHUSDC  maker 0.000%  taker 0.040%   ← same edge, $1.81B/24h volume
+//   ETHUSDT  maker 0.020%  ← would cost ~$0.35/unit and destroy the edge. Excluded.
+//   BTCUSDT  maker 0.020%  ← ~$12.43/unit. Excluded.
+//   BTCUSDC  maker 0.000%  but a $62k asset: min notional forces a position far
+//                            larger than a ~$1.4 stack can hold. Excluded on size.
+//
+// Assignment (gold = the calmer, mean-reverting book; ETH = the trendier one):
+//   XAU-SCALP : gold, frequency scalping — small $2 TP, ranging-only, fires often
+//   ETH-DIR   : ETHUSDC, directional — rides trends, no ranging-only restriction
+//
+// -15% of margin @100x = a price move of entry × 0.15/100:
+//   gold @ ~$4000 → $6.00 stop  vs a $2 TP  → 1 loss ≈ 3.9 wins
+//   ETH  @ ~$1770 → $2.66 stop  vs a $4 TP  → 1 loss ≈ 0.8 wins → breakeven ~45%
+// ETH's tighter dollar stop (its price is 2.3x smaller) is what makes the
+// directional bot's math the strongest of any config this project has run.
 const BOTS: BotConfig[] = [
     {
-        botId: 'XAU-A', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT-A', wsSymbol: 'xauusdt',
+        botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
         leverage: 100, wallMinNotional: 20_000,
         strategy: {
-            TP_MIN_USD:   process.env.TP_A_USD ?? '6.00',   // directional: top of the user's $2–$6 band
-            SL_ROI_PCT:   '15',                             // -15% of margin → ~$6.15 @100x
-            SL_FIXED_USD: '',                               // unset → SL_ROI_PCT governs
-            ENTRY_TAKER:  'false',                          // maker entry (0 fee)
-            BANK_SPLIT:   '0',                              // no banking, 100% reinvested
+            TP_MIN_USD:   process.env.TP_XAU_USD ?? '2.00',  // frequency scalp: small target
+            SL_ROI_PCT:   '15',                              // -15% margin → ~$6.00 @100x
+            SL_FIXED_USD: '',                                // unset → SL_ROI_PCT governs
+            ENTRY_TAKER:  'false',                           // maker entry (0 fee)
+            BANK_SPLIT:   '0',                               // no banking, 100% reinvested
+            RANGING_ONLY: 'true',                            // scalping only makes sense in ranges
         },
     },
     {
-        botId: 'XAU-B', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT-B', wsSymbol: 'xauusdt',
-        leverage: 100, wallMinNotional: 20_000,
+        botId: 'ETH-DIR', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
+        leverage: 100, wallMinNotional: 50_000,
         strategy: {
-            TP_MIN_USD:   process.env.TP_B_USD ?? '2.00',   // micro-scalp: closer target, fires more often
-            SL_ROI_PCT:   '15',
+            TP_MIN_USD:   process.env.TP_ETH_USD ?? '4.00',  // directional: ride the move
+            SL_ROI_PCT:   '15',                              // -15% margin → ~$2.66 @100x
             SL_FIXED_USD: '',
             ENTRY_TAKER:  'false',
             BANK_SPLIT:   '0',
-            RANGING_ONLY: 'true',                           // micro-scalping only makes sense in ranges
+            RANGING_ONLY: 'false',                           // directional: trends allowed
         },
     },
 ];
@@ -267,12 +276,11 @@ process.on('SIGINT',  () => shutdown('SIGINT'));
 console.log(`\n${'═'.repeat(70)}`);
 console.log(`  DUAL-BOT GOLD SCALPER`);
 console.log(`  ENV     : ${ENVIRONMENT}`);
-console.log(`  BOT A   : directional | TP $${BOTS[0].strategy.TP_MIN_USD} | ${BOTS[0].leverage}x | SL -${BOTS[0].strategy.SL_ROI_PCT}% margin`);
-console.log(`  BOT B   : micro-scalp | TP $${BOTS[1].strategy.TP_MIN_USD} | ${BOTS[1].leverage}x | SL -${BOTS[1].strategy.SL_ROI_PCT}% margin | ranging-only`);
+console.log(`  ${BOTS[0].botId.padEnd(9)}: ${BOTS[0].marketSymbol} frequency-scalp | TP $${BOTS[0].strategy.TP_MIN_USD} | ${BOTS[0].leverage}x | SL -${BOTS[0].strategy.SL_ROI_PCT}% | ranging-only | 0% maker`);
+console.log(`  ${BOTS[1].botId.padEnd(9)}: ${BOTS[1].marketSymbol} directional     | TP $${BOTS[1].strategy.TP_MIN_USD} | ${BOTS[1].leverage}x | SL -${BOTS[1].strategy.SL_ROI_PCT}% | trends OK    | 0% maker`);
 console.log(`  CAPITAL : split 50/50, independent bankrolls, NO banking, 100% compounding`);
 console.log(`  LIFECYCLE: one dies → other continues alone | both die → ALL TRADING STOPS`);
-console.log(`  MATH    : -15% @100x = ~$6.15 stop | A: 1 loss ≈ 1.3 wins, breakeven ~57% WR`);
-console.log(`                                     | B: 1 loss ≈ 3.9 wins, breakeven ~80% WR`);
+console.log(`  WHY 2 SYMBOLS: one net position per symbol — two bots on one symbol collide`);
 console.log(`${'═'.repeat(70)}\n`);
 
 initBankrolls().then(() => {

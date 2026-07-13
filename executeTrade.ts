@@ -134,7 +134,10 @@ const STRATEGY = {
 
     // Fill-poll interval used by the chase-to-fill entry loop below.
     get FILL_POLL_MS() { return Number(process.env.FILL_POLL_MS ?? 1_000); },
-    MIN_NOTIONAL: 5.0,
+    // Exchange MIN_NOTIONAL is per-symbol, not a global $5: XAUUSDT is $5 but
+    // ETHUSDC is $20. Hardcoding 5 would size ETH orders below the exchange floor
+    // and every entry would be rejected.
+    get MIN_NOTIONAL() { return MARKET_SYMBOL.toUpperCase() === 'ETHUSDC' ? 20.0 : 5.0; },
 };
 
 // ─── INTERFACES ───────────────────────────────────────────────────────────────
@@ -574,13 +577,12 @@ function calcTpDistance(_atr5m: number): number {
 }
 
 // SL is either a fixed $ move (SL_FIXED_USD) or a % of margin (SL_ROI_PCT), the
-// latter added for the 2026-07-12 dual-bot spec ("stop losses should be -15%").
-// SL_ROI_PCT wins when set, since it's leverage-aware:
+// latter added for the 2026-07-12 dual-bot spec ("stop losses should be -15%"):
 //   slDist = entry × (roiPct/100) / leverage
-// At 50x, -15% of margin = a ~$1.24 price move on gold — see the MAE warning in
-// multiSymbol.ts: that distance sits INSIDE gold's normal noise (median adverse
-// excursion $2.97), so it stops out ~73% of trades. Kept because the user chose
-// it with the data in hand; the structural fix would be lower leverage.
+// Counter-intuitive but verified: a %-of-margin stop gets WIDER in dollars as
+// leverage DROPS (position size shrinks, so a bigger move is needed to lose the
+// same fraction of margin). On gold at -15%: 12x → $51.25, 50x → $12.30,
+// 100x → $6.15. High leverage is what makes this rule tight enough to be usable.
 export function calcSlDistance(entry: number): number {
     const floor  = _cfg.slMinTicks * _cfg.tick;
     const roiPct = Number(process.env.SL_ROI_PCT || 0);
