@@ -581,16 +581,20 @@ function calcTpDistance(_atr5m: number): number {
 // multiSymbol.ts: that distance sits INSIDE gold's normal noise (median adverse
 // excursion $2.97), so it stops out ~73% of trades. Kept because the user chose
 // it with the data in hand; the structural fix would be lower leverage.
-function calcSlDistance(entry: number): number {
-    const roiPct = Number(process.env.SL_ROI_PCT ?? 0);
+export function calcSlDistance(entry: number): number {
     const floor  = _cfg.slMinTicks * _cfg.tick;
+    const roiPct = Number(process.env.SL_ROI_PCT || 0);
     if (roiPct > 0) {
         const raw = entry * (roiPct / 100) / STRATEGY.LEVERAGE;
         return tickRound(Math.max(raw, floor));
     }
-    const fixedUsd = Number(process.env.SL_FIXED_USD ?? 10.00);
+    // `|| 10` (not `??`) so an empty-string override falls back instead of Number('')===0.
+    const fixedUsd = Number(process.env.SL_FIXED_USD || 10.00);
     return tickRound(Math.max(fixedUsd, floor));
 }
+
+/** True when entries are taker MARKET orders; false = maker GTX chase-to-fill. */
+export const isEntryTaker = (): boolean => (process.env.ENTRY_TAKER ?? 'true') === 'true';
 
 // ─── MAIN EXECUTION ENGINE ────────────────────────────────────────────────────
 // Order flow (user spec, 2026-07-09):

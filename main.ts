@@ -24,6 +24,8 @@ import {
     hasOpenOrders,
     adoptOrphanPosition,
     transferBankedToSpot,
+    calcSlDistance,
+    isEntryTaker,
     ASSET_TIMING,
 } from './executeTrade.js';
 
@@ -603,12 +605,19 @@ const _mar = process.env.MARGIN_PER_TRADE ?? '1';
 console.log(`\n${'═'.repeat(70)}`);
 console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
 console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
-const _tpUsd = Number(process.env.TP_MIN_USD ?? 4.00);
-const _slUsd = Number(process.env.SL_FIXED_USD ?? 10.00);
-console.log(`  ENTRY    : TAKER/MARKET, follows momentum immediately (~0.04% fee every trade)`);
+// Report the SL the engine will ACTUALLY use (calcSlDistance), not a guess from one
+// env var — the banner previously printed "$0.00" and "TAKER" while the engine was
+// correctly running an ROI stop and maker entries.
+const _tpUsd  = Number(process.env.TP_MIN_USD || 4.00);
+const _slUsd  = calcSlDistance(4100);              // 4100 = reference price, banner only
+const _taker  = isEntryTaker();
+const _entFee = _taker ? 1.65 : 0;                 // maker entry costs nothing
+const _win    = _tpUsd - _entFee;                  // maker TP exit = 0 fee
+const _loss   = _slUsd + 1.65 + _entFee;           // the stop exits taker
+console.log(`  ENTRY    : ${_taker ? 'TAKER/MARKET (instant, ~0.04% fee every trade)' : 'MAKER/GTX chase-to-fill (0 fee; only fills when price comes to us)'}`);
 console.log(`  TP       : FIXED $${_tpUsd.toFixed(2)} price move, post-only maker, 0 fee`);
-console.log(`  SL       : FIXED $${_slUsd.toFixed(2)} price move, Algo stop-market, taker fee only when it fires (user spec 2026-07-09)`);
-console.log(`  BREAKEVEN: win ≈ +$${(_tpUsd - 1.65).toFixed(2)}/unit, stop-out ≈ -$${(_slUsd + 3.3).toFixed(2)}/unit incl. fees → 1 loss ≈ ${((_slUsd + 3.3) / (_tpUsd - 1.65)).toFixed(1)} wins, breakeven ≈ ${(((_slUsd + 3.3) / (_slUsd + 3.3 + _tpUsd - 1.65)) * 100).toFixed(0)}% WR (disclosed to user)`);
+console.log(`  SL       : $${_slUsd.toFixed(2)} price move${process.env.SL_ROI_PCT ? ` (= -${process.env.SL_ROI_PCT}% of margin @ ${_lev}x)` : ''}, Algo stop-market`);
+console.log(`  BREAKEVEN: win ≈ +$${_win.toFixed(2)}/unit, stop-out ≈ -$${_loss.toFixed(2)}/unit incl. fees → 1 loss ≈ ${(_loss / _win).toFixed(1)} wins, breakeven ≈ ${((_loss / (_loss + _win)) * 100).toFixed(0)}% WR`);
 console.log(`  GATES    : RANGING-ONLY | momentum-aligned | flow 5s+60s | funding | OI surge | VWAP value-side | daily break + news blackout`);
 console.log(`  EXIT     : maker TP, stop-market SL, or time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min (hygiene)`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);
