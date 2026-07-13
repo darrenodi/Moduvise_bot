@@ -608,12 +608,18 @@ console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
 // Report the SL the engine will ACTUALLY use (calcSlDistance), not a guess from one
 // env var — the banner previously printed "$0.00" and "TAKER" while the engine was
 // correctly running an ROI stop and maker entries.
+//
+// The reference price MUST come from the symbol being traded: an ROI stop scales
+// with price, so hardcoding gold's ~$4100 made the ETHUSDC bot's banner report a
+// $6.15 stop when its real stop (at ETH's ~$1770) is ~$2.66. Engine was always
+// right (it uses the live fill price); only the banner lied.
+const _refPx  = Number(process.env.BANNER_REF_PRICE || (_symbol.includes('ETH') ? 1770 : 4100));
 const _tpUsd  = Number(process.env.TP_MIN_USD || 4.00);
-const _slUsd  = calcSlDistance(4100);              // 4100 = reference price, banner only
+const _slUsd  = calcSlDistance(_refPx);
 const _taker  = isEntryTaker();
-const _entFee = _taker ? 1.65 : 0;                 // maker entry costs nothing
+const _entFee = _taker ? _refPx * 0.0004 : 0;      // taker entry fee scales with price; maker = 0
 const _win    = _tpUsd - _entFee;                  // maker TP exit = 0 fee
-const _loss   = _slUsd + 1.65 + _entFee;           // the stop exits taker
+const _loss   = _slUsd + (_refPx * 0.0004) + _entFee;   // the stop always exits taker
 console.log(`  ENTRY    : ${_taker ? 'TAKER/MARKET (instant, ~0.04% fee every trade)' : 'MAKER/GTX chase-to-fill (0 fee; only fills when price comes to us)'}`);
 console.log(`  TP       : FIXED $${_tpUsd.toFixed(2)} price move, post-only maker, 0 fee`);
 console.log(`  SL       : $${_slUsd.toFixed(2)} price move${process.env.SL_ROI_PCT ? ` (= -${process.env.SL_ROI_PCT}% of margin @ ${_lev}x)` : ''}, Algo stop-market`);
