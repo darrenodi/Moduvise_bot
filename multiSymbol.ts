@@ -40,27 +40,28 @@ interface BotConfig {
     strategy:        Record<string, string>;
 }
 
-// SL_ROI_PCT = 15 → stop at -15% of margin (user spec). Both bots maker-entry.
+// SL_ROI_PCT = 15 → stop at -15% of margin (user spec). Both bots maker-entry, 100x.
 //
-// LEVERAGE = 12x, and that number is load-bearing (2026-07-12). A -15% margin stop
-// is a price move of entry × 0.15 / leverage, so leverage alone decides whether the
-// stop is sane:
-//   @50x → $12.30 stop → one loss costs 4.6 wins → breakeven 82% WR  (LOSING vs the
-//          ~80% measured ranging WR — this is the same trap as the $4/$10 config
-//          that just lost 36% of the stack)
-//   @12x → $ 5.13 stop → one loss costs 2.2 wins → breakeven 69% WR  (WINNABLE)
-// A 150-trade MAE audit puts gold's median adverse excursion at $2.97 (p75 $6.96),
-// so $5.13 also clears the noise band (~72% of trades never reach it) while $1.24
-// (an earlier miscalculation of the 50x case) would not have. Keep leverage low:
-// raising it re-widens the stop in dollar terms and pushes breakeven back above the
-// achievable win rate. TP stays inside the user's $2–$6 band.
+// The leverage↔stop relationship is counter-intuitive and I got it backwards twice
+// on 2026-07-12, so it is written out here once, correctly, and verified:
+//   a -15%-of-margin loss = a price move of  entry × 0.15 / leverage
+//   because position size = margin × leverage / entry, so a SMALLER position (lower
+//   leverage) needs a BIGGER price move to lose the same fraction of margin.
+//     @ 12x → $51.25 stop  (one loss = 17.6 wins vs a $3 TP — catastrophic)
+//     @ 50x → $12.30 stop  (one loss = 4.6 wins)
+//     @100x → $ 6.15 stop  (one loss = 1.3 wins vs a $6 TP → breakeven 57%)
+// So HIGH leverage is what makes a %-of-margin stop tight in dollar terms. 100x also
+// clears gold's noise: a 150-trade MAE audit puts the median adverse excursion at
+// $2.97 (p75 $6.96), and $6.15 sits above the median.
+//   Bot A: TP $6 → 1 loss ≈ 1.3 wins → breakeven ~57% WR  (measured ranging WR ~80%)
+//   Bot B: TP $2 → 1 loss ≈ 3.9 wins → breakeven ~80% WR  (marginal, at the line)
 const BOTS: BotConfig[] = [
     {
         botId: 'XAU-A', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT-A', wsSymbol: 'xauusdt',
-        leverage: 12, wallMinNotional: 20_000,
+        leverage: 100, wallMinNotional: 20_000,
         strategy: {
-            TP_MIN_USD:   process.env.TP_A_USD ?? '3.00',   // directional: $2–$6 band
-            SL_ROI_PCT:   '15',                             // -15% of margin → ~$5.13 @12x
+            TP_MIN_USD:   process.env.TP_A_USD ?? '6.00',   // directional: top of the user's $2–$6 band
+            SL_ROI_PCT:   '15',                             // -15% of margin → ~$6.15 @100x
             SL_FIXED_USD: '',                               // unset → SL_ROI_PCT governs
             ENTRY_TAKER:  'false',                          // maker entry (0 fee)
             BANK_SPLIT:   '0',                              // no banking, 100% reinvested
@@ -68,7 +69,7 @@ const BOTS: BotConfig[] = [
     },
     {
         botId: 'XAU-B', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT-B', wsSymbol: 'xauusdt',
-        leverage: 12, wallMinNotional: 20_000,
+        leverage: 100, wallMinNotional: 20_000,
         strategy: {
             TP_MIN_USD:   process.env.TP_B_USD ?? '2.00',   // micro-scalp: closer target, fires more often
             SL_ROI_PCT:   '15',
@@ -270,8 +271,8 @@ console.log(`  BOT A   : directional | TP $${BOTS[0].strategy.TP_MIN_USD} | ${BO
 console.log(`  BOT B   : micro-scalp | TP $${BOTS[1].strategy.TP_MIN_USD} | ${BOTS[1].leverage}x | SL -${BOTS[1].strategy.SL_ROI_PCT}% margin | ranging-only`);
 console.log(`  CAPITAL : split 50/50, independent bankrolls, NO banking, 100% compounding`);
 console.log(`  LIFECYCLE: one dies → other continues alone | both die → ALL TRADING STOPS`);
-console.log(`  MATH    : -15% @12x = ~$5.13 stop | A: 1 loss = 2.2 wins, breakeven 69% WR`);
-console.log(`                                    | B: 1 loss = 3.4 wins, breakeven 77% WR`);
+console.log(`  MATH    : -15% @100x = ~$6.15 stop | A: 1 loss ≈ 1.3 wins, breakeven ~57% WR`);
+console.log(`                                     | B: 1 loss ≈ 3.9 wins, breakeven ~80% WR`);
 console.log(`${'═'.repeat(70)}\n`);
 
 initBankrolls().then(() => {
