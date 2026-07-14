@@ -613,16 +613,21 @@ console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
 // with price, so hardcoding gold's ~$4100 made the ETHUSDC bot's banner report a
 // $6.15 stop when its real stop (at ETH's ~$1770) is ~$2.66. Engine was always
 // right (it uses the live fill price); only the banner lied.
-const _refPx  = Number(process.env.BANNER_REF_PRICE || (_symbol.includes('ETH') ? 1770 : 4100));
-const _tpUsd  = Number(process.env.TP_MIN_USD || 4.00);
-const _slUsd  = calcSlDistance(_refPx);
+// Reference price AND ATR must both match the traded symbol — TP/SL are now
+// ATR-relative, so a gold-shaped ATR would misreport ETH's bracket entirely.
+const _isEth  = _symbol.includes('ETH');
+const _refPx  = Number(process.env.BANNER_REF_PRICE || (_isEth ? 1786 : 4022));
+const _refAtr = Number(process.env.BANNER_REF_ATR   || (_isEth ? 2.92 : 3.60));   // measured 2026-07-14
+const _tpMult = Number(process.env.TP_ATR_MULT || 0);
+const _tpUsd  = _tpMult > 0 ? _refAtr * _tpMult : Number(process.env.TP_MIN_USD || 4.00);
+const _slUsd  = calcSlDistance(_refPx, _refAtr);
 const _taker  = isEntryTaker();
 const _entFee = _taker ? _refPx * 0.0004 : 0;      // taker entry fee scales with price; maker = 0
 const _win    = _tpUsd - _entFee;                  // maker TP exit = 0 fee
 const _loss   = _slUsd + (_refPx * 0.0004) + _entFee;   // the stop always exits taker
 console.log(`  ENTRY    : ${_taker ? 'TAKER/MARKET (instant, ~0.04% fee every trade)' : 'MAKER/GTX chase-to-fill (0 fee; only fills when price comes to us)'}`);
-console.log(`  TP       : FIXED $${_tpUsd.toFixed(2)} price move, post-only maker, 0 fee`);
-console.log(`  SL       : $${_slUsd.toFixed(2)} price move${process.env.SL_ROI_PCT ? ` (= -${process.env.SL_ROI_PCT}% of margin @ ${_lev}x)` : ''}, Algo stop-market`);
+console.log(`  TP       : $${_tpUsd.toFixed(2)}${_tpMult > 0 ? ` (${_tpMult}x ATR $${_refAtr.toFixed(2)})` : ' fixed'}, post-only maker, 0 fee`);
+console.log(`  SL       : $${_slUsd.toFixed(2)}${process.env.SL_ATR_MULT ? ` (${process.env.SL_ATR_MULT}x ATR)` : (process.env.SL_ROI_PCT ? ` (= -${process.env.SL_ROI_PCT}% of margin @ ${_lev}x)` : '')}, Algo stop-market`);
 console.log(`  BREAKEVEN: win ≈ +$${_win.toFixed(2)}/unit, stop-out ≈ -$${_loss.toFixed(2)}/unit incl. fees → 1 loss ≈ ${(_loss / _win).toFixed(1)} wins, breakeven ≈ ${((_loss / (_loss + _win)) * 100).toFixed(0)}% WR`);
 console.log(`  GATES    : RANGING-ONLY | momentum-aligned | flow 5s+60s | funding | OI surge | VWAP value-side | daily break + news blackout`);
 console.log(`  EXIT     : maker TP, stop-market SL, or time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min (hygiene)`);

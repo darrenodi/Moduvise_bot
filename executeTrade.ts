@@ -563,28 +563,46 @@ export function calcSize(price: number): number {
 }
 
 // ─── TP / SL CALCULATION ─────────────────────────────────────────────────────
-// User spec 2026-07-09: "predict $3 to $5 price moves, enter with taker and tp
-// as maker. sl at $10 price move." TP fixed $4 (env TP_MIN_USD), SL fixed $10
-// (env SL_FIXED_USD) — the SL is BACK after 3 days of no-SL, bounding a loss at
-// ~$13.30/unit incl. fees vs the unbounded rides that previously ate the account.
-// Disclosed math at these settings: win nets ~+$2.35/unit after the taker entry
-// fee, stop-out costs ~−$13.30/unit → one loss ≈ 5.7 wins, breakeven WR ≈ 85%.
-// User was shown this and chose the wide-stop shape deliberately (noise room).
-function calcTpDistance(_atr5m: number): number {
-    const fixedUsd = Number(process.env.TP_MIN_USD ?? 4.00);
-    const floor    = Math.max(fixedUsd, _cfg.tpMinTicks * _cfg.tick);
-    return tickRound(floor);
+// TP IS ATR-RELATIVE, NOT A FIXED DOLLAR AMOUNT (fixed 2026-07-14).
+//
+// A dollar TP means nothing across assets — what decides whether a target is ever
+// reached is its size relative to the asset's OWN volatility. Live proof from the
+// first dual-bot night:
+//   XAUUSDT TP $2 = 0.56x its ATR($3.60)  -> 8 TP / 5 SL / 0 timestops  (reachable)
+//   ETHUSDC TP $4 = 1.37x its ATR($2.92)  -> 6 TP / 21 TIMESTOPS        (unreachable)
+// I had set ETH's $4 by analogy to gold ("ETH moves more") without measuring it;
+// ETH is 2.3x CHEAPER, so $4 is a far bigger move in ATR terms. 53% of ETH's trades
+// died on the clock.
+//
+// TP_ATR_MULT (default 0.56 = gold's proven, profitable multiple) now sizes the TP
+// off live ATR for any asset. TP_MIN_USD still forces a fixed $ target if set, so
+// existing configs keep working.
+function calcTpDistance(atr5m: number): number {
+    const tickFloor = _cfg.tpMinTicks * _cfg.tick;
+    const fixedUsd  = Number(process.env.TP_MIN_USD || 0);
+    if (fixedUsd > 0) return tickRound(Math.max(fixedUsd, tickFloor));
+
+    const mult = Number(process.env.TP_ATR_MULT || 0.56);
+    const atrBased = atr5m > 0 ? atr5m * mult : STRATEGY.TP_FIXED_USD;
+    return tickRound(Math.max(atrBased, tickFloor));
 }
 
-// SL is either a fixed $ move (SL_FIXED_USD) or a % of margin (SL_ROI_PCT), the
-// latter added for the 2026-07-12 dual-bot spec ("stop losses should be -15%"):
-//   slDist = entry × (roiPct/100) / leverage
-// Counter-intuitive but verified: a %-of-margin stop gets WIDER in dollars as
-// leverage DROPS (position size shrinks, so a bigger move is needed to lose the
-// same fraction of margin). On gold at -15%: 12x → $51.25, 50x → $12.30,
-// 100x → $6.15. High leverage is what makes this rule tight enough to be usable.
-export function calcSlDistance(entry: number): number {
-    const floor  = _cfg.slMinTicks * _cfg.tick;
+// SL, in priority order:
+//   1. SL_ATR_MULT  — stop at N x live ATR (PREFERRED; the only scale-free mode, so
+//      one number works on any asset). 0.8x sits outside tick noise but inside the
+//      1.0x-ATR target, which is what finally makes breakeven land below the
+//      measured win rate.
+//   2. SL_ROI_PCT   — % of margin. Leverage-dependent and counter-intuitive: the
+//      dollar stop gets WIDER as leverage DROPS (smaller position needs a bigger
+//      move to lose the same fraction). Gold at -15%: 12x→$51.25, 50x→$12.30,
+//      100x→$6.15.
+//   3. SL_FIXED_USD — fixed dollars. Meaningless across assets; kept for legacy.
+export function calcSlDistance(entry: number, atr5m = 0): number {
+    const floor   = _cfg.slMinTicks * _cfg.tick;
+    const atrMult = Number(process.env.SL_ATR_MULT || 0);
+    if (atrMult > 0 && atr5m > 0) {
+        return tickRound(Math.max(atr5m * atrMult, floor));
+    }
     const roiPct = Number(process.env.SL_ROI_PCT || 0);
     if (roiPct > 0) {
         const raw = entry * (roiPct / 100) / STRATEGY.LEVERAGE;
@@ -759,7 +777,7 @@ export async function executeBinanceTrade(
         const takerFeeRate = await getTakerFeeRate();
         const feePerUnit = takerFeeRate * actualEntry;
         const tpDist  = calcTpDistance(signal.atr5m);
-        const slDist  = calcSlDistance(actualEntry);
+        const slDist  = calcSlDistance(actualEntry, signal.atr5m);
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 

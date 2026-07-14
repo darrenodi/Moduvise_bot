@@ -164,7 +164,15 @@ export function detectRegime(closes: number[], atr5m: number): { regime: MarketR
 const RSI_OVERBOUGHT    = Number(process.env.RSI_OVERBOUGHT    ?? 75);    // don't buy exhausted tops (no-SL killer)
 const RSI_OVERSOLD      = Number(process.env.RSI_OVERSOLD      ?? 25);    // don't sell exhausted bottoms (RSI 22.2 short liquidated us)
 const FLOW_1M_AGAINST   = Number(process.env.FLOW_1M_AGAINST   ?? 1.3);   // block if 60s cumulative flow opposes by more than this ratio
-const VWAP_EXT_MAX_PCT  = Number(process.env.VWAP_EXT_MAX_PCT  ?? 0.0);   // max % price may be stretched PAST VWAP in the trade's direction (0 = enter at/behind value only)
+// Max % price may be stretched PAST VWAP in the trade's direction.
+// MUST be per-asset: measured 2026-07-14 over 1000x 5m candles, ETH's typical
+// |price-VWAP| deviation is 0.142% vs gold's 0.027% — 5.3x wider. A single 0.0%
+// gate (tuned on gold) permanently blocked the ETH bot ("CHASING" on every
+// heartbeat, ~93 blocks in 200 beats). Defaults below allow ~60% of moments on
+// each asset; override per bot with VWAP_EXT_MAX_PCT.
+const VWAP_EXT_MAX_PCT  = Number(
+    process.env.VWAP_EXT_MAX_PCT ?? (MARKET_SYMBOL.toUpperCase().includes('ETH') ? 0.18 : 0.04)
+);
 const RANGING_ONLY      = (process.env.RANGING_ONLY ?? 'true') === 'true'; // user spec 2026-07-11: trade only when regime classifies as 'ranging'
 const MOM_ALIGN         = (process.env.MOM_ALIGN    ?? 'true') === 'true'; // user spec 2026-07-11: 5m momentum must already point in the trade's direction
 // Was 'true' by default (blocks Asia/off-hours + NY-close, i.e. ~14h/day) from

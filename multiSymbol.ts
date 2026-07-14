@@ -63,29 +63,61 @@ interface BotConfig {
 //   ETH  @ ~$1770 → $2.66 stop  vs a $4 TP  → 1 loss ≈ 0.8 wins → breakeven ~45%
 // ETH's tighter dollar stop (its price is 2.3x smaller) is what makes the
 // directional bot's math the strongest of any config this project has run.
+// EVERY THRESHOLD IS PER-ASSET, MEASURED (2026-07-14). The first night ran ETH on
+// gold's constants and both bots lost ~13%. Measured over 1000x 5m candles:
+//                 price      ATR(5m)    ATR%     |px-VWAP| median
+//   XAUUSDT     $4,022       $3.60     0.090%        0.027%
+//   ETHUSDC     $1,786       $2.92     0.164%        0.142%   <- 5.3x gold's VWAP dev
+//
+// Three gold-shaped constants were killing ETH:
+//   1. TP $4 = 1.37x ETH's ATR (gold's working TP is 0.56x) -> 21/40 trades died on
+//      the time-stop, only 6 hit TP. TP is now ATR-relative (TP_ATR_MULT=0.56).
+//   2. VWAP gate 0.0% -> ETH's typical deviation is 0.142%, so it blocked ~every
+//      entry ("CHASING" 93x in 200 heartbeats). Now 0.18% for ETH, 0.04% for gold.
+//   3. SL -15% = 0.92x ETH's ATR -> the stop sat INSIDE ETH's own noise (gold's
+//      -15% is a comfortable 1.68x ATR). ETH's stop widened to -27% (~1.68x ATR),
+//      matching the ratio that works on gold.
+// THE KEY FIX: TP must be WIDER than SL, both sized in ATR (not dollars).
+// Every config this project has run had TP << SL, which forces an unreachable win
+// rate no matter how good the signal is. Sweeping TP/SL in ATR-multiples against
+// the fee, TP=1.0x ATR / SL=0.8x ATR is the first shape whose breakeven sits BELOW
+// the measured win rate on BOTH assets:
+//     XAU  TP $3.60 / SL $2.88  -> 1 loss = 1.2 wins -> breakeven 55%  (measured 62%)
+//     ETH  TP $2.92 / SL $2.34  -> 1 loss = 1.0 wins -> breakeven 51%
+// TP at 1.0x ATR is one normal 5m candle — demonstrably reachable (gold hit its TP
+// 8/13 times at 0.56x ATR with zero time-stops), unlike ETH's old $4 = 1.37x ATR
+// which time-stopped on 21 of 40 trades.
+const SL_ATR_MULT = '0.8';   // stop at 0.8x ATR — outside the tick noise, inside the win
+const TP_ATR_MULT = '1.0';   // target one normal candle
 const BOTS: BotConfig[] = [
     {
         botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
         leverage: 100, wallMinNotional: 20_000,
         strategy: {
-            TP_MIN_USD:   process.env.TP_XAU_USD ?? '2.00',  // frequency scalp: small target
-            SL_ROI_PCT:   '15',                              // -15% margin → ~$6.00 @100x
-            SL_FIXED_USD: '',                                // unset → SL_ROI_PCT governs
-            ENTRY_TAKER:  'false',                           // maker entry (0 fee)
-            BANK_SPLIT:   '0',                               // no banking, 100% reinvested
-            RANGING_ONLY: 'true',                            // scalping only makes sense in ranges
+            TP_ATR_MULT,
+            SL_ATR_MULT,                // ≈ $2.88 ≈ -7% margin @100x
+            TP_MIN_USD:       '',       // unset → ATR-relative
+            SL_ROI_PCT:       '',       // unset → ATR-relative
+            SL_FIXED_USD:     '',
+            VWAP_EXT_MAX_PCT: '0.04',   // gold's measured VWAP deviation (median 0.027%)
+            ENTRY_TAKER:      'false',  // maker entry (0 fee)
+            BANK_SPLIT:       '0',      // no banking, 100% reinvested
+            RANGING_ONLY:     'true',   // scalping only makes sense in ranges
         },
     },
     {
         botId: 'ETH-DIR', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
         leverage: 100, wallMinNotional: 50_000,
         strategy: {
-            TP_MIN_USD:   process.env.TP_ETH_USD ?? '4.00',  // directional: ride the move
-            SL_ROI_PCT:   '15',                              // -15% margin → ~$2.66 @100x
-            SL_FIXED_USD: '',
-            ENTRY_TAKER:  'false',
-            BANK_SPLIT:   '0',
-            RANGING_ONLY: 'false',                           // directional: trends allowed
+            TP_ATR_MULT,
+            SL_ATR_MULT,                // ≈ $2.34 ≈ -13% margin @100x
+            TP_MIN_USD:       '',
+            SL_ROI_PCT:       '',
+            SL_FIXED_USD:     '',
+            VWAP_EXT_MAX_PCT: '0.18',   // ETH's VWAP deviation is 5.3x gold's (median 0.142%)
+            ENTRY_TAKER:      'false',
+            BANK_SPLIT:       '0',
+            RANGING_ONLY:     'false',  // directional: trends allowed
         },
     },
 ];
