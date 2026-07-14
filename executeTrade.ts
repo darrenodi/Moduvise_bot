@@ -75,7 +75,12 @@ function getConfig(symbol: string): SymbolConfig {
         maxLeverage: 100, tpFixedUsd: 0.10,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.05,
-        lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
+        // maxHoldMs was a legacy 8min from the pre-bracket era and it was cutting
+        // live winners short: flight verdicts on 2026-07-14 showed 12/18 exits
+        // clock-forced, incl. "MFE $3.11, missed TP by $0.26 — timestop" and
+        // winners scratched at +$0.003 en route to +$0.08 TPs. The TP/SL bracket
+        // is the primary exit; the timer is hygiene only — match gold's 90min.
+        lossCooldownMs: 30_000, maxHoldMs: 90 * 60_000,
     };
     if (s === 'BTCUSDC')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
