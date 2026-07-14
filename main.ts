@@ -206,13 +206,137 @@ function logTradeEntry(
     console.log(`[TradeLog] 📝 ${signal.direction.toUpperCase()} @ $${entryPrice} | TP=$${tpPrice} SL=$${slPrice} | OB=${(ind.obImbalance*100).toFixed(0)}%`);
 }
 
+// ─── FLIGHT RECORDER ──────────────────────────────────────────────────────────
+// Answers "WHY did this trade fail?" (user ask, 2026-07-14). The entry snapshot
+// says what the world looked like when we got in; the exit record says what we got
+// out with. Everything in between — the sell flush that ran us over, the wall we
+// leaned on being pulled 90s after entry, the news spike — was visible live in the
+// heartbeat and then discarded. This records it per-trade and writes a
+// cause-of-death verdict into every closed record, which also gives the Gemini
+// post-trade analyst real evidence instead of just endpoints.
+interface Flight {
+    side:          'long' | 'short';
+    entryPrice:    number;
+    openedAt:      number;
+    samples:       number;
+    mae:           number;   // max adverse excursion ($)
+    maeAtMs:       number;   // ms after entry when MAE was set
+    mfe:           number;   // max favorable excursion ($)
+    mfeAtMs:       number;
+    worstFlowRatio:   number;   // biggest 5s opposing/with-us volume ratio seen
+    worstFlowAtMs:    number;
+    worstFlowOpposeV: number;   // opposing 5s volume at that moment
+    entryWallPrice:   number;   // nearest supporting wall at entry (0 = none seen yet)
+    entryWallUsd:     number;
+    wallPulledAtMs:   number | null;   // when that wall dropped below 40% of its size
+}
+let _flight: Flight | null = null;
+
+function _flightActive(): boolean { return _flight !== null; }
+
+function flightStart(side: 'long' | 'short', entryPrice: number, openedAt = Date.now()): void {
+    _flight = { side, entryPrice, openedAt, samples: 0, mae: 0, maeAtMs: 0, mfe: 0, mfeAtMs: 0,
+        worstFlowRatio: 0, worstFlowAtMs: 0, worstFlowOpposeV: 0,
+        entryWallPrice: 0, entryWallUsd: 0, wallPulledAtMs: null };
+}
+
+// Called from the health watchdog (~2s cadence) with live price + velocity state.
+function flightSample(price: number): void {
+    const f = _flight;
+    if (!f || price <= 0) return;
+    f.samples++;
+    const t = Date.now() - f.openedAt;
+    const adverse = f.side === 'long' ? f.entryPrice - price : price - f.entryPrice;
+    const favor   = -adverse;
+    if (adverse > f.mae) { f.mae = adverse; f.maeAtMs = t; }
+    if (favor   > f.mfe) { f.mfe = favor;   f.mfeAtMs = t; }
+    const v = getVelocityState();
+    if (v?.wsReady) {
+        const oppose = f.side === 'long' ? v.sellVol5s : v.buyVol5s;
+        const withUs = f.side === 'long' ? v.buyVol5s  : v.sellVol5s;
+        const ratio  = oppose / Math.max(withUs, 0.001);
+        if (oppose > 0.5 && ratio > f.worstFlowRatio) {
+            f.worstFlowRatio = ratio; f.worstFlowAtMs = t; f.worstFlowOpposeV = oppose;
+        }
+    }
+}
+
+// Called from runCycle (which already has the book) while a trade is open: tracks
+// whether the wall we entered against is still there.
+function flightWalls(bidWalls: Array<{price: number; notionalUsd: number}>, askWalls: Array<{price: number; notionalUsd: number}>): void {
+    const f = _flight;
+    if (!f) return;
+    const supporting = f.side === 'long' ? bidWalls : askWalls;
+    if (f.entryWallPrice === 0) {
+        const w = supporting[0];
+        if (w) { f.entryWallPrice = w.price; f.entryWallUsd = w.notionalUsd; }
+        return;
+    }
+    if (f.wallPulledAtMs !== null) return;
+    const near = supporting.find(w => Math.abs(w.price - f.entryWallPrice) <= f.entryPrice * 0.0005);
+    if (!near || near.notionalUsd < f.entryWallUsd * 0.4) {
+        f.wallPulledAtMs = Date.now() - f.openedAt;
+    }
+}
+
+// Was any part of [openedAt, now] within ±windowMin of a configured news time (UTC)?
+function nearNewsWindow(openedAt: number, windowMin = 15): string | null {
+    const times = (process.env.NEWS_BLACKOUT_TIMES ?? '12:30,14:00,18:00').split(',').map(s => s.trim()).filter(Boolean);
+    for (const t of times) {
+        const [hh, mm] = t.split(':').map(Number);
+        for (const ts of [openedAt, Date.now()]) {
+            const d = new Date(ts);
+            const news = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), hh, mm);
+            if (Math.abs(ts - news) <= windowMin * 60_000) return `${t}UTC`;
+        }
+    }
+    return null;
+}
+
+// Builds the cause-of-death verdict from the recorded flight.
+function flightVerdict(outcome: string, exitPhase: string): Record<string, any> {
+    const f = _flight;
+    if (!f || f.samples === 0) return { flight: null, verdict: 'no in-trade data recorded' };
+    const news = nearNewsWindow(f.openedAt);
+    const causes: string[] = [];
+    if (outcome !== 'tp') {
+        if (f.worstFlowRatio >= 5)        causes.push(`opposing ${f.side === 'long' ? 'SELL' : 'BUY'} flush ${f.worstFlowRatio.toFixed(0)}x (vol ${f.worstFlowOpposeV.toFixed(1)}) at +${(f.worstFlowAtMs / 1000).toFixed(0)}s`);
+        if (f.wallPulledAtMs !== null)    causes.push(`entry wall ($${(f.entryWallUsd / 1000).toFixed(0)}K @ $${f.entryWallPrice.toFixed(2)}) pulled at +${(f.wallPulledAtMs / 1000).toFixed(0)}s`);
+        if (news)                         causes.push(`news window ${news}`);
+        if (exitPhase === 'timestop') {
+            causes.push(f.mfe < f.mae * 0.5
+                ? `never went our way (MFE $${f.mfe.toFixed(2)} vs MAE $${f.mae.toFixed(2)}) — entry direction wrong`
+                : `chopped both ways but TP never reached (MFE $${f.mfe.toFixed(2)}) — target too far for the window`);
+        }
+        if (causes.length === 0)          causes.push(`gradual drift against (MAE $${f.mae.toFixed(2)} at +${(f.maeAtMs / 1000).toFixed(0)}s), no single shock`);
+    } else {
+        causes.push(f.mae < 0.10 * Math.max(f.mfe, 0.01)
+            ? `clean run to TP (heat only $${f.mae.toFixed(2)})`
+            : `won after $${f.mae.toFixed(2)} heat at +${(f.maeAtMs / 1000).toFixed(0)}s`);
+        if (f.worstFlowRatio >= 5) causes.push(`survived opposing flush ${f.worstFlowRatio.toFixed(0)}x`);
+    }
+    return {
+        flight: {
+            samples: f.samples,
+            mae: +f.mae.toFixed(4), maeAtSec: Math.round(f.maeAtMs / 1000),
+            mfe: +f.mfe.toFixed(4), mfeAtSec: Math.round(f.mfeAtMs / 1000),
+            worstOpposingFlow: f.worstFlowRatio > 0 ? { ratio: +f.worstFlowRatio.toFixed(1), volume: +f.worstFlowOpposeV.toFixed(2), atSec: Math.round(f.worstFlowAtMs / 1000) } : null,
+            entryWall: f.entryWallPrice > 0 ? { price: f.entryWallPrice, notionalUsd: Math.round(f.entryWallUsd), pulledAtSec: f.wallPulledAtMs !== null ? Math.round(f.wallPulledAtMs / 1000) : null } : null,
+            nearNews: news,
+        },
+        verdict: causes.join(' | '),
+    };
+}
+
 function logTradeClose(
     id: string, outcome: string, closePrice: number, pnl: number,
     exitPhase: string, tp2: boolean, scratch: boolean, p1Timeout?: number,
 ): void {
+    const forensics = flightVerdict(outcome, exitPhase);
+    _flight = null;
     const entry = _openLogEntries.get(id);
     if (!entry) {
-        try { fs.appendFileSync(TRADE_LOG_FILE, JSON.stringify({ id, phase: 'closed', outcome, closePrice, pnl, closedAt: new Date().toISOString() }) + '\n'); } catch {}
+        try { fs.appendFileSync(TRADE_LOG_FILE, JSON.stringify({ id, phase: 'closed', outcome, closePrice, pnl, closedAt: new Date().toISOString(), ...forensics }) + '\n'); } catch {}
         return;
     }
     const durationMs  = Date.now() - new Date(entry.entrySignalAt).getTime();
@@ -226,11 +350,12 @@ function logTradeClose(
     const closed = { ...entry, phase: 'closed', outcome, closePrice, pnl,
         durationMs, exitPhase, closedAt: new Date().toISOString(),
         tp2Triggered: tp2, scratchTriggered: scratch,
-        postMortem: { adverseMove: +adverseMove.toFixed(4), priceAtTp1Timeout: p1Timeout ?? null, note } };
+        postMortem: { adverseMove: +adverseMove.toFixed(4), priceAtTp1Timeout: p1Timeout ?? null, note, ...forensics } };
     try { fs.appendFileSync(TRADE_LOG_FILE, JSON.stringify(closed) + '\n'); } catch {}
     _openLogEntries.delete(id);
     const emoji = outcome === 'tp' ? '✅' : outcome === 'sl' ? '🔴' : '⏱';
     console.log(`[TradeLog] ${emoji} ${outcome.toUpperCase()} | PnL: $${pnl.toFixed(4)} | ${(durationMs/1000).toFixed(0)}s | ${note}`);
+    console.log(`[Forensics] ${forensics.verdict}`);
 }
 
 // ─── MARKET DATA INGESTION ────────────────────────────────────────────────────
@@ -364,6 +489,13 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     let   pos   = await getOpenPositionDetails();
     const trade = getActiveTrade();
 
+    // Flight recorder: sample price + live flow every health tick while in a trade.
+    // Also covers adopted orphans (trade exists but no flight was started at entry).
+    if (pos.exists && trade) {
+        if (!_flightActive()) flightStart(trade.side, trade.entryPrice, trade.openedAt);
+        flightSample(pos.currentPrice);
+    }
+
     // ── Orphan safety net ─────────────────────────────────────────────────────
     // A position with no active trade object (e.g. after a restart). If it still
     // has a resting maker TP, it's fine — let it ride to TP. Only a TRULY naked
@@ -490,7 +622,20 @@ async function runCycle(): Promise<void> {
     try {
         const health = await checkPositionHealth();
         if (health === 'tp' || health === 'sl') { saveState(); return; }
-        if (health === 'open') return;
+        if (health === 'open') {
+            // Flight recorder: while riding a position runCycle normally skips all
+            // market fetches, so grab a light depth snapshot here to keep tracking
+            // whether the wall we entered against is still standing.
+            if (_flightActive()) {
+                try {
+                    const d = await fetch(`https://fapi.binance.com/fapi/v1/depth?symbol=${MARKET_SYMBOL}&limit=20`).then(r => r.json()) as any;
+                    const WALL_THRESHOLD = 20_000;
+                    const mk = (ls: string[][]) => ls.map(l => ({ price: Number(l[0]), notionalUsd: Number(l[0]) * Number(l[1]) })).filter(w => w.notionalUsd >= WALL_THRESHOLD);
+                    flightWalls(mk(d.bids ?? []), mk(d.asks ?? []));
+                } catch { /* non-critical forensics */ }
+            }
+            return;
+        }
 
         // Reload bankroll each cycle
         _bankroll = loadBankroll(_symbol);
@@ -538,6 +683,8 @@ async function runCycle(): Promise<void> {
 
         if (result.outcome === 'orders_placed' && result.entryPrice) {
             _currentTradeId = new Date().toISOString().replace(/[:.]/g, '-');
+            flightStart(signal.direction as 'long' | 'short', result.entryPrice);
+            flightWalls(asset.orderBook.bidWalls, asset.orderBook.askWalls);   // capture the entry wall now
             logTradeEntry(_currentTradeId, signal, asset, result.entryPrice,
                 result.tpPrice ?? 0, result.slPrice ?? 0,
                 _lastKlines, _lastRawBook.bids, _lastRawBook.asks);
