@@ -254,9 +254,14 @@ function flightSample(price: number): void {
     if (v?.wsReady) {
         const oppose = f.side === 'long' ? v.sellVol5s : v.buyVol5s;
         const withUs = f.side === 'long' ? v.buyVol5s  : v.sellVol5s;
-        const ratio  = oppose / Math.max(withUs, 0.001);
-        if (oppose > 0.5 && ratio > f.worstFlowRatio) {
-            f.worstFlowRatio = ratio; f.worstFlowAtMs = t; f.worstFlowOpposeV = oppose;
+        // Rank by opposing VOLUME, not by ratio. A ratio blows up to absurd values
+        // (80267x) whenever the other side of the tape is momentarily silent —
+        // that's a quiet book, not a flush. Volume is the honest measure of "how
+        // much size ran us over"; the ratio is only reported alongside it, clamped.
+        if (oppose > f.worstFlowOpposeV) {
+            f.worstFlowOpposeV = oppose;
+            f.worstFlowRatio   = Math.min(oppose / Math.max(withUs, 0.05), 99);
+            f.worstFlowAtMs    = t;
         }
     }
 }
@@ -300,7 +305,10 @@ function flightVerdict(outcome: string, exitPhase: string): Record<string, any> 
     const news = nearNewsWindow(f.openedAt);
     const causes: string[] = [];
     if (outcome !== 'tp') {
-        if (f.worstFlowRatio >= 5)        causes.push(`opposing ${f.side === 'long' ? 'SELL' : 'BUY'} flush ${f.worstFlowRatio.toFixed(0)}x (vol ${f.worstFlowOpposeV.toFixed(1)}) at +${(f.worstFlowAtMs / 1000).toFixed(0)}s`);
+        // Threshold on VOLUME (ratio is unreliable — see flightSample). FLUSH_VOL is
+        // per-asset: gold's aggTrade sizes are ~10x ETH's, so one number won't do.
+        const FLUSH_VOL = Number(process.env.FORENSIC_FLUSH_VOL || (_isEth ? 20 : 30));
+        if (f.worstFlowOpposeV >= FLUSH_VOL) causes.push(`opposing ${f.side === 'long' ? 'SELL' : 'BUY'} flush (vol ${f.worstFlowOpposeV.toFixed(1)}, ${f.worstFlowRatio.toFixed(0)}x) at +${(f.worstFlowAtMs / 1000).toFixed(0)}s`);
         if (f.wallPulledAtMs !== null)    causes.push(`entry wall ($${(f.entryWallUsd / 1000).toFixed(0)}K @ $${f.entryWallPrice.toFixed(2)}) pulled at +${(f.wallPulledAtMs / 1000).toFixed(0)}s`);
         if (news)                         causes.push(`news window ${news}`);
         if (exitPhase === 'timestop') {
@@ -313,7 +321,8 @@ function flightVerdict(outcome: string, exitPhase: string): Record<string, any> 
         causes.push(f.mae < 0.10 * Math.max(f.mfe, 0.01)
             ? `clean run to TP (heat only $${f.mae.toFixed(2)})`
             : `won after $${f.mae.toFixed(2)} heat at +${(f.maeAtMs / 1000).toFixed(0)}s`);
-        if (f.worstFlowRatio >= 5) causes.push(`survived opposing flush ${f.worstFlowRatio.toFixed(0)}x`);
+        const FLUSH_VOL = Number(process.env.FORENSIC_FLUSH_VOL || (_isEth ? 20 : 30));
+        if (f.worstFlowOpposeV >= FLUSH_VOL) causes.push(`survived opposing flush (vol ${f.worstFlowOpposeV.toFixed(1)})`);
     }
     return {
         flight: {
