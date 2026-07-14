@@ -551,6 +551,19 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                     stats.fills++;
                     await applyTradeResult(real.pnl);
                     await cancelAllOrders(trade.slOrderId);
+                    // Expressive win/loss notification (user ask, 2026-07-14).
+                    const holdMin = ((Date.now() - trade.openedAt) / 60_000).toFixed(1);
+                    const roiPct  = trade.margin > 0 ? (real.pnl / trade.margin) * 100 : 0;
+                    await sendAlert(outcome === 'tp'
+                        ? `🟢🎯 TP HIT — ${_symbol} ${trade.side.toUpperCase()}\n` +
+                          `💰 PROFIT: +$${real.pnl.toFixed(4)}  (${roiPct >= 0 ? '+' : ''}${roiPct.toFixed(1)}% on margin)\n` +
+                          `📍 entry $${trade.entryPrice.toFixed(2)} → target $${trade.tpPrice.toFixed(2)} | held ${holdMin}min\n` +
+                          `🏦 stack: $${getStack().toFixed(4)} | today: ${stats.tpHits}W/${stats.slHits}L`
+                        : `🔴🛑 SL HIT — ${_symbol} ${trade.side.toUpperCase()}\n` +
+                          `💸 LOSS: −$${Math.abs(real.pnl).toFixed(4)}  (${roiPct.toFixed(1)}% on margin)\n` +
+                          `📍 entry $${trade.entryPrice.toFixed(2)} → stopped $${trade.slPrice > 0 ? trade.slPrice.toFixed(2) : pos.currentPrice.toFixed(2)} | held ${holdMin}min\n` +
+                          `🏦 stack: $${getStack().toFixed(4)} | today: ${stats.tpHits}W/${stats.slHits}L`
+                    ).catch(() => {});
                     if (_currentTradeId) {
                         // exitPhase must reflect what ACTUALLY closed it — this was
                         // hardcoded 'tp1' even on real algo-SL fills, mislabeling
@@ -776,14 +789,14 @@ const _refPx  = Number(process.env.BANNER_REF_PRICE || (_isEth ? 1786 : 4022));
 const _refAtr = Number(process.env.BANNER_REF_ATR   || (_isEth ? 2.92 : 3.60));   // measured 2026-07-14
 const _tpMult = Number(process.env.TP_ATR_MULT || 0);
 const _tpUsd  = _tpMult > 0 ? _refAtr * _tpMult : Number(process.env.TP_MIN_USD || 4.00);
-const _slUsd  = calcSlDistance(_refPx, _refAtr);
+const _slUsd  = calcSlDistance(_refPx, _refAtr, _tpUsd);
 const _taker  = isEntryTaker();
 const _entFee = _taker ? _refPx * 0.0004 : 0;      // taker entry fee scales with price; maker = 0
 const _win    = _tpUsd - _entFee;                  // maker TP exit = 0 fee
 const _loss   = _slUsd + (_refPx * 0.0004) + _entFee;   // the stop always exits taker
 console.log(`  ENTRY    : ${_taker ? 'TAKER/MARKET (instant, ~0.04% fee every trade)' : 'MAKER/GTX chase-to-fill (0 fee; only fills when price comes to us)'}`);
 console.log(`  TP       : $${_tpUsd.toFixed(2)}${_tpMult > 0 ? ` (${_tpMult}x ATR $${_refAtr.toFixed(2)})` : ' fixed'}, post-only maker, 0 fee`);
-console.log(`  SL       : $${_slUsd.toFixed(2)}${process.env.SL_ATR_MULT ? ` (${process.env.SL_ATR_MULT}x ATR)` : (process.env.SL_ROI_PCT ? ` (= -${process.env.SL_ROI_PCT}% of margin @ ${_lev}x)` : '')}, Algo stop-market`);
+console.log(`  SL       : $${_slUsd.toFixed(2)}${process.env.SL_FROM_TP_MULT ? ` (loss + taker fee = ${process.env.SL_FROM_TP_MULT}x TP, exact)` : (process.env.SL_ATR_MULT ? ` (${process.env.SL_ATR_MULT}x ATR)` : '')}, Algo stop-market`);
 console.log(`  BREAKEVEN: win ≈ +$${_win.toFixed(2)}/unit, stop-out ≈ -$${_loss.toFixed(2)}/unit incl. fees → 1 loss ≈ ${(_loss / _win).toFixed(1)} wins, breakeven ≈ ${((_loss / (_loss + _win)) * 100).toFixed(0)}% WR`);
 console.log(`  GATES    : RANGING-ONLY | momentum-aligned | flow 5s+60s | funding | OI surge | VWAP value-side | daily break + news blackout`);
 console.log(`  EXIT     : maker TP, stop-market SL, or time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min (hygiene)`);

@@ -87,8 +87,14 @@ interface BotConfig {
 // TP at 1.0x ATR is one normal 5m candle — demonstrably reachable (gold hit its TP
 // 8/13 times at 0.56x ATR with zero time-stops), unlike ETH's old $4 = 1.37x ATR
 // which time-stopped on 21 of 40 trades.
-const SL_ATR_MULT = '0.8';   // stop at 0.8x ATR — outside the tick noise, inside the win
-const TP_ATR_MULT = '1.0';   // target one normal candle
+// User rule 2026-07-14 (exact form): "sl + taker fee = tp x 2" — the total realized
+// loss INCLUDING the taker exit fee equals exactly two wins:
+//   slDist = 2×tpDist − takerFee×entry     (maker entry/TP pay nothing)
+// One loss = exactly 2.0 wins → breakeven 66.7%, vs the sniper stacks' measured 81%.
+// The stop lands ≈1.55×ATR on gold / ≈1.74×ATR on ETH — outside the ~0.8×ATR median
+// adverse excursion, so ordinary wiggle shouldn't tag it.
+const SL_FROM_TP_MULT = '2';   // exact rule: loss + fee = 2 × TP
+const TP_ATR_MULT     = '1.0'; // target one normal candle
 const BOTS: BotConfig[] = [
     // SNIPER MODE (2026-07-14, user demand: maximize accuracy, not just expectancy).
     // Both bots now run the two measured-best filter stacks from the 150-trade path
@@ -108,7 +114,7 @@ const BOTS: BotConfig[] = [
         leverage: 100, wallMinNotional: 20_000,
         strategy: {
             TP_ATR_MULT,
-            SL_ATR_MULT,                // ≈ $2.88 ≈ -7% margin @100x
+            SL_FROM_TP_MULT,            // sl + taker fee = 2 x TP (exact)
             TP_MIN_USD:       '',       // unset → ATR-relative
             SL_ROI_PCT:       '',       // unset → ATR-relative
             SL_FIXED_USD:     '',
@@ -127,7 +133,7 @@ const BOTS: BotConfig[] = [
         leverage: 100, wallMinNotional: 50_000,
         strategy: {
             TP_ATR_MULT,
-            SL_ATR_MULT,                // ≈ $2.34 ≈ -13% margin @100x
+            SL_FROM_TP_MULT,            // sl + taker fee = 2 x TP (exact)
             TP_MIN_USD:       '',
             SL_ROI_PCT:       '',
             SL_FIXED_USD:     '',

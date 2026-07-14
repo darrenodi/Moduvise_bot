@@ -602,8 +602,17 @@ function calcTpDistance(atr5m: number): number {
 //      move to lose the same fraction). Gold at -15%: 12x→$51.25, 50x→$12.30,
 //      100x→$6.15.
 //   3. SL_FIXED_USD — fixed dollars. Meaningless across assets; kept for legacy.
-export function calcSlDistance(entry: number, atr5m = 0): number {
+export function calcSlDistance(entry: number, atr5m = 0, tpDist = 0): number {
     const floor   = _cfg.slMinTicks * _cfg.tick;
+    // Priority 0 (user spec 2026-07-14, "sl + taker fee = tp x 2"): the EXACT rule —
+    // total realized loss including the taker exit fee equals exactly N wins:
+    //   slDist = N × tpDist − takerFee×entry     (maker entry pays nothing)
+    // With TP = 1.0×ATR this stays solvable (fee ≈ 0.45×ATR on gold, less on ETH).
+    const tpMult = Number(process.env.SL_FROM_TP_MULT || 0);
+    if (tpMult > 0 && tpDist > 0) {
+        const fee = Number(process.env.TAKER_FEE_FALLBACK ?? 0.0004) * entry;
+        return tickRound(Math.max(tpMult * tpDist - fee, floor));
+    }
     const atrMult = Number(process.env.SL_ATR_MULT || 0);
     if (atrMult > 0 && atr5m > 0) {
         return tickRound(Math.max(atr5m * atrMult, floor));
@@ -683,10 +692,17 @@ export async function executeBinanceTrade(
         // ("already isolated") case. With no SL now in place, an un-isolated position
         // exposes the WHOLE wallet to liquidation, not just this trade's margin — this
         // must be loud, not swallowed.
-        const marginRes = await privatePost('/fapi/v1/marginType', { symbol: STRATEGY.SYMBOL, marginType: process.env.MARGIN_TYPE ?? 'ISOLATED' });
-        if (marginRes?.code && marginRes.code !== -4046) {
-            console.error(`[Margin] ⚠️ Failed to set ISOLATED margin: ${JSON.stringify(marginRes)} — position will be CROSS (whole wallet at risk)`);
-            await sendAlert(`⚠️ ${STRATEGY.SYMBOL} could not set ISOLATED margin (${marginRes.msg}) — this trade will be on CROSS margin, exposing the full wallet.`);
+        // Isolated-margin forcing DISABLED (user, 2026-07-14: "the logs show cross
+        // isolated failing, so stop forcing it"). Binance rejects the switch (-4047)
+        // whenever any order/position exists, which with two bots trading is nearly
+        // always — so the attempt just spammed alerts without ever succeeding.
+        // Positions run on whatever margin mode the account is set to (currently
+        // CROSS). Set FORCE_ISOLATED=true to re-enable the attempt.
+        if ((process.env.FORCE_ISOLATED ?? 'false') === 'true') {
+            const marginRes = await privatePost('/fapi/v1/marginType', { symbol: STRATEGY.SYMBOL, marginType: process.env.MARGIN_TYPE ?? 'ISOLATED' });
+            if (marginRes?.code && marginRes.code !== -4046) {
+                console.warn(`[Margin] isolated switch rejected (${marginRes.code}) — continuing on account default`);
+            }
         }
 
         // Set leverage
@@ -782,7 +798,7 @@ export async function executeBinanceTrade(
         const takerFeeRate = await getTakerFeeRate();
         const feePerUnit = takerFeeRate * actualEntry;
         const tpDist  = calcTpDistance(signal.atr5m);
-        const slDist  = calcSlDistance(actualEntry, signal.atr5m);
+        const slDist  = calcSlDistance(actualEntry, signal.atr5m, tpDist);
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
