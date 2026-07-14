@@ -90,6 +90,19 @@ interface BotConfig {
 const SL_ATR_MULT = '0.8';   // stop at 0.8x ATR — outside the tick noise, inside the win
 const TP_ATR_MULT = '1.0';   // target one normal candle
 const BOTS: BotConfig[] = [
+    // SNIPER MODE (2026-07-14, user demand: maximize accuracy, not just expectancy).
+    // Both bots now run the two measured-best filter stacks from the 150-trade path
+    // dataset — the highest win rates this signal's inputs produce:
+    //   stack A: ranging + OB>=80% + at/behind VWAP            → 81% WR (n=16)
+    //   stack B: any regime + OB>=80% + behind VWAP + mom-align → 81% WR (n=16)
+    // OB>=90% measured WORSE (56%) — extreme imbalance is a trap; 80 is the sweet
+    // spot. Pure-momentum entries are disabled (MOM_STRONG_ATR=99) since the stacks
+    // were measured on OB-led entries only. Frequency drops to ~10% of trades; with
+    // the 1.0/0.8 ATR bracket (breakeven 55%), 81% WR ≈ +$2.06/unit expectancy.
+    // Caveat on the record: stacks were measured on GOLD data; ETH runs stack B
+    // structurally (own ATR/VWAP scale) as an experiment — its old loose config was
+    // a proven coinflip (losers wrong from the first tick), so tightening can't do
+    // worse and the flight recorder will verdict it either way.
     {
         botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
         leverage: 100, wallMinNotional: 20_000,
@@ -99,10 +112,14 @@ const BOTS: BotConfig[] = [
             TP_MIN_USD:       '',       // unset → ATR-relative
             SL_ROI_PCT:       '',       // unset → ATR-relative
             SL_FIXED_USD:     '',
-            VWAP_EXT_MAX_PCT: '0.04',   // gold's measured VWAP deviation (median 0.027%)
+            VWAP_EXT_MAX_PCT: '0',      // sniper: at/behind VWAP only
+            OB_STRONG:        '0.80',   // sniper: strong-book entries only
+            OB_LEAN:          '0.80',
+            MOM_STRONG_ATR:   '99',     // no pure-momentum entries
+            MOM_ALIGN:        'false',  // stack A measured better WITHOUT mom-align
             ENTRY_TAKER:      'false',  // maker entry (0 fee)
             BANK_SPLIT:       '0',      // no banking, 100% reinvested
-            RANGING_ONLY:     'true',   // scalping only makes sense in ranges
+            RANGING_ONLY:     'true',   // stack A: ranging only
         },
     },
     {
@@ -114,10 +131,14 @@ const BOTS: BotConfig[] = [
             TP_MIN_USD:       '',
             SL_ROI_PCT:       '',
             SL_FIXED_USD:     '',
-            VWAP_EXT_MAX_PCT: '0.18',   // ETH's VWAP deviation is 5.3x gold's (median 0.142%)
+            VWAP_EXT_MAX_PCT: '0',      // sniper: value side only (was 0.18 loose)
+            OB_STRONG:        '0.80',
+            OB_LEAN:          '0.80',
+            MOM_STRONG_ATR:   '99',
+            MOM_ALIGN:        'true',   // stack B keeps momentum alignment
             ENTRY_TAKER:      'false',
             BANK_SPLIT:       '0',
-            RANGING_ONLY:     'false',  // directional: trends allowed
+            RANGING_ONLY:     'false',  // stack B: any regime
         },
     },
 ];
