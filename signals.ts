@@ -173,6 +173,13 @@ const FLOW_1M_AGAINST   = Number(process.env.FLOW_1M_AGAINST   ?? 1.3);   // blo
 const VWAP_EXT_MAX_PCT  = Number(
     process.env.VWAP_EXT_MAX_PCT ?? (MARKET_SYMBOL.toUpperCase().includes('ETH') ? 0.18 : 0.04)
 );
+// Max % price may sit BEHIND VWAP in the trade's direction (the falling-knife cap,
+// 2026-07-15). Value-side entries are good; entries DEEP below value are knives —
+// sniper-era ETH losses entered at avg 1.14% from VWAP vs 0.84% for wins. Set near
+// each asset's p85 deviation so it trims the tail without killing frequency.
+const VWAP_DEPTH_MAX_PCT = Number(
+    process.env.VWAP_DEPTH_MAX_PCT ?? (MARKET_SYMBOL.toUpperCase().includes('ETH') ? 1.00 : 0.30)
+);
 const RANGING_ONLY      = (process.env.RANGING_ONLY ?? 'true') === 'true'; // user spec 2026-07-11: trade only when regime classifies as 'ranging'
 const MOM_ALIGN         = (process.env.MOM_ALIGN    ?? 'true') === 'true'; // user spec 2026-07-11: 5m momentum must already point in the trade's direction
 // Was 'true' by default (blocks Asia/off-hours + NY-close, i.e. ~14h/day) from
@@ -411,6 +418,19 @@ function getDirection(
         if (vwapExt > VWAP_EXT_MAX_PCT) {
             return neutral(`CHASING: ${Math.abs(ind.priceVsVwap).toFixed(2)}% past VWAP in trade direction (max ${VWAP_EXT_MAX_PCT}) — wait for value side`);
         }
+    }
+
+    // ── Gate 3b3: FALLING KNIFE — value side has a bottom too (2026-07-15) ────
+    // The extension cap stops chasing PAST value, but nothing stopped buying DEEP
+    // below it. Sniper-era ETH audit (22W/17L): losses entered at avg 1.14% from
+    // VWAP vs wins at 0.84%, on hotter momentum — i.e. the losers were catching
+    // knives that kept falling. Cap how far BEHIND value an entry may be, in ALL
+    // regimes (a knife falls in trends too). Moderate-evidence gate: thresholds
+    // set generously (≈p85 of each asset's deviation) so it trims the tail, not
+    // the frequency.
+    const vwapDepth = -(dir === 'long' ? ind.priceVsVwap : -ind.priceVsVwap);  // % BEHIND value in our direction
+    if (vwapDepth > VWAP_DEPTH_MAX_PCT) {
+        return neutral(`FALLING KNIFE: ${vwapDepth.toFixed(2)}% behind VWAP (max ${VWAP_DEPTH_MAX_PCT}) — too deep, let it land`);
     }
 
     // ── Gate 3c: Sentiment — funding + open-interest ──────────────────────────

@@ -903,10 +903,13 @@ export async function executeBinanceTrade(
             tp2Phase:    false,
         };
 
+        // Entry alert is BLUE (user, 2026-07-15): green/red are reserved for the
+        // TP-hit / SL-hit outcome alerts, so an entry must never look like a win.
         await sendAlert(
-            `✅ ${STRATEGY.SYMBOL} ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} (TAKER)\n` +
-            `TP: $${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | SL: $${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)})\n` +
-            `Size: ${size} | Margin: $${Number(process.env.MARGIN_PER_TRADE ?? 1).toFixed(2)}`
+            `🔵📥 ENTRY — ${STRATEGY.SYMBOL} ${direction === 'long' ? '⬆️ LONG' : '⬇️ SHORT'} (${(process.env.ENTRY_TAKER ?? 'true') === 'true' ? 'taker' : 'maker'})\n` +
+            `💵 filled @ $${actualEntry.toFixed(_cfg.priceDp)}\n` +
+            `🎯 TP $${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | 🛡 SL $${slPrice.toFixed(_cfg.priceDp)} (−$${slDist.toFixed(_cfg.priceDp)})\n` +
+            `📦 size ${size} | margin $${Number(process.env.MARGIN_PER_TRADE ?? 1).toFixed(2)}`
         );
 
         return {

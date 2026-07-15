@@ -805,7 +805,7 @@ console.log(`  STACK    : $${getStack().toFixed(4)} | BANKED: $${getBanked().toF
 console.log(`  LOG      : ${TRADE_LOG_FILE}`);
 console.log(`${'═'.repeat(70)}\n`);
 
-sendAlert(`✅ ${_symbol} | ${ENVIRONMENT} | ${_lev}x | stack=$${getStack().toFixed(4)} | banked=$${getBanked().toFixed(4)}`);
+sendAlert(`🔵🤖 ${_symbol} online | ${ENVIRONMENT} | ${_lev}x | stack=$${getStack().toFixed(4)} | banked=$${getBanked().toFixed(4)}`);
 
 startVelocityMonitor();
 runCycle().then(scheduleNext);
