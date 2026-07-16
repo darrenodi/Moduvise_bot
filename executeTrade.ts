@@ -427,7 +427,11 @@ export async function getRealizedPnlSince(sinceMs: number): Promise<{ pnl: numbe
         // bankroll compounded numbers that didn't exist (found 2026-07-07: log said
         // +$0.083 while the wallet dropped $0.12 over the same 19 trades).
         const netPnl = (rows: any[]) => rows.reduce((s: number, t: any) =>
-            s + Number(t.realizedPnl ?? 0) - (t.commissionAsset === 'USDT' ? Number(t.commission ?? 0) : 0), 0);
+            // USDT *and* USDC: ETHUSDC pays commission in USDC — the USDT-only filter
+            // silently skipped every ETH fee and the ledger drifted $0.62 above the
+            // real wallet in 4 days (found reconciling 2026-07-16: books $1.92,
+            // wallet $1.30; the rest is uncounted funding fees).
+            s + Number(t.realizedPnl ?? 0) - (['USDT', 'USDC'].includes(t.commissionAsset) ? Number(t.commission ?? 0) : 0), 0);
         if (!Array.isArray(data) || !data.length) {
             // Retry with broader window for clock skew
             const data2 = await privateGet('/fapi/v1/userTrades', {
