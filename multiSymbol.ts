@@ -145,6 +145,10 @@ const BOTS: BotConfig[] = [
             ENTRY_TAKER:      'false',
             BANK_SPLIT:       '0',
             RANGING_ONLY:     'false',  // stack B: any regime
+            // Quiet-hours window (2026-07-16, from 75 flight-recorded trades):
+            // 18:00-06:00 UTC ran ~76% WR +$0.46; 06:00-18:00 ran 50% WR −$0.73 —
+            // every big-flush death was a London/NY hour. ETH trades nights only.
+            TRADE_HOURS_UTC:  '18-6',
         },
     },
 ];

@@ -180,6 +180,8 @@ const VWAP_EXT_MAX_PCT  = Number(
 const VWAP_DEPTH_MAX_PCT = Number(
     process.env.VWAP_DEPTH_MAX_PCT ?? (MARKET_SYMBOL.toUpperCase().includes('ETH') ? 1.00 : 0.30)
 );
+// Allowed trading window in UTC hours, e.g. "18-6" (wrap-around OK). Empty = 24h.
+const TRADE_HOURS_UTC   = (process.env.TRADE_HOURS_UTC ?? '').trim();
 const RANGING_ONLY      = (process.env.RANGING_ONLY ?? 'true') === 'true'; // user spec 2026-07-11: trade only when regime classifies as 'ranging'
 const MOM_ALIGN         = (process.env.MOM_ALIGN    ?? 'true') === 'true'; // user spec 2026-07-11: 5m momentum must already point in the trade's direction
 // Was 'true' by default (blocks Asia/off-hours + NY-close, i.e. ~14h/day) from
@@ -307,6 +309,22 @@ function getDirection(
     // ── Gate 0: Trading blackout (weekend frozen index, daily break, news) ─────
     const blackout = getTradingBlackout();
     if (blackout) return neutral(`BLACKOUT: ${blackout}`);
+
+    // ── Gate 0a: Trading-hours window (env TRADE_HOURS_UTC, e.g. "18-6") ──────
+    // Data-driven, 2026-07-16, from 75 flight-recorded ETH sniper trades:
+    //   18:00–06:00 UTC: 33 trades, ~76% WR, +$0.46   (Asia + late NY — calm flow)
+    //   06:00–18:00 UTC: 42 trades,  50% WR, −$0.73   (London/NY — every big-flush
+    //                                                  death lived here)
+    // Book-led entries read resting liquidity; during London/NY the institutional
+    // flushes (700–1,900-volume waves per the flight recorder) run straight over
+    // them. Confirmed independently by session labels (Asia 79% WR) and the ATR
+    // tercile (high-ATR bucket 56%, −$0.27). Wrap-around supported ("18-6").
+    if (TRADE_HOURS_UTC) {
+        const h = new Date().getUTCHours();
+        const [a, b] = TRADE_HOURS_UTC.split('-').map(Number);
+        const inWindow = a < b ? (h >= a && h < b) : (h >= a || h < b);
+        if (!inWindow) return neutral(`OFF HOURS: ${h}:xx UTC outside ${TRADE_HOURS_UTC} window — flush hours, book signal unreliable`);
+    }
 
     // ── Gate 0b: Session quality — no entries in thin/drift hours. Both live
     //    losses (174min ride, 72min ride) entered during Asia/off-hours; the
