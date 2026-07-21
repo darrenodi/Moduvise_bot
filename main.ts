@@ -492,6 +492,24 @@ async function buildLiveMarketData(symbol: string): Promise<MarketData[]> {
 // until one fills, or liquidation if the SL gaps. No taker timeout/scratch/fail-safe.
 let _currentTradeId: string | null = null;
 let _lastLossAt = 0;
+// Directional loss guard (2026-07-21): after a stop-out, block RE-ENTERING THE SAME
+// DIRECTION until price has actually moved favorably past the level where we were
+// stopped — this breaks the "buy the dip → flushed → buy again" loop that had gold
+// take 16 consecutive longs into a single afternoon selloff (9W/7L, −$0.077, the
+// bulk of the day's loss). Verified in the flight data BEFORE building; the same
+// check showed ETH does NOT streak-lose, so this guard is gold-appropriate but
+// harmless to ETH (which rarely triggers it). Env DIR_GUARD_MULT (× ATR).
+let _lastLossDir: 'long' | 'short' | null = null;
+let _lastLossPrice = 0;
+let _lastLossReclaim = 0;   // price that must be reclaimed before same-dir re-entry
+function recordLoss(dir: 'long' | 'short', exitPrice: number, atr: number): void {
+    _lastLossAt = Date.now();
+    _lastLossDir = dir;
+    _lastLossPrice = exitPrice;
+    // Require price to reclaim ~1×ATR back in our favor before we retry this side.
+    const mult = Number(process.env.DIR_GUARD_MULT ?? 1.0);
+    _lastLossReclaim = dir === 'long' ? exitPrice + atr * mult : exitPrice - atr * mult;
+}
 let _closeInProgress = false;   // guards against runCycle + watchdog double-processing a close
 
 async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
@@ -547,7 +565,8 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 const real = await getRealizedPnlSince(trade.openedAt - 2_000);
                 if (real) {
                     const outcome = real.pnl >= 0 ? 'tp' : 'sl';
-                    if (outcome === 'tp') stats.tpHits++; else { stats.slHits++; _lastLossAt = Date.now(); }
+                    if (outcome === 'tp') stats.tpHits++;
+                    else { stats.slHits++; recordLoss(trade.side, pos.currentPrice, Math.abs(trade.entryPrice - trade.slPrice) || Math.abs(trade.tpPrice - trade.entryPrice)); }
                     stats.fills++;
                     await applyTradeResult(real.pnl);
                     await cancelAllOrders(trade.slOrderId);
@@ -619,7 +638,8 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
             const real = await getRealizedPnlSince(trade.openedAt - 2_000);
             const pnl  = real ? real.pnl : 0;
             const outcome = pnl >= 0 ? 'tp' : 'sl';
-            if (outcome === 'tp') stats.tpHits++; else { stats.slHits++; _lastLossAt = Date.now(); }
+            if (outcome === 'tp') stats.tpHits++;
+            else { stats.slHits++; recordLoss(trade.side, pos.currentPrice, Math.abs(trade.entryPrice - trade.slPrice) || Math.abs(trade.tpPrice - trade.entryPrice)); }
             stats.fills++;
             await applyTradeResult(pnl);
             if (_currentTradeId) {
@@ -678,6 +698,20 @@ async function runCycle(): Promise<void> {
         console.log(`[Heartbeat] ${signal.reasoning} | Stack: $${getStack().toFixed(4)} | Banked: $${getBanked().toFixed(4)}`);
 
         if (signal.direction === 'neutral') { stats.skipped++; return; }
+
+        // Directional loss guard: after a stop-out, refuse the SAME direction until
+        // price has reclaimed ~1×ATR past where we were stopped. Opposite-direction
+        // entries are always allowed (if the move flipped, trade the flip). Clears
+        // once reclaimed so we don't sit out a genuine resumption.
+        if (_lastLossDir && signal.direction === _lastLossDir) {
+            const px = asset.price;
+            const reclaimed = _lastLossDir === 'long' ? px >= _lastLossReclaim : px <= _lastLossReclaim;
+            if (!reclaimed) {
+                console.log(`[${_symbol}] 🚫 DIR-GUARD: skip ${signal.direction} — price $${px.toFixed(2)} hasn't reclaimed $${_lastLossReclaim.toFixed(2)} since last ${_lastLossDir} loss`);
+                stats.skipped++; return;
+            }
+            _lastLossDir = null;   // reclaimed — guard clears
+        }
 
         // Size the trade to REAL available balance. Deploy the stack, but never more
         // than ~98% of free balance (buffer), and skip only if we can't meet the
