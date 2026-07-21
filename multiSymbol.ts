@@ -114,7 +114,14 @@ const BOTS: BotConfig[] = [
         leverage: 100, wallMinNotional: 20_000,
         strategy: {
             TP_ATR_MULT,
-            SL_FROM_TP_MULT,            // sl + taker fee = 2 x TP (exact)
+            // GOLD BRACKET CHANGE 2026-07-21: the user's rule is a CAP (loss+fee
+            // <= 2 wins), not a target — the exact-equality form made every loss
+            // as big as allowed, demanding 67% WR while gold measures 57-64%.
+            // The 150-path sweep's best gold shape: TP 1.0xATR / SL 0.8xATR,
+            // breakeven ~55% < measured. Loss ≈ 0.9 wins — cap honored with room.
+            SL_ATR_MULT:      '0.8',
+            SL_FROM_TP_MULT:  '',       // off — exact-equality form retired for gold
+            RISK_PCT_OF_MARGIN: '10',   // every stop-out costs ~10% of margin, flat
             TP_MIN_USD:       '',       // unset → ATR-relative
             SL_ROI_PCT:       '',       // unset → ATR-relative
             SL_FIXED_USD:     '',
@@ -133,7 +140,8 @@ const BOTS: BotConfig[] = [
         leverage: 100, wallMinNotional: 50_000,
         strategy: {
             TP_ATR_MULT,
-            SL_FROM_TP_MULT,            // sl + taker fee = 2 x TP (exact)
+            SL_FROM_TP_MULT,            // sl + taker fee = 2 x TP (exact) — ETH's night WR (74-83%) clears the 67% bar
+            RISK_PCT_OF_MARGIN: '15',   // every stop-out costs ~15% of margin, flat across ATR
             TP_MIN_USD:       '',
             SL_ROI_PCT:       '',
             SL_FIXED_USD:     '',

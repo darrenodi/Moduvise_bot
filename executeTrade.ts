@@ -558,16 +558,29 @@ function qtyFloor(qty: number): number {
     return Math.max(_cfg.minQty, steps * _cfg.qtyStep);
 }
 
-export function calcSize(price: number): number {
+// RISK-CONSTANT SIZING (2026-07-21). Found in the 2-day autopsy: gold's avg loss ran
+// 2.7x its avg win (6 losses at 3-5x!) despite the per-trade SL rule holding, because
+// brackets scale with ATR-at-entry — wins were landing in calm (small-bracket) moments
+// and losses in violent (big-bracket) ones, so the dollar mix violated the ratio the
+// per-trade math promised. Fix: cap qty so a full stop-out costs the same dollars on
+// every trade: qty ≤ (margin × RISK_PCT_OF_MARGIN%) / slDist. High-ATR trade → smaller
+// position, low-ATR → bigger (up to the leverage cap). The exchange min-notional floor
+// can still force a slightly larger position at tiny stacks — unavoidable, disclosed.
+export function calcSize(price: number, slDistEst = 0): number {
     const margin   = Number(process.env.MARGIN_PER_TRADE ?? STRATEGY.MARGIN_PER_TRADE);
     const leverage = STRATEGY.LEVERAGE;
     const notional = Math.min(margin * leverage, 5000);
-    const raw      = notional / price;
-    let   size     = qtyFloor(raw);
+    let   raw      = notional / price;
+    const riskPct  = Number(process.env.RISK_PCT_OF_MARGIN || 0);
+    if (riskPct > 0 && slDistEst > 0) {
+        const qtyRisk = (margin * riskPct / 100) / slDistEst;
+        raw = Math.min(raw, qtyRisk);
+    }
+    let size = qtyFloor(raw);
     while (size * price < STRATEGY.MIN_NOTIONAL) {
         size = Number((size + _cfg.qtyStep).toFixed(_cfg.qtyDp === 0 ? 0 : 3));
     }
-    console.log(`[Size] ${STRATEGY.SYMBOL} | margin=$${Number(margin).toFixed(2)} ${leverage}x | notional=$${(size*price).toFixed(2)} | size=${size}`);
+    console.log(`[Size] ${STRATEGY.SYMBOL} | margin=$${Number(margin).toFixed(2)} ${leverage}x | notional=$${(size*price).toFixed(2)} | size=${size}${riskPct > 0 && slDistEst > 0 ? ` | riskCap $${(margin*riskPct/100).toFixed(3)}@SL$${slDistEst.toFixed(2)}` : ''}`);
     return size;
 }
 
@@ -722,7 +735,10 @@ export async function executeBinanceTrade(
         // The 2026-07-12 dual-bot spec is maker on both bots.
         const ENTRY_TAKER = (process.env.ENTRY_TAKER ?? 'true') === 'true';
         const estPrice = isBuy ? liveAsk : liveBid;
-        const size     = calcSize(estPrice);
+        // Pre-entry SL estimate so sizing can hold dollar-risk constant across ATR.
+        const estTp    = calcTpDistance(signal.atr5m);
+        const estSl    = calcSlDistance(estPrice, signal.atr5m, estTp);
+        const size     = calcSize(estPrice, estSl);
         const fillStart = Date.now();
         let actualEntry = 0;
 
