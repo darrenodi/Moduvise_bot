@@ -9,7 +9,7 @@ import {
     getCurrentMargin, bankrollSummary,
 } from './symbolBankroll.js';
 import type { SymbolBankroll } from './symbolBankroll.js';
-import { checkKillSwitch, analyseFailedTrade } from './geminiAdvisor.js';
+import { checkKillSwitch } from './geminiAdvisor.js';   // Gemini post-mortem/tuner disabled 2026-07-21; kill-switch is local math, no API
 import {
     executeBinanceTrade,
     getOpenPositionDetails,
@@ -588,15 +588,10 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                         // hardcoded 'tp1' even on real algo-SL fills, mislabeling
                         // genuine stop-loss hits as TP hits in the trade log.
                         logTradeClose(_currentTradeId, outcome, pos.currentPrice, real.pnl, outcome === 'tp' ? 'tp1' : 'sl', false, false);
-                        // Gemini post-mortem on SL hits
-                        if (outcome === 'sl') {
-                            try {
-                                const lines = fs.readFileSync(TRADE_LOG_FILE, 'utf-8')
-                                    .split('\n').filter(l => l.trim() && l.includes(_currentTradeId!));
-                                const logEntry = lines.length ? JSON.parse(lines[lines.length - 1]) : {};
-                                analyseFailedTrade(logEntry, sendAlert).catch(() => {});
-                            } catch { /* non-critical */ }
-                        }
+                        // Gemini post-mortem removed 2026-07-21 — the free-tier API
+                        // was exhausted and spamming "[Gemini] Tune failed" alerts
+                        // with zero trading value. The flight recorder already writes
+                        // a verdict on every close; that's the post-mortem now.
                         _currentTradeId = null;
                     }
                     clearActiveTrade();
