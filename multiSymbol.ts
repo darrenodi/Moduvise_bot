@@ -113,18 +113,20 @@ const BOTS: BotConfig[] = [
         botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
         leverage: 100, wallMinNotional: 20_000,
         strategy: {
-            TP_ATR_MULT,
+            TP_MIN_USD:       '0.50',   // user 2026-07-22: fixed $0.50 TP price move
+            SL_FIXED_USD:     '1.00',   // fixed $1.00 SL price move
+            TP_ATR_MULT:      '',       // off — fixed $ overrides ATR
+            SL_ATR_MULT:      '',
+            SL_FROM_TP_MULT:  '',
+            MAX_CONSEC_LOSSES:'5',      // pause this bot after 5 straight losses
+            // (superseded gold bracket note below kept for history)
             // GOLD BRACKET CHANGE 2026-07-21: the user's rule is a CAP (loss+fee
             // <= 2 wins), not a target — the exact-equality form made every loss
             // as big as allowed, demanding 67% WR while gold measures 57-64%.
             // The 150-path sweep's best gold shape: TP 1.0xATR / SL 0.8xATR,
             // breakeven ~55% < measured. Loss ≈ 0.9 wins — cap honored with room.
-            SL_ATR_MULT:      '0.8',
-            SL_FROM_TP_MULT:  '',       // off — exact-equality form retired for gold
-            RISK_PCT_OF_MARGIN: '3',    // ~3% of stack per stop-out (recalibrated 2026-07-22 for the $4.49 deposit; 15/10% risked ~90% of stack per 6-loss night)
-            TP_MIN_USD:       '',       // unset → ATR-relative
-            SL_ROI_PCT:       '',       // unset → ATR-relative
-            SL_FIXED_USD:     '',
+            RISK_PCT_OF_MARGIN: '3',    // ~3% of stack per stop-out
+            SL_ROI_PCT:       '',
             VWAP_EXT_MAX_PCT: '0',      // sniper: at/behind VWAP only
             OB_STRONG:        '0.80',   // sniper: strong-book entries only
             OB_LEAN:          '0.80',
@@ -139,12 +141,14 @@ const BOTS: BotConfig[] = [
         botId: 'ETH-DIR', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
         leverage: 100, wallMinNotional: 50_000,
         strategy: {
-            TP_ATR_MULT,
-            SL_FROM_TP_MULT,            // sl + taker fee = 2 x TP (exact) — ETH's night WR (74-83%) clears the 67% bar
-            RISK_PCT_OF_MARGIN: '3',    // ~3% of stack per stop-out (recalibrated 2026-07-22; ETH lost $0.83 in a 6-loss night at 15% = a fifth of the deposit)
-            TP_MIN_USD:       '',
+            TP_MIN_USD:       '0.50',   // user 2026-07-22: fixed $0.50 TP / $1.00 SL on both bots
+            SL_FIXED_USD:     '1.00',
+            SL_FROM_TP_MULT:  '',
+            RISK_PCT_OF_MARGIN: '3',    // ~3% of stack per stop-out
+            MAX_CONSEC_LOSSES:'5',      // pause after 5 straight losses
             SL_ROI_PCT:       '',
-            SL_FIXED_USD:     '',
+            TP_ATR_MULT:      '',       // off — fixed $ overrides ATR
+            SL_ATR_MULT:      '',
             VWAP_EXT_MAX_PCT: '0',      // sniper: value side only (was 0.18 loose)
             OB_STRONG:        '0.80',
             OB_LEAN:          '0.80',

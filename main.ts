@@ -121,10 +121,24 @@ function printDailySummary(): void {
 // Sweep banked profit to Spot only once it's worth moving (no tiny transfers).
 const BANK_TRANSFER_MIN = Number(process.env.BANK_TRANSFER_MIN ?? 5);
 
+let _consecLosses = 0;
+const MAX_CONSEC_LOSSES = Number(process.env.MAX_CONSEC_LOSSES ?? 0);   // 0 = disabled
+
 async function applyTradeResult(realizedPnl: number): Promise<void> {
     if (!_bankroll) return;
     const { updated, shouldPause } = bankrollApply(_bankroll, realizedPnl);
     _bankroll = updated;
+
+    // Circuit breaker (user 2026-07-22): pause this bot after N straight losses.
+    if (realizedPnl >= 0) _consecLosses = 0;
+    else _consecLosses++;
+    if (MAX_CONSEC_LOSSES > 0 && _consecLosses >= MAX_CONSEC_LOSSES && !_bankroll.paused) {
+        _bankroll.paused = true;
+        _bankroll.pausedReason = `Circuit breaker: ${_consecLosses} consecutive losses`;
+        saveBankroll(_bankroll);
+        await sendAlert(`🛑🔌 ${_symbol} CIRCUIT BREAKER — ${_consecLosses} losses in a row. Trading paused. Stack: $${_bankroll.stack.toFixed(4)}`);
+        console.log(`[${_symbol}] 🛑 Circuit breaker tripped at ${_consecLosses} consecutive losses — pausing.`);
+    }
     if (realizedPnl > 0) { stats.grossProfit += realizedPnl; stats.netProfit += realizedPnl; }
     else { stats.netProfit += realizedPnl; stats.slLoss += Math.abs(realizedPnl); }
 
