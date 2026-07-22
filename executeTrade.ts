@@ -114,10 +114,12 @@ function getConfig(symbol: string): SymbolConfig {
 
 const _cfg = getConfig(MARKET_SYMBOL);
 
-// Per-asset trading timing for the current symbol — imported by main.ts (no env).
+// Per-asset trading timing for the current symbol — imported by main.ts.
+// MAX_HOLD_MS env override (user spec 2026-07-22: "if tp or sl not hit in 5
+// minutes, close trade at whatever value") — force-close window, default per-asset.
 export const ASSET_TIMING = {
     lossCooldownMs: _cfg.lossCooldownMs,
-    maxHoldMs:      _cfg.maxHoldMs,
+    maxHoldMs:      Number(process.env.MAX_HOLD_MS || _cfg.maxHoldMs),
 };
 
 // ─── STRATEGY PARAMETERS ──────────────────────────────────────────────────────
@@ -625,6 +627,13 @@ export function calcSlDistance(entry: number, atr5m = 0, tpDist = 0): number {
     // total realized loss including the taker exit fee equals exactly N wins:
     //   slDist = N × tpDist − takerFee×entry     (maker entry pays nothing)
     // With TP = 1.0×ATR this stays solvable (fee ≈ 0.45×ATR on gold, less on ETH).
+    // Priority -1 (user spec 2026-07-22): SL = exactly N × TP as a PRICE distance
+    // (no fee subtraction). "trade entered, set tp and sl = 2 x tp". Maker entry +
+    // maker TP = 0 fee on wins; the taker fee only applies if the stop actually fires.
+    const slTpMult = Number(process.env.SL_TP_MULT || 0);
+    if (slTpMult > 0 && tpDist > 0) {
+        return tickRound(Math.max(slTpMult * tpDist, floor));
+    }
     const tpMult = Number(process.env.SL_FROM_TP_MULT || 0);
     if (tpMult > 0 && tpDist > 0) {
         const fee = Number(process.env.TAKER_FEE_FALLBACK ?? 0.0004) * entry;

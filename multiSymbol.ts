@@ -113,61 +113,67 @@ const BOTS: BotConfig[] = [
         botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
         leverage: 100, wallMinNotional: 20_000,
         strategy: {
-            // DATA-DRIVEN DIRECTION (2026-07-22, from the full Binance statement,
-            // 82 pages / ~800 trades). Three verdicts the statement forces:
-            //  1. Every account-draining loss was a no-SL/wide-SL crater
-            //     (-1.74, -2.56, -0.73, -0.43). Hard stop is mandatory.
-            //  2. The $0.50-TP/$1.00-SL experiment is TP<SL = structural bleed
-            //     (the exact geometry every failed config shared). REVERSED:
-            //     TP must be >= SL. Now 1.2x ATR TP / 1.0x ATR SL (loss ~= 0.9
-            //     wins incl. fee, breakeven ~48% — below any measured win rate).
-            //  3. ~90% of the statement is low-conviction chop that washes out
-            //     on fees. Only the very strongest book entries survive. OB gate
-            //     tightened 0.80 -> 0.85; trade FAR less, only the best.
-            TP_ATR_MULT:      '1.2',    // TP wider than SL — reverses the losing shape
-            SL_ATR_MULT:      '1.0',    // hard stop, outside noise
-            TP_MIN_USD:       '',       // ATR-relative (fixed-$ overrides removed)
+            // USER 6-POINT SPEC (2026-07-22). High-frequency maker scalping —
+            // 0.00% maker fees make small TPs viable (fee only if the taker SL fires).
+            //  1. Data decides direction: order-book imbalance (a derivative of the
+            //     book — net pressure = ∂(depth)/∂side) + momentum sign. Enforced by
+            //     the existing signal gates.
+            //  2. Maker entry (ENTRY_TAKER=false), chase-to-fill budget 120s (≤2min).
+            //  3. TP set, SL = 2 × TP exactly (SL_TP_MULT=2).
+            //  4. Force-close at 5min if neither hit (MAX_HOLD_MS=300000, maker-first).
+            //  5. Applies to each asset (both bots).
+            //  6. ATR does NOT block trades (ATR_CEIL_PCT raised to 5.0 = flash-crash
+            //     only; no ATR floor exists).
+            // FLAGGED TO USER: SL=2×TP needs ~74-79% WR to break even, above the
+            // ~55-63% the statement measured. SL_TP_MULT is one env line to change if
+            // the live data says so — kept exactly as specced, escape hatch visible.
+            TP_ATR_MULT:      '0.6',    // small, fast TP so trades resolve in the 5min window
+            SL_TP_MULT:       '2',      // SL = 2 × TP (user spec point 3)
+            SL_ATR_MULT:      '',       // off — SL derives from TP
+            TP_MIN_USD:       '',
             SL_FIXED_USD:     '',
             SL_FROM_TP_MULT:  '',
             SL_ROI_PCT:       '',
-            RISK_PCT_OF_MARGIN: '3',    // ~3% of stack per stop-out — never a crater
+            RISK_PCT_OF_MARGIN: '3',    // never a crater (statement lesson, kept)
+            MAX_HOLD_MS:      '300000', // point 4: force-close at 5 minutes
+            ENTRY_CHASE_TOTAL_MS: '120000',  // point 2: fill within 2 minutes
             MAX_CONSEC_LOSSES:'5',      // circuit breaker
-            VWAP_EXT_MAX_PCT: '0',      // value-side entries only
-            OB_STRONG:        '0.85',   // ONLY the strongest book (was 0.80)
-            OB_LEAN:          '0.85',
-            MOM_STRONG_ATR:   '99',     // no pure-momentum entries
-            MOM_ALIGN:        'false',
-            ENTRY_TAKER:      'false',  // maker entry (0 fee)
-            BANK_SPLIT:       '0',      // 100% reinvested
-            RANGING_ONLY:     'true',   // gold: ranging only
+            VWAP_EXT_MAX_PCT: '0.30',   // value-side but not razor-thin (allows frequency)
+            OB_STRONG:        '0.35',   // point 1: directional book pressure (not sniper-tight)
+            OB_LEAN:          '0.15',
+            MOM_STRONG_ATR:   '0.5',    // momentum entries allowed (more frequency)
+            MOM_ALIGN:        'true',   // enter with direction
+            ENTRY_TAKER:      'false',  // point 2: MAKER entry, 0 fee
+            BANK_SPLIT:       '0',
+            RANGING_ONLY:     'false',  // point 6 spirit: don't over-restrict
+            TRADE_HOURS_UTC:  '',       // all hours (frequency)
         },
     },
     {
         botId: 'ETH-DIR', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
         leverage: 100, wallMinNotional: 50_000,
         strategy: {
-            // Same data-driven direction as gold (see note above): TP>=SL, hardest
-            // conviction only, hard stop, 3% risk cap, circuit breaker.
-            TP_ATR_MULT:      '1.2',
-            SL_ATR_MULT:      '1.0',
+            // Same 6-point spec as gold (see note above), applied to ETH.
+            TP_ATR_MULT:      '0.6',
+            SL_TP_MULT:       '2',
+            SL_ATR_MULT:      '',
             TP_MIN_USD:       '',
             SL_FIXED_USD:     '',
             SL_FROM_TP_MULT:  '',
             SL_ROI_PCT:       '',
             RISK_PCT_OF_MARGIN: '3',
+            MAX_HOLD_MS:      '300000',
+            ENTRY_CHASE_TOTAL_MS: '120000',
             MAX_CONSEC_LOSSES:'5',
-            VWAP_EXT_MAX_PCT: '0',
-            OB_STRONG:        '0.85',
-            OB_LEAN:          '0.85',
-            MOM_STRONG_ATR:   '99',
-            MOM_ALIGN:        'true',   // ETH keeps momentum alignment
+            VWAP_EXT_MAX_PCT: '0.30',
+            OB_STRONG:        '0.35',
+            OB_LEAN:          '0.15',
+            MOM_STRONG_ATR:   '0.5',
+            MOM_ALIGN:        'true',
             ENTRY_TAKER:      'false',
             BANK_SPLIT:       '0',
-            RANGING_ONLY:     'false',  // ETH: any regime, momentum-aligned
-            // Quiet-hours window (2026-07-16, from 75 flight-recorded trades):
-            // 18:00-06:00 UTC ran ~76% WR +$0.46; 06:00-18:00 ran 50% WR −$0.73 —
-            // every big-flush death was a London/NY hour. ETH trades nights only.
-            TRADE_HOURS_UTC:  '18-2',  // trimmed 2026-07-18: deep-Asia 02-05 bled 3 nights straight (1W/5L last night)
+            RANGING_ONLY:     'false',
+            TRADE_HOURS_UTC:  '',       // ETH all hours now (was 18-2, opened for frequency)
         },
     },
 ];

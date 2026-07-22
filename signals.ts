@@ -197,7 +197,7 @@ const FUNDING_EXTREME   = Number(process.env.FUNDING_EXTREME   ?? 0.0005);// don
 const OI_SURGE_PCT      = Number(process.env.OI_SURGE_PCT      ?? 2.0);   // OI +% in ~5m = new money piling in; block if momentum opposes us
 const TOUCH_CONFIRM     = Number(process.env.TOUCH_CONFIRM     ?? 0.12);  // top-of-book must lean THIS far in our direction (confirmation)
 const FLOW_AGAINST      = Number(process.env.FLOW_AGAINST      ?? 1.15);  // block if opposing 5s trade flow exceeds this ratio
-const ATR_CEIL_PCT      = Number(process.env.ATR_CEIL_PCT      ?? 0.6);   // ATR as % of price — above = too fast
+const ATR_CEIL_PCT      = Number(process.env.ATR_CEIL_PCT      ?? 5.0);   // ATR as % of price — above = too fast. User 2026-07-22: "make sure ATR doesn't prevent trades" — raised 0.6→5.0 so it never blocks normal markets, only catches genuine flash-crash chaos (5%+ ATR).
 const MOM_TRAP_ATR      = Number(process.env.MOM_TRAP_ATR      ?? 0.6);   // momentum AGAINST dir, in ATR units (tighter: no SL)
 const MOM_STRONG_ATR    = Number(process.env.MOM_STRONG_ATR    ?? 0.5);   // pure-momentum entry, ATR units
 const MOM_CONFIRM_ATR   = Number(process.env.MOM_CONFIRM_ATR   ?? 0.15);  // OB+momentum confirm, ATR units
