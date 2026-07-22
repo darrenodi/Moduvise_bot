@@ -121,7 +121,7 @@ const BOTS: BotConfig[] = [
             // breakeven ~55% < measured. Loss ≈ 0.9 wins — cap honored with room.
             SL_ATR_MULT:      '0.8',
             SL_FROM_TP_MULT:  '',       // off — exact-equality form retired for gold
-            RISK_PCT_OF_MARGIN: '10',   // every stop-out costs ~10% of margin, flat
+            RISK_PCT_OF_MARGIN: '3',    // ~3% of stack per stop-out (recalibrated 2026-07-22 for the $4.49 deposit; 15/10% risked ~90% of stack per 6-loss night)
             TP_MIN_USD:       '',       // unset → ATR-relative
             SL_ROI_PCT:       '',       // unset → ATR-relative
             SL_FIXED_USD:     '',
@@ -141,7 +141,7 @@ const BOTS: BotConfig[] = [
         strategy: {
             TP_ATR_MULT,
             SL_FROM_TP_MULT,            // sl + taker fee = 2 x TP (exact) — ETH's night WR (74-83%) clears the 67% bar
-            RISK_PCT_OF_MARGIN: '15',   // every stop-out costs ~15% of margin, flat across ATR
+            RISK_PCT_OF_MARGIN: '3',    // ~3% of stack per stop-out (recalibrated 2026-07-22; ETH lost $0.83 in a 6-loss night at 15% = a fifth of the deposit)
             TP_MIN_USD:       '',
             SL_ROI_PCT:       '',
             SL_FIXED_USD:     '',
