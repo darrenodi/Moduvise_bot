@@ -91,6 +91,14 @@ function saveContext(ctx: GeminiContext): void {
 
 // ─── API CALLER ───────────────────────────────────────────────────────────────
 async function callGemini(prompt: string): Promise<string> {
+    // HARD KILL SWITCH (2026-07-22): the free-tier Gemini API is exhausted and was
+    // spamming "[Gemini] Rate limited — rotating" on every trade, burning request
+    // budget for zero value. Disabled unless GEMINI_ENABLED=true is explicitly set.
+    // The flight recorder already writes a per-trade verdict; this advisor is dead
+    // weight. No network call is made below unless re-enabled on purpose.
+    if ((process.env.GEMINI_ENABLED ?? 'false') !== 'true') {
+        throw new Error('Gemini disabled (GEMINI_ENABLED != true)');
+    }
     for (const key of GEMINI_KEYS) {
         for (const model of MODELS) {
             try {

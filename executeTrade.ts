@@ -800,16 +800,22 @@ export async function executeBinanceTrade(
             };
 
             const chaseTotalMs = Number(process.env.ENTRY_CHASE_TOTAL_MS ?? 20_000);
+            const maxRequotes  = Number(process.env.ENTRY_MAX_REQUOTES ?? 6);   // cap API churn
             let requotes = 0;
-            let result = await quoteAndWait(tickRound(isBuy ? liveBid : liveAsk));
+            let lastQuote = tickRound(isBuy ? liveBid : liveAsk);
+            let result = await quoteAndWait(lastQuote);
             if (result.filled) actualEntry = result.avgPrice ?? 0;
             if (!actualEntry && result.rejectedCode === -2019) {
                 return { success: false, outcome: 'skipped', message: `MARGIN_INSUFFICIENT: ${JSON.stringify(result)}` };
             }
-            while (!actualEntry && Date.now() - fillStart < chaseTotalMs) {
-                requotes++;
+            while (!actualEntry && Date.now() - fillStart < chaseTotalMs && requotes < maxRequotes) {
                 const bt = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
                 const touch = tickRound(isBuy ? Number(bt.bidPrice) : Number(bt.askPrice));
+                // Skip a redundant re-place if the touch hasn't moved — the resting
+                // order is already at the right price; re-placing just burns API calls.
+                if (touch === lastQuote) { await new Promise(r => setTimeout(r, 1_000)); continue; }
+                requotes++;
+                lastQuote = touch;
                 result = await quoteAndWait(touch);
                 if (result.filled) actualEntry = result.avgPrice ?? touch;
                 if (!actualEntry && result.rejectedCode === -2019) {

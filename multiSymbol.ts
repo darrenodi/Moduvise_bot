@@ -137,6 +137,9 @@ const BOTS: BotConfig[] = [
             RISK_PCT_OF_MARGIN: '3',    // never a crater (statement lesson, kept)
             MAX_HOLD_MS:      '300000', // point 4: force-close at 5 minutes
             ENTRY_CHASE_TOTAL_MS: '120000',  // point 2: fill within 2 minutes
+            ENTRY_MAX_REQUOTES: '6',         // cap API churn (was re-quoting 16x/fill)
+            ENTRY_CHASE_POLL_MS: '3000',     // let each resting order sit 3s before re-quoting
+            FILL_POLL_MS:      '1500',
             MAX_CONSEC_LOSSES:'5',      // circuit breaker
             VWAP_EXT_MAX_PCT: '0.30',   // value-side but not razor-thin (allows frequency)
             OB_STRONG:        '0.35',   // point 1: directional book pressure (not sniper-tight)
@@ -164,6 +167,9 @@ const BOTS: BotConfig[] = [
             RISK_PCT_OF_MARGIN: '3',
             MAX_HOLD_MS:      '300000',
             ENTRY_CHASE_TOTAL_MS: '120000',
+            ENTRY_MAX_REQUOTES: '6',
+            ENTRY_CHASE_POLL_MS: '3000',
+            FILL_POLL_MS:      '1500',
             MAX_CONSEC_LOSSES:'5',
             VWAP_EXT_MAX_PCT: '0.30',
             OB_STRONG:        '0.35',
