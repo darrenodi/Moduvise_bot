@@ -113,50 +113,57 @@ const BOTS: BotConfig[] = [
         botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
         leverage: 100, wallMinNotional: 20_000,
         strategy: {
-            TP_MIN_USD:       '0.50',   // user 2026-07-22: fixed $0.50 TP price move
-            SL_FIXED_USD:     '1.00',   // fixed $1.00 SL price move
-            TP_ATR_MULT:      '',       // off — fixed $ overrides ATR
-            SL_ATR_MULT:      '',
+            // DATA-DRIVEN DIRECTION (2026-07-22, from the full Binance statement,
+            // 82 pages / ~800 trades). Three verdicts the statement forces:
+            //  1. Every account-draining loss was a no-SL/wide-SL crater
+            //     (-1.74, -2.56, -0.73, -0.43). Hard stop is mandatory.
+            //  2. The $0.50-TP/$1.00-SL experiment is TP<SL = structural bleed
+            //     (the exact geometry every failed config shared). REVERSED:
+            //     TP must be >= SL. Now 1.2x ATR TP / 1.0x ATR SL (loss ~= 0.9
+            //     wins incl. fee, breakeven ~48% — below any measured win rate).
+            //  3. ~90% of the statement is low-conviction chop that washes out
+            //     on fees. Only the very strongest book entries survive. OB gate
+            //     tightened 0.80 -> 0.85; trade FAR less, only the best.
+            TP_ATR_MULT:      '1.2',    // TP wider than SL — reverses the losing shape
+            SL_ATR_MULT:      '1.0',    // hard stop, outside noise
+            TP_MIN_USD:       '',       // ATR-relative (fixed-$ overrides removed)
+            SL_FIXED_USD:     '',
             SL_FROM_TP_MULT:  '',
-            MAX_CONSEC_LOSSES:'5',      // pause this bot after 5 straight losses
-            // (superseded gold bracket note below kept for history)
-            // GOLD BRACKET CHANGE 2026-07-21: the user's rule is a CAP (loss+fee
-            // <= 2 wins), not a target — the exact-equality form made every loss
-            // as big as allowed, demanding 67% WR while gold measures 57-64%.
-            // The 150-path sweep's best gold shape: TP 1.0xATR / SL 0.8xATR,
-            // breakeven ~55% < measured. Loss ≈ 0.9 wins — cap honored with room.
-            RISK_PCT_OF_MARGIN: '3',    // ~3% of stack per stop-out
             SL_ROI_PCT:       '',
-            VWAP_EXT_MAX_PCT: '0',      // sniper: at/behind VWAP only
-            OB_STRONG:        '0.80',   // sniper: strong-book entries only
-            OB_LEAN:          '0.80',
+            RISK_PCT_OF_MARGIN: '3',    // ~3% of stack per stop-out — never a crater
+            MAX_CONSEC_LOSSES:'5',      // circuit breaker
+            VWAP_EXT_MAX_PCT: '0',      // value-side entries only
+            OB_STRONG:        '0.85',   // ONLY the strongest book (was 0.80)
+            OB_LEAN:          '0.85',
             MOM_STRONG_ATR:   '99',     // no pure-momentum entries
-            MOM_ALIGN:        'false',  // stack A measured better WITHOUT mom-align
+            MOM_ALIGN:        'false',
             ENTRY_TAKER:      'false',  // maker entry (0 fee)
-            BANK_SPLIT:       '0',      // no banking, 100% reinvested
-            RANGING_ONLY:     'true',   // stack A: ranging only
+            BANK_SPLIT:       '0',      // 100% reinvested
+            RANGING_ONLY:     'true',   // gold: ranging only
         },
     },
     {
         botId: 'ETH-DIR', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
         leverage: 100, wallMinNotional: 50_000,
         strategy: {
-            TP_MIN_USD:       '0.50',   // user 2026-07-22: fixed $0.50 TP / $1.00 SL on both bots
-            SL_FIXED_USD:     '1.00',
+            // Same data-driven direction as gold (see note above): TP>=SL, hardest
+            // conviction only, hard stop, 3% risk cap, circuit breaker.
+            TP_ATR_MULT:      '1.2',
+            SL_ATR_MULT:      '1.0',
+            TP_MIN_USD:       '',
+            SL_FIXED_USD:     '',
             SL_FROM_TP_MULT:  '',
-            RISK_PCT_OF_MARGIN: '3',    // ~3% of stack per stop-out
-            MAX_CONSEC_LOSSES:'5',      // pause after 5 straight losses
             SL_ROI_PCT:       '',
-            TP_ATR_MULT:      '',       // off — fixed $ overrides ATR
-            SL_ATR_MULT:      '',
-            VWAP_EXT_MAX_PCT: '0',      // sniper: value side only (was 0.18 loose)
-            OB_STRONG:        '0.80',
-            OB_LEAN:          '0.80',
+            RISK_PCT_OF_MARGIN: '3',
+            MAX_CONSEC_LOSSES:'5',
+            VWAP_EXT_MAX_PCT: '0',
+            OB_STRONG:        '0.85',
+            OB_LEAN:          '0.85',
             MOM_STRONG_ATR:   '99',
-            MOM_ALIGN:        'true',   // stack B keeps momentum alignment
+            MOM_ALIGN:        'true',   // ETH keeps momentum alignment
             ENTRY_TAKER:      'false',
             BANK_SPLIT:       '0',
-            RANGING_ONLY:     'false',  // stack B: any regime
+            RANGING_ONLY:     'false',  // ETH: any regime, momentum-aligned
             // Quiet-hours window (2026-07-16, from 75 flight-recorded trades):
             // 18:00-06:00 UTC ran ~76% WR +$0.46; 06:00-18:00 ran 50% WR −$0.73 —
             // every big-flush death was a London/NY hour. ETH trades nights only.
