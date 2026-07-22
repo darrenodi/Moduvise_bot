@@ -465,6 +465,7 @@ export async function cancelAllOrders(slAlgoId?: number): Promise<void> {
     } catch (e: any) {
         console.error(`[Cleanup] Cancel failed: ${e.message}`);
     }
+    // Cancel the known SL algo id first (fast path).
     if (slAlgoId && slAlgoId > 0) {
         try {
             await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId: slAlgoId });
@@ -473,6 +474,22 @@ export async function cancelAllOrders(slAlgoId?: number): Promise<void> {
             console.error(`[Cleanup] Algo cancel failed: ${e.message}`);
         }
     }
+    // ROOT-CAUSE FIX (2026-07-22): /allOpenOrders does NOT touch algo/conditional
+    // orders, so any algo SL whose id we lost (restart, adopted orphan, code path
+    // without the id) survived and became an orphan stop that could misfire on a
+    // LATER trade at a random level. Found live: ETH carried two stops, one from a
+    // previous trade. Now ALWAYS sweep every open algo order for the symbol, not
+    // just one known id — leaves nothing behind.
+    try {
+        const algos = await privateGet('/fapi/v1/openAlgoOrders', { symbol: STRATEGY.SYMBOL });
+        if (Array.isArray(algos)) {
+            for (const a of algos) {
+                if (!a.algoId || a.algoId === slAlgoId) continue;   // already handled / none
+                await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId: a.algoId }).catch(() => {});
+                console.log(`[Cleanup] Swept stray algo ${a.algoId} @ ${a.triggerPrice}`);
+            }
+        }
+    } catch { /* non-critical: the known-id path above still ran */ }
 }
 
 // Safety close: try a maker limit at the touch first (free); if it doesn't fill in
