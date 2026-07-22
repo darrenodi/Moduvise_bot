@@ -641,22 +641,32 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         if (_closeInProgress) return 'open';
         _closeInProgress = true;
         try {
-            console.log(`[TimeStop] ⏱ ${(ageMs / 60_000).toFixed(1)}min without TP — scratching`);
+            console.log(`[TimeStop] ⏱ ${(ageMs / 60_000).toFixed(1)}min without TP — scratching (maker-only, no taker fee)`);
             await cancelAllOrders(trade.slOrderId);
-            await triggerEmergencyClose(trade.side, trade.size, `time-stop ${(ageMs / 60_000).toFixed(0)}min`);
+            // maker-only: never pays a taker fee on the time-stop (fixes gold's fee leak).
+            await triggerEmergencyClose(trade.side, trade.size, `time-stop ${(ageMs / 60_000).toFixed(0)}min`, true);
             const real = await getRealizedPnlSince(trade.openedAt - 2_000);
             const pnl  = real ? real.pnl : 0;
-            const outcome = pnl >= 0 ? 'tp' : 'sl';
-            if (outcome === 'tp') stats.tpHits++;
+            const won  = pnl >= 0;
+            const outcome = won ? 'tp' : 'sl';
+            if (won) stats.tpHits++;
             else { stats.slHits++; recordLoss(trade.side, pos.currentPrice, Math.abs(trade.entryPrice - trade.slPrice) || Math.abs(trade.tpPrice - trade.entryPrice)); }
             stats.fills++;
             await applyTradeResult(pnl);
             if (_currentTradeId) {
-                logTradeClose(_currentTradeId, outcome, pos.currentPrice, pnl, 'timestop', false, true);
+                // exitPhase records win/loss so post-mortems don't lump all time-stops
+                // together (user 2026-07-22: a 5-min close is a real win or loss).
+                logTradeClose(_currentTradeId, outcome, pos.currentPrice, pnl, won ? 'timestop-win' : 'timestop-loss', false, true);
                 _currentTradeId = null;
             }
             clearActiveTrade();
-            await sendAlert(`⏱ ${_symbol} time-stop @ ${(ageMs / 60_000).toFixed(0)}min | ${trade.side.toUpperCase()} | PnL: $${pnl.toFixed(4)}`);
+            const holdMin = (ageMs / 60_000).toFixed(0);
+            const roiPct  = trade.margin > 0 ? (pnl / trade.margin) * 100 : 0;
+            // Green for a win, red for a loss (user request) — a 5-min close is a real outcome.
+            await sendAlert(won
+                ? `🟢⏱ TIMED-WIN — ${_symbol} ${trade.side.toUpperCase()}\n💰 +$${pnl.toFixed(4)} (${roiPct >= 0 ? '+' : ''}${roiPct.toFixed(1)}% margin) | closed at ${holdMin}min\n🏦 stack: $${getStack().toFixed(4)}`
+                : `🔴⏱ TIMED-LOSS — ${_symbol} ${trade.side.toUpperCase()}\n💸 −$${Math.abs(pnl).toFixed(4)} (${roiPct.toFixed(1)}% margin) | closed at ${holdMin}min\n🏦 stack: $${getStack().toFixed(4)}`
+            ).catch(() => {});
             return outcome;
         } finally {
             _closeInProgress = false;

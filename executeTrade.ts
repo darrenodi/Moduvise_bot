@@ -492,46 +492,62 @@ export async function cancelAllOrders(slAlgoId?: number): Promise<void> {
     } catch { /* non-critical: the known-id path above still ran */ }
 }
 
-// Safety close: try a maker limit at the touch first (free); if it doesn't fill in
-// 5s, MARKET close (taker) to guarantee flat. Used to recover orphans and to flatten
-// when the SL couldn't be placed — a guaranteed close beats carrying unbounded risk.
-export async function triggerEmergencyClose(side: 'long' | 'short', size: number, reason: string): Promise<void> {
+// Safety close: RE-QUOTE a maker limit at the moving touch (0 fee) several times
+// before any taker fallback. FEE-LEAK FIX (2026-07-22): the old version placed one
+// maker limit for 12s then market-closed taker — Binance showed gold paying $0.076
+// in taker fees on time-stop closes because a single static quote rarely fills. Now
+// it re-quotes at each new touch (join the queue, never cross) for a budget, and
+// only crosses to taker as a last resort. makerOnly=true never goes taker at all
+// (used by the routine 5-min time-stop — a small unfilled position is not an
+// emergency; the algo SL still backstops it).
+export async function triggerEmergencyClose(side: 'long' | 'short', size: number, reason: string, makerOnly = false): Promise<void> {
     const closeSide = side === 'long' ? 'SELL' : 'BUY';
-    console.log(`[CLOSE] 🛑 ${closeSide} ${size} ${STRATEGY.SYMBOL} | ${reason}`);
+    console.log(`[CLOSE] 🛑 ${closeSide} ${size} ${STRATEGY.SYMBOL} | ${reason}${makerOnly ? ' (maker-only)' : ''}`);
     await cancelAllOrders();
 
-    // 1) maker attempt (no fee)
-    try {
-        const ticker = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`)
-            .then(r => r.json()) as any;
-        const limitPrice = closeSide === 'SELL' ? Number(ticker.askPrice) : Number(ticker.bidPrice);
-        const limitOrder = await privatePost('/fapi/v1/order', {
-            symbol:      STRATEGY.SYMBOL,
-            side:        closeSide,
-            type:        'LIMIT',
-            timeInForce: 'GTC',
-            price:       limitPrice.toFixed(_cfg.priceDp),
-            quantity:    size.toFixed(_cfg.qtyDp),
-            reduceOnly:  'true',
-        });
-        if (limitOrder?.orderId) {
-            // Give the maker close time to fill (0 fee) before any taker fallback.
-            const makerWaitMs = Number(process.env.EMERGENCY_MAKER_WAIT_MS ?? 12_000);
-            const start = Date.now();
-            while (Date.now() - start < makerWaitMs) {
-                await new Promise(r => setTimeout(r, 500));
-                const check = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId });
-                if (check.status === 'FILLED') {
-                    console.log(`[CLOSE] ✅ Maker close filled @ $${limitPrice.toFixed(_cfg.priceDp)}`);
-                    clearActiveTrade();
-                    return;
+    // Maker re-quote loop — join the touch, never cross, re-place as it moves.
+    const budgetMs = Number(process.env.CLOSE_MAKER_BUDGET_MS ?? (makerOnly ? 60_000 : 12_000));
+    const start = Date.now();
+    let lastPrice = 0;
+    while (Date.now() - start < budgetMs) {
+        try {
+            const bt = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
+            const px = tickRound(closeSide === 'SELL' ? Number(bt.askPrice) : Number(bt.bidPrice));
+            if (px !== lastPrice) {   // only re-place when the touch actually moved
+                lastPrice = px;
+                const o = await privatePost('/fapi/v1/order', {
+                    symbol: STRATEGY.SYMBOL, side: closeSide, type: 'LIMIT', timeInForce: 'GTX',
+                    price: px.toFixed(_cfg.priceDp), quantity: size.toFixed(_cfg.qtyDp), reduceOnly: 'true',
+                });
+                if (o?.orderId) {
+                    // Let the resting order sit ~4s, checking only twice — API-frugal.
+                    await new Promise(r => setTimeout(r, 2_000));
+                    let chk = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: o.orderId });
+                    if (chk.status !== 'FILLED') {
+                        await new Promise(r => setTimeout(r, 2_000));
+                        chk = await privateGet('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: o.orderId });
+                    }
+                    if (chk.status === 'FILLED') {
+                        console.log(`[CLOSE] ✅ Maker close filled @ $${px.toFixed(_cfg.priceDp)} (0 fee)`);
+                        clearActiveTrade();
+                        return;
+                    }
+                    await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: o.orderId }).catch(() => {});
                 }
+            } else {
+                await new Promise(r => setTimeout(r, 2_000));
             }
-            await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: limitOrder.orderId }).catch(() => {});
-        }
-    } catch { /* fall through to market */ }
+        } catch { await new Promise(r => setTimeout(r, 1_000)); }
+    }
 
-    // 2) market close (taker) — guarantee flat
+    if (makerOnly) {
+        // Never went taker — leave the position; its algo SL still guards it and the
+        // next cycle will retry the maker close. No fee paid.
+        console.log(`[CLOSE] ⏳ Maker close unfilled in ${budgetMs / 1000}s — leaving for next cycle (algo SL still armed)`);
+        return;
+    }
+
+    // Last resort: market close (taker) — guarantee flat.
     try {
         await privatePost('/fapi/v1/order', {
             symbol: STRATEGY.SYMBOL, side: closeSide, type: 'MARKET',
