@@ -131,15 +131,17 @@ const BOTS: BotConfig[] = [
             // showed gold's avg favorable move ~$0.96, so the old $2.16 TP was too
             // far (34/71 timed out). $0.80 is reachable → more clean maker TP hits,
             // fewer taker stop-outs (the fee leak). Targets 200 trades/day.
-            TP_MIN_USD:       '5.00',   // user 2026-07-23: $5 TP
-            SL_FIXED_USD:     '5.00',   // $5 SL — 1:1, breakeven ~57% (was 80% at 0.80/1.60)
+            TP_MIN_USD:       '0.50',   // user 2026-07-23: $0.50 TP
+            SL_FIXED_USD:     '0.50',   // $0.50 SL, MAKER (SL_MAKER) — breakeven ~50%
+            SL_MAKER:         'true',   // maker stop-limit, 0 fee (user: maker only)
+            MAX_ENTRY_DRIFT:  '0.05',   // only fill if within $0.05 of live price
             SL_TP_MULT:       '',       // off — fixed $ SL
             TP_ATR_MULT:      '',       // off — fixed $ TP
             SL_ATR_MULT:      '',
             SL_FROM_TP_MULT:  '',
             SL_ROI_PCT:       '',
             RISK_PCT_OF_MARGIN: '3',    // never a crater (statement lesson, kept)
-            MAX_HOLD_MS:      '1800000',// 30min — a $5 move needs time; 5min killed them prematurely
+            MAX_HOLD_MS:      '300000', // 5min — $0.50 targets resolve fast
             ENTRY_CHASE_TOTAL_MS: '120000',
             ENTRY_MAX_REQUOTES: '6',
             ENTRY_CHASE_POLL_MS: '3000',
@@ -165,15 +167,17 @@ const BOTS: BotConfig[] = [
             // ETH is the earner (+$0.08 net, clean maker). Loosened for frequency:
             // OB 0.35→0.25, VWAP 0.30→0.45 (its #1 block was "CHASING past VWAP"),
             // momentum 0.5→0.35. Keeps its winning TP=0.6×ATR geometry unchanged.
-            TP_MIN_USD:       '5.00',   // user 2026-07-23: $5 TP
-            SL_FIXED_USD:     '5.00',   // $5 SL — 1:1, breakeven ~54%
+            TP_MIN_USD:       '0.50',   // user 2026-07-23: $0.50 TP
+            SL_FIXED_USD:     '0.50',   // $0.50 SL, MAKER — breakeven ~50%
+            SL_MAKER:         'true',
+            MAX_ENTRY_DRIFT:  '0.05',
             TP_ATR_MULT:      '',
             SL_TP_MULT:       '',
             SL_ATR_MULT:      '',
             SL_FROM_TP_MULT:  '',
             SL_ROI_PCT:       '',
             RISK_PCT_OF_MARGIN: '3',
-            MAX_HOLD_MS:      '1800000',// 30min for $5 targets
+            MAX_HOLD_MS:      '300000', // 5min for $0.50 targets
             ENTRY_CHASE_TOTAL_MS: '120000',
             ENTRY_MAX_REQUOTES: '6',
             ENTRY_CHASE_POLL_MS: '3000',

@@ -957,25 +957,43 @@ export async function executeBinanceTrade(
             return { success: false, outcome: 'error', message: 'TP failed, emergency closed.' };
         }
 
-        // ── 3. SL — Algo CONDITIONAL STOP_MARKET at $10 (caps the loss) ──────────
-        // Guaranteed-fill stop; taker fee only when it fires. Placed via the Algo
-        // endpoint (plain STOP on /fapi/v1/order is rejected -4120, see memory).
+        // ── 3. SL — MAKER stop-limit (SL_MAKER=true) or taker stop-market ────────
+        // User 2026-07-23: "maker only". A stop-MARKET pays taker on trigger, which
+        // at a $0.50 TP needs ~81% WR — impossible. A stop-LIMIT resting AT the
+        // trigger posts as maker (0 fee) → breakeven drops to ~50%. Trade-off: if
+        // price gaps clean through the limit it may not fill; the 30-min time-stop
+        // is the backstop, and at $0.50 stops on these assets gaps are rare.
+        const slMaker = (process.env.SL_MAKER ?? 'false') === 'true';
         let slOrderId = 0;
         for (let attempt = 1; attempt <= 3; attempt++) {
             try {
-                const slRes = await privatePost('/fapi/v1/algoOrder', {
-                    symbol:       STRATEGY.SYMBOL,
-                    side:         closeSide,
-                    algoType:     'CONDITIONAL',
-                    type:         'STOP_MARKET',
-                    quantity:     size.toFixed(_cfg.qtyDp),
-                    triggerPrice: slPrice.toFixed(_cfg.priceDp),
-                    workingType:  'MARK_PRICE',
-                    reduceOnly:   'true',
-                });
+                const slRes = slMaker
+                    ? await privatePost('/fapi/v1/algoOrder', {
+                        symbol:       STRATEGY.SYMBOL,
+                        side:         closeSide,
+                        algoType:     'CONDITIONAL',
+                        type:         'STOP',                       // stop-LIMIT (has a limit price)
+                        quantity:     size.toFixed(_cfg.qtyDp),
+                        triggerPrice: slPrice.toFixed(_cfg.priceDp),
+                        // limit sits AT the trigger so it rests maker, not crossing.
+                        price:        slPrice.toFixed(_cfg.priceDp),
+                        timeInForce:  'GTC',
+                        workingType:  'MARK_PRICE',
+                        reduceOnly:   'true',
+                    })
+                    : await privatePost('/fapi/v1/algoOrder', {
+                        symbol:       STRATEGY.SYMBOL,
+                        side:         closeSide,
+                        algoType:     'CONDITIONAL',
+                        type:         'STOP_MARKET',
+                        quantity:     size.toFixed(_cfg.qtyDp),
+                        triggerPrice: slPrice.toFixed(_cfg.priceDp),
+                        workingType:  'MARK_PRICE',
+                        reduceOnly:   'true',
+                    });
                 if (slRes?.algoId) {
                     slOrderId = slRes.algoId;
-                    console.log(`[SL] ✅ Stop-Market trigger=$${slPrice.toFixed(_cfg.priceDp)} | algoId=${slOrderId}`);
+                    console.log(`[SL] ✅ ${slMaker ? 'Maker stop-limit' : 'Stop-Market'} trigger=$${slPrice.toFixed(_cfg.priceDp)} | algoId=${slOrderId}`);
                     break;
                 }
                 console.error(`[SL] ❌ Attempt ${attempt}: ${JSON.stringify(slRes)}`);
