@@ -144,7 +144,7 @@ const BOTS: BotConfig[] = [
             ENTRY_MAX_REQUOTES: '6',
             ENTRY_CHASE_POLL_MS: '3000',
             FILL_POLL_MS:      '1500',
-            MAX_CONSEC_LOSSES:'5',      // circuit breaker
+            MAX_CONSEC_LOSSES:'12',     // circuit breaker (5 was tripping on normal streaks at ~55% WR)
             VWAP_EXT_MAX_PCT: '0.30',
             OB_STRONG:        '0.35',   // book pressure (loose = frequency)
             OB_LEAN:          '0.15',
@@ -177,7 +177,7 @@ const BOTS: BotConfig[] = [
             ENTRY_MAX_REQUOTES: '6',
             ENTRY_CHASE_POLL_MS: '3000',
             FILL_POLL_MS:      '1500',
-            MAX_CONSEC_LOSSES:'5',
+            MAX_CONSEC_LOSSES:'12',
             VWAP_EXT_MAX_PCT: '0.45',   // was 0.30 — its top block; loosen for frequency
             OB_STRONG:        '0.25',   // was 0.35 — more entries
             OB_LEAN:          '0.12',

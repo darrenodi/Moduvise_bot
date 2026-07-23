@@ -173,6 +173,8 @@ export interface ActiveTrade {
     openedAt:      number;
     tpOrderId?:    number;
     slOrderId?:    number;
+    /** Set once the profit-lock has moved the stop to break-even (one-shot). */
+    beMoved?:      boolean;
     tp2Phase:      boolean;
     tp2StartedAt?: number;
     tp2OrderId?:   number;
@@ -558,6 +560,45 @@ export async function triggerEmergencyClose(side: 'long' | 'short', size: number
     } catch (e: any) {
         console.error(`[CLOSE] Close FAILED: ${e.message}`);
         await sendAlert(`🚨 ${STRATEGY.SYMBOL} CLOSE FAILED ${size} — CHECK NOW. ${e.message}`);
+    }
+}
+
+// ─── PROFIT LOCK: move the stop to break-even ────────────────────────────────
+// Cancels the original algo stop and re-places it at the entry price, so a trade
+// that has already travelled most of the way to TP can no longer become a loss.
+// Returns true only if the new stop is actually resting at the exchange — if the
+// re-place fails we DON'T report success, because a position must never be left
+// without a stop (that is the crater mechanism from the Binance statement).
+export async function moveStopToBreakeven(
+    side: 'long' | 'short', size: number, entryPrice: number, oldAlgoId?: number,
+): Promise<boolean> {
+    const closeSide = side === 'long' ? 'SELL' : 'BUY';
+    // Nudge one tick beyond entry so the stop is never "already triggered".
+    const bePrice = tickRound(side === 'long' ? entryPrice - _cfg.tick : entryPrice + _cfg.tick);
+    try {
+        const res = await privatePost('/fapi/v1/algoOrder', {
+            symbol:       STRATEGY.SYMBOL,
+            side:         closeSide,
+            algoType:     'CONDITIONAL',
+            type:         'STOP_MARKET',
+            quantity:     size.toFixed(_cfg.qtyDp),
+            triggerPrice: bePrice.toFixed(_cfg.priceDp),
+            workingType:  'MARK_PRICE',
+            reduceOnly:   'true',
+        });
+        if (!res?.algoId) {
+            console.error(`[ProfitLock] ❌ BE stop rejected: ${JSON.stringify(res)} — keeping original stop`);
+            return false;
+        }
+        // New stop is live; now cancel the old one (order matters — never be naked).
+        if (oldAlgoId && oldAlgoId > 0) {
+            await privateDelete('/fapi/v1/algoOrder', { symbol: STRATEGY.SYMBOL, algoId: oldAlgoId }).catch(() => {});
+        }
+        console.log(`[ProfitLock] ✅ Stop moved to break-even $${bePrice.toFixed(_cfg.priceDp)} (algoId=${res.algoId})`);
+        return true;
+    } catch (e: any) {
+        console.error(`[ProfitLock] ❌ ${e.message} — keeping original stop`);
+        return false;
     }
 }
 

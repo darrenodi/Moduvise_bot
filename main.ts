@@ -23,6 +23,7 @@ import {
     getAvailableBalance,
     hasOpenOrders,
     adoptOrphanPosition,
+    moveStopToBreakeven,
     transferBankedToSpot,
     calcSlDistance,
     isEntryTaker,
@@ -41,6 +42,9 @@ const { lossCooldownMs: LOSS_COOLDOWN_MS, maxHoldMs: MAX_HOLD_MS } = ASSET_TIMIN
 
 // Below this available balance, stop trying to trade (don't force doomed orders).
 const MIN_STACK = Number(process.env.MIN_STACK ?? 0.60);
+// Profit lock: once price travels this fraction of the way to TP, the stop moves to
+// break-even. 0 disables. Default 0.6 = lock in once 60% of the target is earned.
+const BE_TRIGGER_PCT = Number(process.env.BE_TRIGGER_PCT ?? 0.6);
 // Binance min order notional (matches executeTrade STRATEGY.MIN_NOTIONAL).
 const STRATEGY_MIN_NOTIONAL = Number(process.env.MIN_NOTIONAL ?? 5);
 
@@ -630,6 +634,30 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     }
 
     if (!trade) return 'open';
+
+    // ── PROFIT LOCK (break-even stop) ─────────────────────────────────────────
+    // THE BIGGEST HOLE, found 2026-07-23 across 91 trades: 50% of gold's losers
+    // travelled within 75% of TP before reversing into a loss. Winners average
+    // MFE $1.34 / MAE $0.62; losers average MFE $0.66 / MAE $2.26 — i.e. they earn
+    // a profit and then give it ALL back, often riding to the -$1.60 taker stop
+    // (7 stop-outs cost -$0.33, more than every timestop loss combined).
+    // Fix: once price has travelled BE_TRIGGER_PCT of the way to TP, cancel the
+    // original stop and re-place it at entry (+/- a tick). The trade can then only
+    // scratch at ~0, never give back a won move. Costs nothing when price runs
+    // straight to TP; saves the entire give-back class of losses.
+    if (!trade.beMoved && BE_TRIGGER_PCT > 0 && trade.slPrice > 0) {
+        const tpDist = Math.abs(trade.tpPrice - trade.entryPrice);
+        const gained = trade.side === 'long'
+            ? pos.currentPrice - trade.entryPrice
+            : trade.entryPrice - pos.currentPrice;
+        if (tpDist > 0 && gained >= tpDist * BE_TRIGGER_PCT) {
+            const moved = await moveStopToBreakeven(trade.side, trade.size, trade.entryPrice, trade.slOrderId);
+            if (moved) {
+                trade.beMoved = true;
+                console.log(`[ProfitLock] 🔒 +${(gained / tpDist * 100).toFixed(0)}% to TP — stop moved to break-even $${trade.entryPrice.toFixed(2)}`);
+            }
+        }
+    }
 
     // ── Time-stop ─────────────────────────────────────────────────────────────
     // The scalp thesis is "TP fills in seconds-to-minutes". If it hasn't filled
