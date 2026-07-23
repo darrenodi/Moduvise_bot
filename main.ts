@@ -872,12 +872,14 @@ const _tpMult = Number(process.env.TP_ATR_MULT || 0);
 const _tpUsd  = _tpMult > 0 ? _refAtr * _tpMult : Number(process.env.TP_MIN_USD || 4.00);
 const _slUsd  = calcSlDistance(_refPx, _refAtr, _tpUsd);
 const _taker  = isEntryTaker();
+const _slMaker = (process.env.SL_MAKER ?? 'false') === 'true';
 const _entFee = _taker ? _refPx * 0.0004 : 0;      // taker entry fee scales with price; maker = 0
 const _win    = _tpUsd - _entFee;                  // maker TP exit = 0 fee
-const _loss   = _slUsd + (_refPx * 0.0004) + _entFee;   // the stop always exits taker
+// SL exit fee: 0 if maker stop-limit, taker rate otherwise.
+const _loss   = _slUsd + (_slMaker ? 0 : _refPx * 0.0004) + _entFee;
 console.log(`  ENTRY    : ${_taker ? 'TAKER/MARKET (instant, ~0.04% fee every trade)' : 'MAKER/GTX chase-to-fill (0 fee; only fills when price comes to us)'}`);
 console.log(`  TP       : $${_tpUsd.toFixed(2)}${_tpMult > 0 ? ` (${_tpMult}x ATR $${_refAtr.toFixed(2)})` : ' fixed'}, post-only maker, 0 fee`);
-console.log(`  SL       : $${_slUsd.toFixed(2)}${process.env.SL_FROM_TP_MULT ? ` (loss + taker fee = ${process.env.SL_FROM_TP_MULT}x TP, exact)` : (process.env.SL_ATR_MULT ? ` (${process.env.SL_ATR_MULT}x ATR)` : '')}, Algo stop-market`);
+console.log(`  SL       : $${_slUsd.toFixed(2)}, ${_slMaker ? 'MAKER stop-limit (0 fee, may not fill on a gap)' : 'stop-market (taker on trigger)'}`);
 console.log(`  BREAKEVEN: win ≈ +$${_win.toFixed(2)}/unit, stop-out ≈ -$${_loss.toFixed(2)}/unit incl. fees → 1 loss ≈ ${(_loss / _win).toFixed(1)} wins, breakeven ≈ ${((_loss / (_loss + _win)) * 100).toFixed(0)}% WR`);
 console.log(`  GATES    : RANGING-ONLY | momentum-aligned | flow 5s+60s | funding | OI surge | VWAP value-side | daily break + news blackout`);
 console.log(`  EXIT     : maker TP, stop-market SL, or time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min (hygiene)`);
