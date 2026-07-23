@@ -127,28 +127,32 @@ const BOTS: BotConfig[] = [
             // FLAGGED TO USER: SL=2×TP needs ~74-79% WR to break even, above the
             // ~55-63% the statement measured. SL_TP_MULT is one env line to change if
             // the live data says so — kept exactly as specced, escape hatch visible.
-            TP_ATR_MULT:      '0.6',    // small, fast TP so trades resolve in the 5min window
-            SL_TP_MULT:       '2',      // SL = 2 × TP (user spec point 3)
-            SL_ATR_MULT:      '',       // off — SL derives from TP
-            TP_MIN_USD:       '',
+            // GOLD 2026-07-23 (user): TP $0.80 fixed, SL = 2×TP = $1.60. MFE data
+            // showed gold's avg favorable move ~$0.96, so the old $2.16 TP was too
+            // far (34/71 timed out). $0.80 is reachable → more clean maker TP hits,
+            // fewer taker stop-outs (the fee leak). Targets 200 trades/day.
+            TP_MIN_USD:       '0.80',   // fixed $0.80 TP price move
+            SL_TP_MULT:       '2',      // SL = 2 × TP = $1.60
+            TP_ATR_MULT:      '',       // off — fixed $ TP
+            SL_ATR_MULT:      '',
             SL_FIXED_USD:     '',
             SL_FROM_TP_MULT:  '',
             SL_ROI_PCT:       '',
             RISK_PCT_OF_MARGIN: '3',    // never a crater (statement lesson, kept)
-            MAX_HOLD_MS:      '300000', // point 4: force-close at 5 minutes
-            ENTRY_CHASE_TOTAL_MS: '120000',  // point 2: fill within 2 minutes
-            ENTRY_MAX_REQUOTES: '6',         // cap API churn (was re-quoting 16x/fill)
-            ENTRY_CHASE_POLL_MS: '3000',     // let each resting order sit 3s before re-quoting
+            MAX_HOLD_MS:      '300000', // force-close at 5 minutes
+            ENTRY_CHASE_TOTAL_MS: '120000',
+            ENTRY_MAX_REQUOTES: '6',
+            ENTRY_CHASE_POLL_MS: '3000',
             FILL_POLL_MS:      '1500',
             MAX_CONSEC_LOSSES:'5',      // circuit breaker
-            VWAP_EXT_MAX_PCT: '0.30',   // value-side but not razor-thin (allows frequency)
-            OB_STRONG:        '0.35',   // point 1: directional book pressure (not sniper-tight)
+            VWAP_EXT_MAX_PCT: '0.30',
+            OB_STRONG:        '0.35',   // book pressure (loose = frequency)
             OB_LEAN:          '0.15',
-            MOM_STRONG_ATR:   '0.5',    // momentum entries allowed (more frequency)
-            MOM_ALIGN:        'true',   // enter with direction
-            ENTRY_TAKER:      'false',  // point 2: MAKER entry, 0 fee
+            MOM_STRONG_ATR:   '0.5',
+            MOM_ALIGN:        'true',
+            ENTRY_TAKER:      'false',  // MAKER entry, 0 fee
             BANK_SPLIT:       '0',
-            RANGING_ONLY:     'false',  // point 6 spirit: don't over-restrict
+            RANGING_ONLY:     'false',
             TRADE_HOURS_UTC:  '',       // all hours (frequency)
         },
     },
@@ -156,8 +160,11 @@ const BOTS: BotConfig[] = [
         botId: 'ETH-DIR', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
         leverage: 100, wallMinNotional: 50_000,
         strategy: {
-            // Same 6-point spec as gold (see note above), applied to ETH.
-            TP_ATR_MULT:      '0.6',
+            // ETH 2026-07-23 (user: "make eth trade more since it's positive").
+            // ETH is the earner (+$0.08 net, clean maker). Loosened for frequency:
+            // OB 0.35→0.25, VWAP 0.30→0.45 (its #1 block was "CHASING past VWAP"),
+            // momentum 0.5→0.35. Keeps its winning TP=0.6×ATR geometry unchanged.
+            TP_ATR_MULT:      '0.6',    // KEEP — this is what's working on ETH
             SL_TP_MULT:       '2',
             SL_ATR_MULT:      '',
             TP_MIN_USD:       '',
@@ -171,15 +178,15 @@ const BOTS: BotConfig[] = [
             ENTRY_CHASE_POLL_MS: '3000',
             FILL_POLL_MS:      '1500',
             MAX_CONSEC_LOSSES:'5',
-            VWAP_EXT_MAX_PCT: '0.30',
-            OB_STRONG:        '0.35',
-            OB_LEAN:          '0.15',
-            MOM_STRONG_ATR:   '0.5',
+            VWAP_EXT_MAX_PCT: '0.45',   // was 0.30 — its top block; loosen for frequency
+            OB_STRONG:        '0.25',   // was 0.35 — more entries
+            OB_LEAN:          '0.12',
+            MOM_STRONG_ATR:   '0.35',   // was 0.5 — more momentum entries
             MOM_ALIGN:        'true',
             ENTRY_TAKER:      'false',
             BANK_SPLIT:       '0',
             RANGING_ONLY:     'false',
-            TRADE_HOURS_UTC:  '',       // ETH all hours now (was 18-2, opened for frequency)
+            TRADE_HOURS_UTC:  '',       // all hours
         },
     },
 ];
