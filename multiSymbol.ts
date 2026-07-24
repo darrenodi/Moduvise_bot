@@ -148,7 +148,7 @@ const BOTS: BotConfig[] = [
             SL_FROM_TP_MULT:  '',
             SL_ROI_PCT:       '',
             RISK_PCT_OF_MARGIN: '3',    // never a crater (statement lesson, kept)
-            MAX_HOLD_MS:      '300000', // 5min
+            MAX_HOLD_MS:      '1800000',// 30min (user 2026-07-24: remove 5min timed loss, enforce 30min)
             ENTRY_CHASE_TOTAL_MS: '120000',
             ENTRY_MAX_REQUOTES: '6',
             ENTRY_CHASE_POLL_MS: '3000',
@@ -187,7 +187,7 @@ const BOTS: BotConfig[] = [
             SL_FROM_TP_MULT:  '',
             SL_ROI_PCT:       '',
             RISK_PCT_OF_MARGIN: '3',
-            MAX_HOLD_MS:      '300000', // 5min
+            MAX_HOLD_MS:      '1800000',// 30min (user 2026-07-24: remove 5min timed loss, enforce 30min)
             ENTRY_CHASE_TOTAL_MS: '120000',
             ENTRY_MAX_REQUOTES: '6',
             ENTRY_CHASE_POLL_MS: '3000',
