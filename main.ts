@@ -325,7 +325,7 @@ function flightVerdict(outcome: string, exitPhase: string): Record<string, any> 
     if (outcome !== 'tp') {
         // Threshold on VOLUME (ratio is unreliable — see flightSample). FLUSH_VOL is
         // per-asset: gold's aggTrade sizes are ~10x ETH's, so one number won't do.
-        const FLUSH_VOL = Number(process.env.FORENSIC_FLUSH_VOL || (_isEth ? 20 : 30));
+        const FLUSH_VOL = Number(process.env.FORENSIC_FLUSH_VOL || (_symbol.includes('ETH') ? 20 : 30));
         if (f.worstFlowOpposeV >= FLUSH_VOL) causes.push(`opposing ${f.side === 'long' ? 'SELL' : 'BUY'} flush (vol ${f.worstFlowOpposeV.toFixed(1)}, ${f.worstFlowRatio.toFixed(0)}x) at +${(f.worstFlowAtMs / 1000).toFixed(0)}s`);
         if (f.wallPulledAtMs !== null)    causes.push(`entry wall ($${(f.entryWallUsd / 1000).toFixed(0)}K @ $${f.entryWallPrice.toFixed(2)}) pulled at +${(f.wallPulledAtMs / 1000).toFixed(0)}s`);
         if (news)                         causes.push(`news window ${news}`);
@@ -339,7 +339,7 @@ function flightVerdict(outcome: string, exitPhase: string): Record<string, any> 
         causes.push(f.mae < 0.10 * Math.max(f.mfe, 0.01)
             ? `clean run to TP (heat only $${f.mae.toFixed(2)})`
             : `won after $${f.mae.toFixed(2)} heat at +${(f.maeAtMs / 1000).toFixed(0)}s`);
-        const FLUSH_VOL = Number(process.env.FORENSIC_FLUSH_VOL || (_isEth ? 20 : 30));
+        const FLUSH_VOL = Number(process.env.FORENSIC_FLUSH_VOL || (_symbol.includes('ETH') ? 20 : 30));
         if (f.worstFlowOpposeV >= FLUSH_VOL) causes.push(`survived opposing flush (vol ${f.worstFlowOpposeV.toFixed(1)})`);
     }
     return {
@@ -924,17 +924,28 @@ console.log(`  LEVERAGE : ${_lev}x | MARGIN: $${_mar}/trade`);
 // env var — the banner previously printed "$0.00" and "TAKER" while the engine was
 // correctly running an ROI stop and maker entries.
 //
-// The reference price MUST come from the symbol being traded: an ROI stop scales
-// with price, so hardcoding gold's ~$4100 made the ETHUSDC bot's banner report a
-// $6.15 stop when its real stop (at ETH's ~$1770) is ~$2.66. Engine was always
-// right (it uses the live fill price); only the banner lied.
-// Reference price AND ATR must both match the traded symbol — TP/SL are now
-// ATR-relative, so a gold-shaped ATR would misreport ETH's bracket entirely.
-const _isEth  = _symbol.includes('ETH');
-const _refPx  = Number(process.env.BANNER_REF_PRICE || (_isEth ? 1786 : 4022));
-const _refAtr = Number(process.env.BANNER_REF_ATR   || (_isEth ? 2.92 : 3.60));   // measured 2026-07-14
+// The reference price MUST come from the symbol being traded: an ROI/PCT stop
+// scales with price, so hardcoding gold's ~$4100 made every other bot's banner
+// report nonsense (found 2026-07-24: BTC and SOL both silently fell through to
+// gold's $4022 fallback, showing a $4.02 SL when BTC's real 0.10% stop is ~$64
+// and SOL's is ~$0.07). Engine was always right (it uses the live fill price);
+// only the banner lied. Expanded to a real per-symbol reference table instead
+// of a two-way ETH/gold guess.
+const _refPriceMap: Record<string, number> = {
+    ETHUSDC: 1858, ETHUSDT: 1858, BTCUSDC: 63970, BTCUSDT: 63970,
+    SOLUSDC: 74, XAUUSDT: 4071, DOGEUSDT: 0.10,
+};
+const _refAtrMap: Record<string, number> = {
+    ETHUSDC: 2.92, ETHUSDT: 2.92, BTCUSDC: 90, BTCUSDT: 90,
+    SOLUSDC: 0.30, XAUUSDT: 3.60, DOGEUSDT: 0.0005,
+};
+const _refPx  = Number(process.env.BANNER_REF_PRICE || _refPriceMap[MARKET_SYMBOL] || 4022);
+const _refAtr = Number(process.env.BANNER_REF_ATR   || _refAtrMap[MARKET_SYMBOL]   || 3.60);
 const _tpMult = Number(process.env.TP_ATR_MULT || 0);
-const _tpUsd  = _tpMult > 0 ? _refAtr * _tpMult : Number(process.env.TP_MIN_USD || 4.00);
+const _tpPct  = Number(process.env.TP_PCT || 0);
+const _tpUsd  = _tpPct > 0 ? _refPx * _tpPct / 100
+              : _tpMult > 0 ? _refAtr * _tpMult
+              : Number(process.env.TP_MIN_USD || 4.00);
 const _slUsd  = calcSlDistance(_refPx, _refAtr, _tpUsd);
 const _taker  = isEntryTaker();
 const _slMaker = (process.env.SL_MAKER ?? 'false') === 'true';
