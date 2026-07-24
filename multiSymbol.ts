@@ -171,6 +171,7 @@ const BOTS: BotConfig[] = [
             SL_FIXED_USD:     '2.00',   // user 2026-07-24: SL = 4x TP ($0.50 x 4)
             SL_MAKER:         'true',
             MAX_ENTRY_DRIFT:  '0.05',
+            DIP_GATE:         'false',  // user 2026-07-24: "remove eth gates, as fast as xau" — no dip/rip cooldown
             TP_ATR_MULT:      '',
             SL_TP_MULT:       '',
             SL_ATR_MULT:      '',

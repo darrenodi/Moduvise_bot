@@ -127,6 +127,10 @@ export function getTradingBlackout(now = new Date()): string | null {
 }
 
 // ─── DIP / RIP REGIME DETECTION ───────────────────────────────────────────────
+// DIP_GATE=false (user 2026-07-24: "remove eth gates, I want it going as fast as
+// xau") disables this per-bot via env — each bot is a separate process, so this
+// only affects the bot it's set on.
+const DIP_GATE_ENABLED = (process.env.DIP_GATE ?? 'true') === 'true';
 const DIP_ATR_MULT = 2.5;
 const RIP_ATR_MULT = 2.0;
 const DIP_CANDLES  = 3;
@@ -135,6 +139,7 @@ const DIP_PAUSE_MS = 10 * 60 * 1000;
 let _dipPauseUntil = 0;
 
 export function detectRegime(closes: number[], atr5m: number): { regime: MarketRegime; reason: string } {
+    if (!DIP_GATE_ENABLED) return { regime: 'normal', reason: 'Dip gate disabled' };
     if (closes.length < DIP_CANDLES + 1) return { regime: 'normal', reason: 'Insufficient history' };
 
     const window     = closes.slice(-(DIP_CANDLES + 1));
