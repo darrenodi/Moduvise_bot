@@ -709,10 +709,21 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         if (_closeInProgress) return 'open';
         _closeInProgress = true;
         try {
-            console.log(`[TimeStop] ⏱ ${(ageMs / 60_000).toFixed(1)}min without TP — scratching (maker-only, no taker fee)`);
+            // DRIFT CAP (2026-07-24): maker-only time-stop was letting losing trades
+            // ride while an unfilled maker close kept retrying — 5 gold trades this
+            // session lost $0.05-$0.11, far past the intended $0.50 risk, because
+            // price kept sliding away from the resting maker order with nothing
+            // forcing a fill. If the position is already losing more than one SL's
+            // worth at the moment the timer fires, go straight to taker — a known,
+            // bounded fee beats an unbounded ride on a maker order that isn't filling.
+            const curLoss = trade.side === 'long'
+                ? trade.entryPrice - pos.currentPrice
+                : pos.currentPrice - trade.entryPrice;
+            const slDist  = Math.abs(trade.entryPrice - trade.slPrice) || 0;
+            const deepLoss = slDist > 0 && curLoss >= slDist;
+            console.log(`[TimeStop] ⏱ ${(ageMs / 60_000).toFixed(1)}min without TP — scratching (${deepLoss ? 'taker: already past SL distance' : 'maker-only, no taker fee'})`);
             await cancelAllOrders(trade.slOrderId);
-            // maker-only: never pays a taker fee on the time-stop (fixes gold's fee leak).
-            await triggerEmergencyClose(trade.side, trade.size, `time-stop ${(ageMs / 60_000).toFixed(0)}min`, true);
+            await triggerEmergencyClose(trade.side, trade.size, `time-stop ${(ageMs / 60_000).toFixed(0)}min`, !deepLoss);
             const real = await getRealizedPnlSince(trade.openedAt - 2_000);
             const pnl  = real ? real.pnl : 0;
             const won  = pnl >= 0;
