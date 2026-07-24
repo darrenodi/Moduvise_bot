@@ -175,6 +175,8 @@ export interface ActiveTrade {
     slOrderId?:    number;
     /** Set once the profit-lock has moved the stop to break-even (one-shot). */
     beMoved?:      boolean;
+    /** ATR at entry, for the directional loss-guard reclaim distance (NOT the SL distance). */
+    atr5m?:        number;
     tp2Phase:      boolean;
     tp2StartedAt?: number;
     tp2OrderId?:   number;
@@ -1027,6 +1029,7 @@ export async function executeBinanceTrade(
             openedAt:    Date.now(),
             tpOrderId,
             slOrderId,
+            atr5m:       signal.atr5m,
             tp2Phase:    false,
         };
 

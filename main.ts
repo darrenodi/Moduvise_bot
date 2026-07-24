@@ -584,7 +584,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
                 if (real) {
                     const outcome = real.pnl >= 0 ? 'tp' : 'sl';
                     if (outcome === 'tp') stats.tpHits++;
-                    else { stats.slHits++; recordLoss(trade.side, pos.currentPrice, Math.abs(trade.entryPrice - trade.slPrice) || Math.abs(trade.tpPrice - trade.entryPrice)); }
+                    else { stats.slHits++; recordLoss(trade.side, pos.currentPrice, trade.atr5m || Math.abs(trade.entryPrice - trade.slPrice)); }
                     stats.fills++;
                     await applyTradeResult(real.pnl);
                     await cancelAllOrders(trade.slOrderId);
@@ -659,6 +659,46 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         }
     }
 
+    // ── BACKUP STOP (user 2026-07-24: "what if we miss the TP and SL? we need a
+    // backup or timed backup") ───────────────────────────────────────────────
+    // A maker stop-LIMIT (SL_MAKER=true) only fills if price actually TRADES at
+    // the trigger — if it gaps straight through, the order sits unfilled and the
+    // position rides naked until the 5-min time-stop. Live proof, 2026-07-23:
+    // two ETH trades that should have capped at -$0.50 rode to -$0.17 and -$0.13
+    // (25-34x the intended stop) because the maker stop never filled and nothing
+    // checked in the meantime. Fix: every cycle, if price has moved past the SL
+    // trigger by more than BACKUP_STOP_SLACK_MULT x the SL distance AND the maker
+    // stop is still open (not filled/cancelled), force an immediate taker close.
+    // This trades a small, known taker fee for capping the loss NOW instead of
+    // riding blind for up to 5 minutes.
+    if (trade.slOrderId && trade.slPrice > 0) {
+        const slDist = Math.abs(trade.entryPrice - trade.slPrice);
+        const breached = trade.side === 'long'
+            ? trade.slPrice - pos.currentPrice
+            : pos.currentPrice - trade.slPrice;
+        const slackMult = Number(process.env.BACKUP_STOP_SLACK_MULT ?? 1.0);
+        if (slDist > 0 && breached >= slDist * slackMult) {
+            const stillOpen = await hasOpenOrders();
+            if (stillOpen) {
+                console.warn(`[BackupStop] 🚨 Price $${pos.currentPrice.toFixed(2)} breached SL $${trade.slPrice.toFixed(2)} by ${slackMult}x and the maker stop hasn't filled — forcing taker close now`);
+                await cancelAllOrders(trade.slOrderId);
+                await triggerEmergencyClose(trade.side, trade.size, 'backup-stop: maker SL missed', false);
+                const real = await getRealizedPnlSince(trade.openedAt - 2_000);
+                const pnl  = real ? real.pnl : 0;
+                stats.slHits++; stats.fills++;
+                recordLoss(trade.side, pos.currentPrice, trade.atr5m || slDist);
+                await applyTradeResult(pnl);
+                if (_currentTradeId) {
+                    logTradeClose(_currentTradeId, 'sl', pos.currentPrice, pnl, 'backup-stop', false, true);
+                    _currentTradeId = null;
+                }
+                clearActiveTrade();
+                await sendAlert(`🔴🚨 ${_symbol} BACKUP STOP — maker SL missed, forced taker close | PnL: $${pnl.toFixed(4)}`).catch(() => {});
+                return 'sl';
+            }
+        }
+    }
+
     // ── Time-stop ─────────────────────────────────────────────────────────────
     // The scalp thesis is "TP fills in seconds-to-minutes". If it hasn't filled
     // after maxHoldMs, the thesis failed — scratch NOW at a small loss instead of
@@ -678,7 +718,7 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
             const won  = pnl >= 0;
             const outcome = won ? 'tp' : 'sl';
             if (won) stats.tpHits++;
-            else { stats.slHits++; recordLoss(trade.side, pos.currentPrice, Math.abs(trade.entryPrice - trade.slPrice) || Math.abs(trade.tpPrice - trade.entryPrice)); }
+            else { stats.slHits++; recordLoss(trade.side, pos.currentPrice, trade.atr5m || Math.abs(trade.entryPrice - trade.slPrice)); }
             stats.fills++;
             await applyTradeResult(pnl);
             if (_currentTradeId) {
