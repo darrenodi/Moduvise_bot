@@ -797,6 +797,20 @@ async function runCycle(): Promise<void> {
 
         if (signal.direction === 'neutral') { stats.skipped++; return; }
 
+        // VOLUME-EXHAUSTION GATE (found 2026-07-24, 547-trade pooled analysis across
+        // both bots): every other logged field (OB magnitude, RSI, ADX, regime,
+        // hour-of-day) showed noise, not a gradient — this was the one exception.
+        // volumeRatio >= 0.85 (an unusually loud candle right at entry, i.e. chasing
+        // a move that's already run) measured 40% WR (31/77) vs 52% (246/470) below
+        // it — a 12-point gap on a real sample, not a 3-trade fluke. Skip entries
+        // into an already-exhausted volume spike.
+        const VOL_EXHAUST_MAX = Number(process.env.VOL_EXHAUST_MAX ?? 0.85);
+        const volRatioNow = asset.indicators.volumeRatio;
+        if (VOL_EXHAUST_MAX > 0 && volRatioNow >= VOL_EXHAUST_MAX) {
+            console.log(`[${_symbol}] 🚫 VOL-EXHAUST: skip — volumeRatio ${volRatioNow.toFixed(2)} >= ${VOL_EXHAUST_MAX} (chasing an already-loud candle)`);
+            stats.skipped++; return;
+        }
+
         // Directional loss guard: after a stop-out, refuse the SAME direction until
         // price has reclaimed ~1×ATR past where we were stopped. Opposite-direction
         // entries are always allowed (if the move flipped, trade the flip). Clears
