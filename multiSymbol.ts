@@ -163,14 +163,18 @@ const BOTS: BotConfig[] = [
         botId: 'ETH-DIR', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
         leverage: 100, wallMinNotional: 50_000,
         strategy: {
-            // ETH 2026-07-23 (user: "make eth trade more since it's positive").
-            // ETH is the earner (+$0.08 net, clean maker). Loosened for frequency:
-            // OB 0.35→0.25, VWAP 0.30→0.45 (its #1 block was "CHASING past VWAP"),
-            // momentum 0.5→0.35. Keeps its winning TP=0.6×ATR geometry unchanged.
-            TP_MIN_USD:       '0.50',   // user 2026-07-23: $0.50 TP
-            SL_FIXED_USD:     '2.00',   // user 2026-07-24: SL = 4x TP ($0.50 x 4)
-            SL_MAKER:         'true',
+            // ETH 2026-07-24 (user: "enter with taker, join the momentum, TP $1
+            // and SL x4 TP"). FLAGGED & RESOLVED WITH USER: taker entry at 100x
+            // leverage on ETH's ~$1900 notional pays ~$0.76 entry fee — at TP $1
+            // that's 76% of the target gone before the trade even moves, breakeven
+            // ~96% (impossible). User chose to keep taker+momentum+4x but size the
+            // TP to absorb the fee instead: TP $3 / SL $12 -> breakeven ~86%, still
+            // high but the fee no longer eats most of the target.
+            TP_MIN_USD:       '3.00',   // user 2026-07-24: TP sized to survive the taker entry fee
+            SL_FIXED_USD:     '12.00',  // SL = 4x TP
+            SL_MAKER:         'true',   // SL exit still maker when it can be
             MAX_ENTRY_DRIFT:  '0.05',
+            ENTRY_TAKER:      'true',   // user: taker entry, joins momentum immediately (no chase)
             DIP_GATE:         'false',  // user 2026-07-24: "remove eth gates, as fast as xau" — no dip/rip cooldown
             TP_ATR_MULT:      '',
             SL_TP_MULT:       '',
@@ -189,8 +193,7 @@ const BOTS: BotConfig[] = [
             OB_STRONG:        '0.25',   // was 0.35 — more entries
             OB_LEAN:          '0.12',
             MOM_STRONG_ATR:   '0.35',   // was 0.5 — more momentum entries
-            MOM_ALIGN:        'true',
-            ENTRY_TAKER:      'false',
+            MOM_ALIGN:        'true',   // required: enters WITH momentum direction
             BANK_SPLIT:       '0',
             RANGING_ONLY:     'false',
             TRADE_HOURS_UTC:  '',       // all hours
