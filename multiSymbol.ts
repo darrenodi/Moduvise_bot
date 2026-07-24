@@ -157,19 +157,31 @@ const TP_ATR_MULT     = '1.0'; // target one normal candle
 // FROZEN EXPERIMENT CONFIG (2026-07-24). Pro-trader framework, "Experiment B":
 // same ATR-normalized TP/SL multiple applied identically across every asset —
 // the fair, apples-to-apples version of the earlier %-of-price attempt, because
-// it also normalizes for volatility, not just price level. TP_ATR_MULT=0.56 /
-// SL_ATR_MULT=0.45 is gold's own historically-proven ratio (1.24:1 R:R) reused
-// verbatim on ETH/BTC/SOL — no per-asset hand-tuning, which is the whole point.
-// RISK_USD_PER_TRADE (not %-of-margin) so dollar risk stays CONSTANT while the
-// stack compounds during this fixed-risk "prove the edge" phase — the trader's
-// explicit Test-1-vs-Test-2 separation. DAILY_LOSS_LIMIT_PCT is the circuit
-// breaker on a slow bleed that never streaks long enough to trip MAX_CONSEC_LOSSES.
+// it also normalizes for volatility, not just price level. RISK_USD_PER_TRADE
+// (not %-of-margin) so dollar risk stays CONSTANT while the stack compounds
+// during this fixed-risk "prove the edge" phase — the trader's explicit
+// Test-1-vs-Test-2 separation. DAILY_LOSS_LIMIT_PCT is the circuit breaker on a
+// slow bleed that never streaks long enough to trip MAX_CONSEC_LOSSES.
 // THIS CONFIG IS MEANT TO BE FROZEN: run `npx tsx multiSymbol.ts --freeze "note"`
 // once satisfied, then no strategy edit will start until --unfreeze.
+//
+// v2 (2026-07-24): user wants +0.3% EXPECTANCY per trade. At the measured 53% WR
+// (547-trade pooled history), a 1:1 bracket (v1, TP=0.56xATR/SL=0.45xATR) only
+// nets ~+0.06% expectancy — nowhere near 0.3%. The math that gets there is
+// ASYMMETRIC reward:risk, not a higher win rate (which I can't manufacture):
+//   expectancy = WR*avgWin - (1-WR)*avgLoss
+//   at 53% WR, 5:1 R:R -> expectancy = 0.53*5 - 0.47*1 = +2.18R -> comfortably
+//   clears +0.3% even after fees, AND breakeven drops to just 21-33% (huge margin).
+// SL tight (0.3x ATR) / TP wide (1.5x ATR, exactly 5x the SL). Flagged risk: a
+// target 5x further away is far less likely to be reached inside any given
+// window than the old 0.56x target was — hold window extended 30min -> 2h to
+// give the wider target real room; if it still resolves mostly via time-stop,
+// that's the signal telling us the wider TP isn't reachable and the shape needs
+// revisiting, not a reason to shrink it back to 1:1 by reflex.
 const SHARED_STRATEGY: Record<string, string> = {
     MARGIN_STACK_PCT:  '100',
-    TP_ATR_MULT:       '0.56',   // gold's proven multiple, same on every symbol
-    SL_ATR_MULT:       '0.45',   // ~1.24:1 R:R
+    TP_ATR_MULT:       '1.5',    // 5x wider than SL — let winners run
+    SL_ATR_MULT:       '0.3',    // tight — losses are meant to be small and frequent
     TP_PCT: '', SL_PCT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
     SL_TP_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
     SL_MAKER:          'true',   // maker both sides, 0 fee
@@ -182,7 +194,7 @@ const SHARED_STRATEGY: Record<string, string> = {
     RISK_USD_PER_TRADE:'0.02',   // fixed $ risk per stop-out — constant across the fixed-risk phase, not a % of a moving stack
     RISK_PCT_OF_MARGIN:'',       // off — fixed-$ mode takes priority
     DAILY_LOSS_LIMIT_PCT: '2',   // pause this bot for the day if it's down 2% of day-start stack
-    MAX_HOLD_MS:       '1800000',// 30min
+    MAX_HOLD_MS:       '7200000',// 2h — a 1.5x-ATR target needs real room vs the old 0.56x
     ENTRY_CHASE_TOTAL_MS: '120000',
     ENTRY_MAX_REQUOTES: '6',
     ENTRY_CHASE_POLL_MS: '3000',
