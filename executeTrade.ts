@@ -911,7 +911,7 @@ export async function executeBinanceTrade(
         const tpDist  = calcTpDistance(signal.atr5m);
         const slDist  = calcSlDistance(actualEntry, signal.atr5m, tpDist);
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
-        const slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
+        let slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);
 
         console.log(`[Filled] ✅ ${direction.toUpperCase()} @ $${actualEntry.toFixed(_cfg.priceDp)} | size=${size} | TP=$${tpPrice.toFixed(_cfg.priceDp)} (+$${tpDist.toFixed(_cfg.priceDp)}) | SL=$${slPrice.toFixed(_cfg.priceDp)} (-$${slDist.toFixed(_cfg.priceDp)}) | entry fee≈$${feePerUnit.toFixed(4)}/unit | fillTime=${fillMs}ms`);
 
@@ -997,6 +997,19 @@ export async function executeBinanceTrade(
                     slOrderId = slRes.algoId;
                     console.log(`[SL] ✅ ${slMaker ? 'Maker stop-limit' : 'Stop-Market'} trigger=$${slPrice.toFixed(_cfg.priceDp)} | algoId=${slOrderId}`);
                     break;
+                }
+                // -2021: "Order would immediately trigger" — price already crossed the
+                // trigger by the time the order reached Binance (race on a fast tape).
+                // Re-anchor the trigger further out (one more SL-distance beyond current
+                // price) so the retry actually has room, instead of retrying the same
+                // doomed price 3x and falling through to a market close.
+                if (slRes?.code === -2021) {
+                    const bt = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker?symbol=${STRATEGY.SYMBOL}`).then(r => r.json()) as any;
+                    const cur = isBuy ? Number(bt.bidPrice) : Number(bt.askPrice);
+                    const dist = Math.abs(actualEntry - slPrice) || (_cfg.slMinTicks * _cfg.tick);
+                    slPrice = tickRound(isBuy ? cur - dist : cur + dist);
+                    console.warn(`[SL] ⚠️ -2021 immediate-trigger — re-anchoring to $${slPrice.toFixed(_cfg.priceDp)} (current $${cur.toFixed(_cfg.priceDp)})`);
+                    continue;
                 }
                 console.error(`[SL] ❌ Attempt ${attempt}: ${JSON.stringify(slRes)}`);
                 if (attempt < 3) await new Promise(r => setTimeout(r, 1_000));

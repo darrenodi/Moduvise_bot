@@ -132,7 +132,7 @@ const BOTS: BotConfig[] = [
             // far (34/71 timed out). $0.80 is reachable → more clean maker TP hits,
             // fewer taker stop-outs (the fee leak). Targets 200 trades/day.
             TP_MIN_USD:       '0.50',   // user 2026-07-23: $0.50 TP
-            SL_FIXED_USD:     '0.50',   // $0.50 SL, MAKER (SL_MAKER) — breakeven ~50%
+            SL_FIXED_USD:     '2.00',   // user 2026-07-24: SL = 4x TP ($0.50 x 4)
             SL_MAKER:         'true',   // maker stop-limit, 0 fee (user: maker only)
             MAX_ENTRY_DRIFT:  '0.05',   // only fill if within $0.05 of live price
             SL_TP_MULT:       '',       // off — fixed $ SL
@@ -168,7 +168,7 @@ const BOTS: BotConfig[] = [
             // OB 0.35→0.25, VWAP 0.30→0.45 (its #1 block was "CHASING past VWAP"),
             // momentum 0.5→0.35. Keeps its winning TP=0.6×ATR geometry unchanged.
             TP_MIN_USD:       '0.50',   // user 2026-07-23: $0.50 TP
-            SL_FIXED_USD:     '0.50',   // $0.50 SL, MAKER — breakeven ~50%
+            SL_FIXED_USD:     '2.00',   // user 2026-07-24: SL = 4x TP ($0.50 x 4)
             SL_MAKER:         'true',
             MAX_ENTRY_DRIFT:  '0.05',
             TP_ATR_MULT:      '',
