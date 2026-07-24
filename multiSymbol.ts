@@ -167,37 +167,46 @@ const BOTS: BotConfig[] = [
         },
     },
     {
-        botId: 'ETH-DIR', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
+        // BTC-DIR replaces ETH-DIR (2026-07-24, user: "switch to btc/usdc... we are
+        // transferring from eth. move eth's asset to btc usdc"). ETH-DIR retired
+        // (paused, flat, no orphan orders — confirmed clean before the swap) after
+        // a 547-trade pooled analysis showed its entries running ~47% WR with no
+        // fixable single cause. BTCUSDC confirmed live: 0% maker / 0.04% taker fee
+        // (same edge as XAU/ETH), 125x max leverage, $50 min notional.
+        // TP/SL scaled proportionally from the ETH $2/$2.5 spec by price ratio
+        // (BTC ~34x ETH's price) so the relative move size and breakeven math stay
+        // consistent: $68 TP / $85 SL -> breakeven ~62% (same ballpark as ETH's ~62%
+        // and gold's ~56% under the same $2/$2.5-equivalent framework). Same capital
+        // that was sitting in ETH-DIR's bankroll carries over via the same botId
+        // convention (new botId = new bankroll file; ETH's stack was flat/paused,
+        // nothing to migrate mid-position).
+        botId: 'BTC-DIR', marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc',
         leverage: 100, wallMinNotional: 50_000,
         strategy: {
-            // ETH 2026-07-24 (user, explicit 4-point spec, supersedes the taker
-            // experiment): 100% margin, TP $2 / SL $2.5, MAKER BOTH SIDES (user:
-            // "both should be maker for both entry and exit" — reverts ENTRY_TAKER
-            // to false), 200 trades/day minimum (gates loosened, no guarantee).
             MARGIN_STACK_PCT: '100',    // user 2026-07-24: use full margin
-            TP_MIN_USD:       '2.00',   // user 2026-07-24: $2 TP
-            SL_FIXED_USD:     '2.50',   // user 2026-07-24: $2.50 SL
+            TP_MIN_USD:       '68',     // scaled from ETH's $2 by BTC/ETH price ratio (~34x)
+            SL_FIXED_USD:     '85',     // scaled from ETH's $2.50, same ratio
             SL_MAKER:         'true',
-            MAX_ENTRY_DRIFT:  '0.05',
-            ENTRY_TAKER:      'false',  // user: maker both sides (reverts the taker experiment)
-            DIP_GATE:         'false',  // user 2026-07-24: "remove eth gates, as fast as xau" — no dip/rip cooldown
+            MAX_ENTRY_DRIFT:  '5',      // scaled from ETH's $0.05 by the same ratio
+            ENTRY_TAKER:      'false',  // maker both sides
+            DIP_GATE:         'false',
             TP_ATR_MULT:      '',
             SL_TP_MULT:       '',
             SL_ATR_MULT:      '',
             SL_FROM_TP_MULT:  '',
             SL_ROI_PCT:       '',
             RISK_PCT_OF_MARGIN: '3',
-            MAX_HOLD_MS:      '1800000',// 30min (user 2026-07-24: remove 5min timed loss, enforce 30min)
+            MAX_HOLD_MS:      '1800000',// 30min
             ENTRY_CHASE_TOTAL_MS: '120000',
             ENTRY_MAX_REQUOTES: '6',
             ENTRY_CHASE_POLL_MS: '3000',
             FILL_POLL_MS:      '1500',
             MAX_CONSEC_LOSSES:'12',
             BE_TRIGGER_PCT:   '0',      // profit-lock disabled (naked-position bug)
-            VWAP_EXT_MAX_PCT: '0.50',   // loosened for frequency
-            OB_STRONG:        '0.20',   // loosened for frequency
+            VWAP_EXT_MAX_PCT: '0.50',
+            OB_STRONG:        '0.20',
             OB_LEAN:          '0.10',
-            MOM_STRONG_ATR:   '0.3',    // loosened for frequency
+            MOM_STRONG_ATR:   '0.3',
             MOM_ALIGN:        'true',   // required: enters WITH momentum direction
             BANK_SPLIT:       '0',
             RANGING_ONLY:     'false',
