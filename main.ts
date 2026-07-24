@@ -146,6 +146,33 @@ async function applyTradeResult(realizedPnl: number): Promise<void> {
     if (realizedPnl > 0) { stats.grossProfit += realizedPnl; stats.netProfit += realizedPnl; }
     else { stats.netProfit += realizedPnl; stats.slLoss += Math.abs(realizedPnl); }
 
+    // DAILY LOSS LIMIT (pro-trader framework, 2026-07-24): "If hit: no more trades
+    // until the next day... 200 trades gives you a lot of opportunities to compound
+    // a mistake." Distinct from the consecutive-loss breaker (which catches a
+    // streak) — this catches a slow bleed of small losses that never streaks long
+    // enough to trip MAX_CONSEC_LOSSES. Checked AFTER stats.netProfit is updated
+    // above, so this trade's own loss counts toward the limit, not just prior ones.
+    // Default -2% of the stack at day start, matching the trader's example.
+    const DAILY_LOSS_LIMIT_PCT = Number(process.env.DAILY_LOSS_LIMIT_PCT ?? 2);
+    if (DAILY_LOSS_LIMIT_PCT > 0 && !_bankroll.paused) {
+        const dayStartStack = _bankroll.stack - stats.netProfit;   // back out today's net to get the day's opening stack
+        const limitUsd = dayStartStack * DAILY_LOSS_LIMIT_PCT / 100;
+        if (dayStartStack > 0 && stats.netProfit <= -limitUsd) {
+            _bankroll.paused = true;
+            // Tagged with today's UTC date so the orchestrator/operator can tell this
+            // was a DAILY limit (auto-clearable tomorrow) vs a permanent-until-fixed
+            // pause (naked position, exhausted stack). NOTE: unpausing on day-rollover
+            // is NOT automatic yet — this bot process exits immediately if paused
+            // (see loadState), so it never reaches its own day-rollover check. Until
+            // an external unpause step exists, treat this as "paused, review before
+            // resuming" rather than a true self-healing daily reset.
+            _bankroll.pausedReason = `Daily loss limit [${stats.date}]: -$${Math.abs(stats.netProfit).toFixed(4)} >= -${DAILY_LOSS_LIMIT_PCT}% of day-start stack ($${dayStartStack.toFixed(4)})`;
+            saveBankroll(_bankroll);
+            await sendAlert(`🛑📉 ${_symbol} DAILY LOSS LIMIT — -$${Math.abs(stats.netProfit).toFixed(4)} today (-${DAILY_LOSS_LIMIT_PCT}% cap). Paused until next UTC day.`);
+            console.log(`[${_symbol}] 🛑 Daily loss limit tripped: $${stats.netProfit.toFixed(4)} <= -$${limitUsd.toFixed(4)} — pausing until day rollover.`);
+        }
+    }
+
     // Once the un-swept banked pile crosses the threshold, physically move it to
     // Spot (out of the futures wallet entirely). Below threshold it just sits in
     // the wallet, already protected by isolated margin.
@@ -222,6 +249,21 @@ function logTradeEntry(
     _openLogEntries.set(id, entry);
     try { fs.appendFileSync(TRADE_LOG_FILE, JSON.stringify(entry) + '\n'); } catch { /* non-critical */ }
     console.log(`[TradeLog] 📝 ${signal.direction.toUpperCase()} @ $${entryPrice} | TP=$${tpPrice} SL=$${slPrice} | OB=${(ind.obImbalance*100).toFixed(0)}%`);
+}
+
+// SKIP LOGGING (pro-trader framework, 2026-07-24): "log all skipped signals, not
+// just trades — with many gates, your 200 'trades' may represent only a narrow
+// subset of market conditions... record signal_generated -> gate_passed/failed ->
+// reason." Every stats.skipped++ site now also writes a `phase: 'skip'` record to
+// the SAME trade log, so a post-mortem can compute true opportunity counts per
+// symbol (how many setups did BTC/ETH/SOL/gold actually generate, not just how
+// many were traded) and see the gate breakdown, not just a raw skip count.
+function logSkip(reason: string, direction?: string): void {
+    const rec = {
+        phase: 'skip', symbol: MARKET_SYMBOL, at: new Date().toISOString(),
+        reason, direction: direction ?? null,
+    };
+    try { fs.appendFileSync(TRADE_LOG_FILE, JSON.stringify(rec) + '\n'); } catch { /* non-critical */ }
 }
 
 // ─── FLIGHT RECORDER ──────────────────────────────────────────────────────────
@@ -795,7 +837,7 @@ async function runCycle(): Promise<void> {
 
         console.log(`[Heartbeat] ${signal.reasoning} | Stack: $${getStack().toFixed(4)} | Banked: $${getBanked().toFixed(4)}`);
 
-        if (signal.direction === 'neutral') { stats.skipped++; return; }
+        if (signal.direction === 'neutral') { stats.skipped++; logSkip(`neutral:${signal.reasoning.slice(0, 60)}`); return; }
 
         // VOLUME-EXHAUSTION GATE (found 2026-07-24, 547-trade pooled analysis across
         // both bots): every other logged field (OB magnitude, RSI, ADX, regime,
@@ -808,7 +850,7 @@ async function runCycle(): Promise<void> {
         const volRatioNow = asset.indicators.volumeRatio;
         if (VOL_EXHAUST_MAX > 0 && volRatioNow >= VOL_EXHAUST_MAX) {
             console.log(`[${_symbol}] 🚫 VOL-EXHAUST: skip — volumeRatio ${volRatioNow.toFixed(2)} >= ${VOL_EXHAUST_MAX} (chasing an already-loud candle)`);
-            stats.skipped++; return;
+            stats.skipped++; logSkip(`vol-exhaust:${volRatioNow.toFixed(2)}`, signal.direction); return;
         }
 
         // Directional loss guard: after a stop-out, refuse the SAME direction until
@@ -820,7 +862,7 @@ async function runCycle(): Promise<void> {
             const reclaimed = _lastLossDir === 'long' ? px >= _lastLossReclaim : px <= _lastLossReclaim;
             if (!reclaimed) {
                 console.log(`[${_symbol}] 🚫 DIR-GUARD: skip ${signal.direction} — price $${px.toFixed(2)} hasn't reclaimed $${_lastLossReclaim.toFixed(2)} since last ${_lastLossDir} loss`);
-                stats.skipped++; return;
+                stats.skipped++; logSkip('dir-guard', signal.direction); return;
             }
             _lastLossDir = null;   // reclaimed — guard clears
         }
@@ -834,6 +876,7 @@ async function runCycle(): Promise<void> {
         const minMargin = STRATEGY_MIN_NOTIONAL / leverage;   // $5 / leverage
         if (avail < minMargin) {
             stats.skipped++;
+            logSkip(`balance-too-low:${avail.toFixed(4)}`, signal.direction);
             if (_bankroll.stack < MIN_STACK) {
                 _bankroll.paused = true;
                 _bankroll.pausedReason = `Balance too low: $${avail.toFixed(4)}`;
@@ -863,10 +906,12 @@ async function runCycle(): Promise<void> {
                 // Transient at the razor's edge (a just-closed trade not yet settled).
                 // Skip and retry next cycle — do NOT pause. The balance gate handles
                 // the genuine "too low to trade" case.
+                logSkip('margin-insufficient-transient', signal.direction);
                 console.log(`[${_symbol}] ⏭ Margin insufficient this instant — skipping, will retry.`);
                 return;
             }
             const skip = result.message ?? '';
+            logSkip(`execute-rejected:${skip.slice(0, 60)}`, signal.direction);
             if (skip && skip !== 'Position already open.' && !skip.includes('not filled') && !skip.includes('taker')) {
                 console.log(`[Skipped] ${skip}`);
             }

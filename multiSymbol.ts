@@ -1,5 +1,7 @@
 import * as dotenv from 'dotenv';
 import { spawn, ChildProcess } from 'child_process';
+import * as fs   from 'fs';
+import * as crypto from 'crypto';
 dotenv.config();
 
 import {
@@ -7,6 +9,41 @@ import {
     bankrollSummary,
 } from './symbolBankroll.js';
 import { sendAlert, getAvailableBalance } from './executeTrade.js';
+
+// ─── EXPERIMENT FREEZE (pro-trader framework, 2026-07-24) ────────────────────
+// "If you keep tuning the strategy based on the first 50 trades, the next 150
+// are no longer an unbiased 200-trade test... Freeze the strategy. No parameter
+// changes. After N trades, analyze. THEN create Version 2." This is a durable,
+// file-based lock — not a comment or a promise — because tonight's actual
+// failure mode was silently tweaking every 10-70 trades. FREEZE_STATE_FILE
+// stores a hash of the live BOTS config at freeze time; startup refuses to run
+// if the current code's config hash doesn't match while frozen. To make a
+// change mid-freeze, you must deliberately run `npx tsx multiSymbol.ts --unfreeze`
+// — a real, visible action, not something that happens as a side effect of an
+// edit-and-redeploy cycle.
+const FREEZE_STATE_FILE = process.env.FREEZE_STATE_FILE ?? './experiment-freeze.json';
+interface FreezeState { frozenAt: string; configHash: string; note: string; }
+
+function hashConfig(bots: BotConfig[]): string {
+    // Hash only the strategy-relevant fields — not comments, not object key order.
+    const canon = bots.map(b => ({
+        botId: b.botId, marketSymbol: b.marketSymbol, leverage: b.leverage,
+        initialStack: b.initialStack ?? null,
+        strategy: Object.fromEntries(Object.entries(b.strategy).sort(([a], [b2]) => a.localeCompare(b2))),
+    }));
+    return crypto.createHash('sha256').update(JSON.stringify(canon)).digest('hex').slice(0, 16);
+}
+
+function loadFreeze(): FreezeState | null {
+    try {
+        if (fs.existsSync(FREEZE_STATE_FILE)) return JSON.parse(fs.readFileSync(FREEZE_STATE_FILE, 'utf-8'));
+    } catch { /* treat as unfrozen */ }
+    return null;
+}
+
+function saveFreeze(state: FreezeState): void {
+    fs.writeFileSync(FREEZE_STATE_FILE, JSON.stringify(state, null, 2));
+}
 
 // ─── DUAL-BOT ORCHESTRATOR ────────────────────────────────────────────────────
 // User spec 2026-07-12: split the balance in half into two INDEPENDENT bots that
@@ -117,126 +154,75 @@ const TP_ATR_MULT     = '1.0'; // target one normal candle
 // This was flagged to the user as a real constraint (not a design choice) before
 // building — user chose "raise leverage only on the two that need it" over the
 // alternatives (bigger margin on ETH/BTC, or dropping them entirely).
+// FROZEN EXPERIMENT CONFIG (2026-07-24). Pro-trader framework, "Experiment B":
+// same ATR-normalized TP/SL multiple applied identically across every asset —
+// the fair, apples-to-apples version of the earlier %-of-price attempt, because
+// it also normalizes for volatility, not just price level. TP_ATR_MULT=0.56 /
+// SL_ATR_MULT=0.45 is gold's own historically-proven ratio (1.24:1 R:R) reused
+// verbatim on ETH/BTC/SOL — no per-asset hand-tuning, which is the whole point.
+// RISK_USD_PER_TRADE (not %-of-margin) so dollar risk stays CONSTANT while the
+// stack compounds during this fixed-risk "prove the edge" phase — the trader's
+// explicit Test-1-vs-Test-2 separation. DAILY_LOSS_LIMIT_PCT is the circuit
+// breaker on a slow bleed that never streaks long enough to trip MAX_CONSEC_LOSSES.
+// THIS CONFIG IS MEANT TO BE FROZEN: run `npx tsx multiSymbol.ts --freeze "note"`
+// once satisfied, then no strategy edit will start until --unfreeze.
+const SHARED_STRATEGY: Record<string, string> = {
+    MARGIN_STACK_PCT:  '100',
+    TP_ATR_MULT:       '0.56',   // gold's proven multiple, same on every symbol
+    SL_ATR_MULT:       '0.45',   // ~1.24:1 R:R
+    TP_PCT: '', SL_PCT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
+    SL_TP_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
+    SL_MAKER:          'true',   // maker both sides, 0 fee
+    ENTRY_TAKER:       'false',
+    // CAVEAT (checked 2026-07-24): $0.02 fixed risk is exact on ETH/SOL/gold, but
+    // BTC's exchange minQty (0.001) forces a slightly larger real position — actual
+    // risk on BTC works out to ~$0.04, not $0.02. Disclosed, not hidden: on a $1
+    // stack this is still small, but "fixed-$ risk" isn't bit-for-bit identical on
+    // every symbol at this account size. Re-verify if RISK_USD_PER_TRADE changes.
+    RISK_USD_PER_TRADE:'0.02',   // fixed $ risk per stop-out — constant across the fixed-risk phase, not a % of a moving stack
+    RISK_PCT_OF_MARGIN:'',       // off — fixed-$ mode takes priority
+    DAILY_LOSS_LIMIT_PCT: '2',   // pause this bot for the day if it's down 2% of day-start stack
+    MAX_HOLD_MS:       '1800000',// 30min
+    ENTRY_CHASE_TOTAL_MS: '120000',
+    ENTRY_MAX_REQUOTES: '6',
+    ENTRY_CHASE_POLL_MS: '3000',
+    FILL_POLL_MS:      '1500',
+    MAX_CONSEC_LOSSES: '12',
+    BE_TRIGGER_PCT:    '0',      // profit-lock stays off (past naked-position bug)
+    VWAP_EXT_MAX_PCT:  '0.50',
+    OB_STRONG:         '0.20',
+    OB_LEAN:           '0.10',
+    MOM_STRONG_ATR:    '0.3',
+    MOM_ALIGN:         'true',
+    BANK_SPLIT:        '0',
+    RANGING_ONLY:      'false',
+    TRADE_HOURS_UTC:   '',
+    VOL_EXHAUST_MAX:   '0.85',   // the one filter the 547-trade pooled analysis actually supported
+};
 const BOTS: BotConfig[] = [
     {
         botId: 'ETH-SCALP', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
         leverage: 20, wallMinNotional: 20_000,   // 20x: $1 margin x 20x = $20, clears ETH's $20 min notional
         initialStack: 1,
-        strategy: {
-            MARGIN_STACK_PCT: '100',    // full $1 stack as margin every trade
-            TP_PCT:           '0.15',   // 0.15% of price, scale-free
-            SL_PCT:           '0.10',   // 0.10% of price — 1.5:1 R:R, breakeven ~48%
-            TP_MIN_USD: '', SL_FIXED_USD: '', SL_TP_MULT: '', TP_ATR_MULT: '',
-            SL_ATR_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
-            SL_MAKER:         'true',   // maker both sides, 0 fee
-            ENTRY_TAKER:      'false',
-            RISK_PCT_OF_MARGIN: '20',   // 20% of the $1 margin per stop-out (small abs $, needs to be a real fraction of a tiny stack to size a position at all)
-            MAX_HOLD_MS:      '1800000',// 30min
-            ENTRY_CHASE_TOTAL_MS: '120000',
-            ENTRY_MAX_REQUOTES: '6',
-            ENTRY_CHASE_POLL_MS: '3000',
-            FILL_POLL_MS:      '1500',
-            MAX_CONSEC_LOSSES: '12',
-            BE_TRIGGER_PCT:   '0',
-            VWAP_EXT_MAX_PCT: '0.50',
-            OB_STRONG:        '0.20',
-            OB_LEAN:          '0.10',
-            MOM_STRONG_ATR:   '0.3',
-            MOM_ALIGN:        'true',
-            BANK_SPLIT:       '0',
-            RANGING_ONLY:     'false',
-            TRADE_HOURS_UTC:  '',
-        },
+        strategy: { ...SHARED_STRATEGY },
     },
     {
         botId: 'BTC-SCALP', marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc',
         leverage: 50, wallMinNotional: 50_000,   // 50x: $1 x 50x = $50, clears BTC's $50 min notional
         initialStack: 1,
-        strategy: {
-            MARGIN_STACK_PCT: '100',
-            TP_PCT:           '0.15',
-            SL_PCT:           '0.10',
-            TP_MIN_USD: '', SL_FIXED_USD: '', SL_TP_MULT: '', TP_ATR_MULT: '',
-            SL_ATR_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
-            SL_MAKER:         'true',
-            ENTRY_TAKER:      'false',
-            RISK_PCT_OF_MARGIN: '20',
-            MAX_HOLD_MS:      '1800000',
-            ENTRY_CHASE_TOTAL_MS: '120000',
-            ENTRY_MAX_REQUOTES: '6',
-            ENTRY_CHASE_POLL_MS: '3000',
-            FILL_POLL_MS:      '1500',
-            MAX_CONSEC_LOSSES: '12',
-            BE_TRIGGER_PCT:   '0',
-            VWAP_EXT_MAX_PCT: '0.50',
-            OB_STRONG:        '0.20',
-            OB_LEAN:          '0.10',
-            MOM_STRONG_ATR:   '0.3',
-            MOM_ALIGN:        'true',
-            BANK_SPLIT:       '0',
-            RANGING_ONLY:     'false',
-            TRADE_HOURS_UTC:  '',
-        },
+        strategy: { ...SHARED_STRATEGY },
     },
     {
         botId: 'SOL-SCALP', marketSymbol: 'SOLUSDC', displaySymbol: 'SOL/USDC', wsSymbol: 'solusdc',
         leverage: 5, wallMinNotional: 5_000,     // 5x as specified: $1 x 5x = $5, clears SOL's $5 min notional
         initialStack: 1,
-        strategy: {
-            MARGIN_STACK_PCT: '100',
-            TP_PCT:           '0.15',
-            SL_PCT:           '0.10',
-            TP_MIN_USD: '', SL_FIXED_USD: '', SL_TP_MULT: '', TP_ATR_MULT: '',
-            SL_ATR_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
-            SL_MAKER:         'true',
-            ENTRY_TAKER:      'false',
-            RISK_PCT_OF_MARGIN: '20',
-            MAX_HOLD_MS:      '1800000',
-            ENTRY_CHASE_TOTAL_MS: '120000',
-            ENTRY_MAX_REQUOTES: '6',
-            ENTRY_CHASE_POLL_MS: '3000',
-            FILL_POLL_MS:      '1500',
-            MAX_CONSEC_LOSSES: '12',
-            BE_TRIGGER_PCT:   '0',
-            VWAP_EXT_MAX_PCT: '0.50',
-            OB_STRONG:        '0.20',
-            OB_LEAN:          '0.10',
-            MOM_STRONG_ATR:   '0.3',
-            MOM_ALIGN:        'true',
-            BANK_SPLIT:       '0',
-            RANGING_ONLY:     'false',
-            TRADE_HOURS_UTC:  '',
-        },
+        strategy: { ...SHARED_STRATEGY },
     },
     {
         botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
         leverage: 5, wallMinNotional: 20_000,    // 5x as specified: gold clears $5 min notional at 5x too
         // no initialStack — gets 100% of whatever remains after ETH/BTC/SOL's $1 each
-        strategy: {
-            MARGIN_STACK_PCT: '100',
-            TP_PCT:           '0.15',
-            SL_PCT:           '0.10',
-            TP_MIN_USD: '', SL_FIXED_USD: '', SL_TP_MULT: '', TP_ATR_MULT: '',
-            SL_ATR_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
-            SL_MAKER:         'true',
-            ENTRY_TAKER:      'false',
-            RISK_PCT_OF_MARGIN: '20',
-            MAX_HOLD_MS:      '1800000',
-            ENTRY_CHASE_TOTAL_MS: '120000',
-            ENTRY_MAX_REQUOTES: '6',
-            ENTRY_CHASE_POLL_MS: '3000',
-            FILL_POLL_MS:      '1500',
-            MAX_CONSEC_LOSSES: '12',
-            BE_TRIGGER_PCT:   '0',
-            VWAP_EXT_MAX_PCT: '0.50',
-            OB_STRONG:        '0.20',
-            OB_LEAN:          '0.10',
-            MOM_STRONG_ATR:   '0.3',
-            MOM_ALIGN:        'true',
-            BANK_SPLIT:       '0',
-            RANGING_ONLY:     'false',
-            TRADE_HOURS_UTC:  '',
-        },
+        strategy: { ...SHARED_STRATEGY },
     },
 ];
 
@@ -323,7 +309,10 @@ function spawnBot(entry: ManagedProcess): void {
         setTimeout(() => spawnBot(entry), backoffMs);
     });
 
-    console.log(`${tag} 🚀 Started | stack=$${bankroll.stack.toFixed(4)} margin=$${margin.toFixed(2)} ${cfg.leverage}x | TP=$${cfg.strategy.TP_MIN_USD} SL=-${cfg.strategy.SL_ROI_PCT}%`);
+    const geomLabel = cfg.strategy.TP_ATR_MULT ? `${cfg.strategy.TP_ATR_MULT}x ATR TP / ${cfg.strategy.SL_ATR_MULT}x ATR SL`
+        : cfg.strategy.TP_PCT ? `${cfg.strategy.TP_PCT}% TP / ${cfg.strategy.SL_PCT}% SL`
+        : `$${cfg.strategy.TP_MIN_USD} TP / $${cfg.strategy.SL_FIXED_USD} SL`;
+    console.log(`${tag} 🚀 Started | stack=$${bankroll.stack.toFixed(4)} margin=$${margin.toFixed(2)} ${cfg.leverage}x | ${geomLabel}`);
 }
 
 // ─── LIFECYCLE: one bot dies → the other continues alone ─────────────────────
@@ -440,16 +429,53 @@ function shutdown(signal: string): void {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
 
+// ─── CLI: freeze / unfreeze ───────────────────────────────────────────────────
+const _cliArg = process.argv[2];
+if (_cliArg === '--freeze') {
+    const state: FreezeState = {
+        frozenAt: new Date().toISOString(),
+        configHash: hashConfig(BOTS),
+        note: process.argv[3] ?? '',
+    };
+    saveFreeze(state);
+    console.log(`[Freeze] ✅ Experiment frozen at ${state.frozenAt} | hash ${state.configHash}${state.note ? ` | ${state.note}` : ''}`);
+    console.log(`[Freeze] Any strategy edit will change the hash and refuse to start until --unfreeze.`);
+    process.exit(0);
+}
+if (_cliArg === '--unfreeze') {
+    if (fs.existsSync(FREEZE_STATE_FILE)) fs.unlinkSync(FREEZE_STATE_FILE);
+    console.log(`[Freeze] 🔓 Experiment unfrozen — strategy edits are allowed again.`);
+    process.exit(0);
+}
+
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
 console.log(`\n${'═'.repeat(70)}`);
-console.log(`  DUAL-BOT GOLD SCALPER`);
+console.log(`  MULTI-BOT SCALPER — ${BOTS.length} bots`);
 console.log(`  ENV     : ${ENVIRONMENT}`);
-console.log(`  ${BOTS[0].botId.padEnd(9)}: ${BOTS[0].marketSymbol} frequency-scalp | TP $${BOTS[0].strategy.TP_MIN_USD} | ${BOTS[0].leverage}x | SL -${BOTS[0].strategy.SL_ROI_PCT}% | ranging-only | 0% maker`);
-console.log(`  ${BOTS[1].botId.padEnd(9)}: ${BOTS[1].marketSymbol} directional     | TP $${BOTS[1].strategy.TP_MIN_USD} | ${BOTS[1].leverage}x | SL -${BOTS[1].strategy.SL_ROI_PCT}% | trends OK    | 0% maker`);
-console.log(`  CAPITAL : split 50/50, independent bankrolls, NO banking, 100% compounding`);
-console.log(`  LIFECYCLE: one dies → other continues alone | both die → ALL TRADING STOPS`);
-console.log(`  WHY 2 SYMBOLS: one net position per symbol — two bots on one symbol collide`);
+for (const b of BOTS) {
+    const geom = b.strategy.TP_ATR_MULT ? `${b.strategy.TP_ATR_MULT}x ATR TP / ${b.strategy.SL_ATR_MULT || '?'}x ATR SL`
+        : b.strategy.TP_PCT ? `${b.strategy.TP_PCT}% TP / ${b.strategy.SL_PCT}% SL`
+        : `$${b.strategy.TP_MIN_USD || '?'} TP / $${b.strategy.SL_FIXED_USD || '?'} SL`;
+    console.log(`  ${b.botId.padEnd(11)}: ${b.marketSymbol.padEnd(9)} | ${b.leverage}x | ${geom} | stack=${b.initialStack !== undefined ? '$' + b.initialStack : 'remainder'}`);
+}
+console.log(`  LIFECYCLE: a bot's stack running out stops only that bot | all dead → ALL TRADING STOPS`);
 console.log(`${'═'.repeat(70)}\n`);
+
+// ─── FREEZE GATE ──────────────────────────────────────────────────────────────
+// Refuses to start if a freeze is active and the live config doesn't match the
+// hash recorded at freeze time — the durable version of "no changes mid-experiment."
+const _freeze = loadFreeze();
+if (_freeze) {
+    const liveHash = hashConfig(BOTS);
+    if (liveHash !== _freeze.configHash) {
+        console.error(`\n🛑 EXPERIMENT IS FROZEN (since ${_freeze.frozenAt}) and the live strategy config has changed.`);
+        console.error(`   Frozen hash: ${_freeze.configHash}  |  Current hash: ${liveHash}`);
+        console.error(`   ${_freeze.note ? `Freeze note: ${_freeze.note}` : ''}`);
+        console.error(`   Run "npx tsx multiSymbol.ts --unfreeze" to deliberately allow this change, or revert the edit.\n`);
+        process.exit(1);
+    }
+    console.log(`[Freeze] 🔒 Running under freeze from ${_freeze.frozenAt} — config hash matches, no unauthorized changes.\n`);
+}
 
 initBankrolls().then(() => {
     if (allStopped) return;

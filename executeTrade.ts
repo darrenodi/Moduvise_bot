@@ -658,16 +658,34 @@ export function calcSize(price: number, slDistEst = 0): number {
     const leverage = STRATEGY.LEVERAGE;
     const notional = Math.min(margin * leverage, 5000);
     let   raw      = notional / price;
-    const riskPct  = Number(process.env.RISK_PCT_OF_MARGIN || 0);
-    if (riskPct > 0 && slDistEst > 0) {
-        const qtyRisk = (margin * riskPct / 100) / slDistEst;
+    // FIXED-$ RISK (2026-07-24, pro-trader framework): a %-of-margin cap means the
+    // dollar risk per trade silently grows as the stack compounds mid-experiment —
+    // exactly the "bankroll performance vs strategy performance" contamination the
+    // trader flagged. RISK_USD_PER_TRADE is a literal, constant dollar amount for
+    // the whole "prove the edge" phase: qty ≤ RISK_USD_PER_TRADE / slDist, full
+    // stop. Does NOT change with the stack. RISK_PCT_OF_MARGIN kept as a fallback
+    // for the later compounding phase, but the fixed-$ mode takes priority.
+    const riskUsd  = Number(process.env.RISK_USD_PER_TRADE || 0);
+    if (riskUsd > 0 && slDistEst > 0) {
+        const qtyRisk = riskUsd / slDistEst;
         raw = Math.min(raw, qtyRisk);
+    } else {
+        const riskPct  = Number(process.env.RISK_PCT_OF_MARGIN || 0);
+        if (riskPct > 0 && slDistEst > 0) {
+            const qtyRisk = (margin * riskPct / 100) / slDistEst;
+            raw = Math.min(raw, qtyRisk);
+        }
     }
     let size = qtyFloor(raw);
     while (size * price < STRATEGY.MIN_NOTIONAL) {
         size = Number((size + _cfg.qtyStep).toFixed(_cfg.qtyDp === 0 ? 0 : 3));
     }
-    console.log(`[Size] ${STRATEGY.SYMBOL} | margin=$${Number(margin).toFixed(2)} ${leverage}x | notional=$${(size*price).toFixed(2)} | size=${size}${riskPct > 0 && slDistEst > 0 ? ` | riskCap $${(margin*riskPct/100).toFixed(3)}@SL$${slDistEst.toFixed(2)}` : ''}`);
+    const riskLabel = riskUsd > 0 && slDistEst > 0
+        ? ` | riskCap $${riskUsd.toFixed(3)}@SL$${slDistEst.toFixed(2)} (fixed-$)`
+        : (Number(process.env.RISK_PCT_OF_MARGIN || 0) > 0 && slDistEst > 0
+            ? ` | riskCap $${(margin * Number(process.env.RISK_PCT_OF_MARGIN || 0) / 100).toFixed(3)}@SL$${slDistEst.toFixed(2)} (%-margin)`
+            : '');
+    console.log(`[Size] ${STRATEGY.SYMBOL} | margin=$${Number(margin).toFixed(2)} ${leverage}x | notional=$${(size*price).toFixed(2)} | size=${size}${riskLabel}`);
     return size;
 }
 
@@ -688,10 +706,14 @@ export function calcSize(price: number, slDistEst = 0): number {
 // existing configs keep working.
 function calcTpDistance(atr5m: number, price = 0): number {
     const tickFloor = _cfg.tpMinTicks * _cfg.tick;
-    // Priority 0 (user spec 2026-07-24): TP_PCT — a % of price, the only truly
-    // scale-free mode. Same 0.15% target behaves identically on a $74 SOL trade
-    // and a $64,000 BTC trade, unlike a fixed $ figure that has to be hand-scaled
-    // per asset. Needs `price` (the live entry estimate) to resolve to a $ distance.
+    // PRO-TRADER FRAMEWORK (2026-07-24): "Experiment B — ATR-normalized target,
+    // same multiple across every asset." %-of-PRICE (below) is scale-free across
+    // price levels but ignores volatility — a 0.15% move on a calm asset is a much
+    // bigger ask than the same 0.15% on a volatile one. %-of-ATR is scale-free
+    // AND volatility-normalized: TP_ATR_MULT=0.56 asks for "0.56 candles worth of
+    // typical movement" on ANY symbol, which is the fair, apples-to-apples
+    // experiment the trader specified. This is now the DEFAULT (TP_PCT/TP_MIN_USD
+    // must be explicitly set to override it — left unset in the frozen configs).
     const tpPct = Number(process.env.TP_PCT || 0);
     if (tpPct > 0 && price > 0) return tickRound(Math.max(price * tpPct / 100, tickFloor));
 
