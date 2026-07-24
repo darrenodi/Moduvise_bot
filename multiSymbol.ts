@@ -127,33 +127,40 @@ const BOTS: BotConfig[] = [
             // FLAGGED TO USER: SL=2×TP needs ~74-79% WR to break even, above the
             // ~55-63% the statement measured. SL_TP_MULT is one env line to change if
             // the live data says so — kept exactly as specced, escape hatch visible.
-            // GOLD 2026-07-23 (user): TP $0.80 fixed, SL = 2×TP = $1.60. MFE data
-            // showed gold's avg favorable move ~$0.96, so the old $2.16 TP was too
-            // far (34/71 timed out). $0.80 is reachable → more clean maker TP hits,
-            // fewer taker stop-outs (the fee leak). Targets 200 trades/day.
-            TP_MIN_USD:       '0.50',   // user 2026-07-23: $0.50 TP
-            SL_FIXED_USD:     '2.00',   // user 2026-07-24: SL = 4x TP ($0.50 x 4)
-            SL_MAKER:         'true',   // maker stop-limit, 0 fee (user: maker only)
-            MAX_ENTRY_DRIFT:  '0.05',   // only fill if within $0.05 of live price
+            // GOLD 2026-07-24 (user, explicit 4-point spec):
+            //  1. 100% margin deployed (MARGIN_STACK_PCT, set globally below).
+            //  2. TP $2.00 fixed price move.
+            //  3. SL $2.50 fixed price move.
+            //  4. 200 trades/day minimum — gates loosened for frequency; flagged to
+            //     user that a wider $2/$2.50 bracket naturally trades less often
+            //     than the $0.50 config, so entry gates are opened as far as
+            //     reasonable to compensate, but 200/day is not a guarantee.
+            // Breakeven check: win +$2.00 (maker, 0 fee) / loss -$4.12 (SL + fee) ->
+            // breakeven ~67%, in the range this signal has cleared on good stretches.
+            MARGIN_STACK_PCT: '100',    // user 2026-07-24: use full margin
+            TP_MIN_USD:       '2.00',   // user 2026-07-24: $2 TP
+            SL_FIXED_USD:     '2.50',   // user 2026-07-24: $2.50 SL
+            SL_MAKER:         'true',   // maker stop-limit, 0 fee (user: maker both sides)
+            MAX_ENTRY_DRIFT:  '0.05',
             SL_TP_MULT:       '',       // off — fixed $ SL
             TP_ATR_MULT:      '',       // off — fixed $ TP
             SL_ATR_MULT:      '',
             SL_FROM_TP_MULT:  '',
             SL_ROI_PCT:       '',
             RISK_PCT_OF_MARGIN: '3',    // never a crater (statement lesson, kept)
-            MAX_HOLD_MS:      '300000', // 5min — $0.50 targets resolve fast
+            MAX_HOLD_MS:      '300000', // 5min
             ENTRY_CHASE_TOTAL_MS: '120000',
             ENTRY_MAX_REQUOTES: '6',
             ENTRY_CHASE_POLL_MS: '3000',
             FILL_POLL_MS:      '1500',
             MAX_CONSEC_LOSSES:'12',     // circuit breaker
             BE_TRIGGER_PCT:   '0',      // profit-lock DISABLED — its cancel/replace left a naked position 2026-07-23
-            VWAP_EXT_MAX_PCT: '0.30',
-            OB_STRONG:        '0.35',   // book pressure (loose = frequency)
-            OB_LEAN:          '0.15',
-            MOM_STRONG_ATR:   '0.5',
+            VWAP_EXT_MAX_PCT: '0.50',   // loosened for frequency (user: 200/day min)
+            OB_STRONG:        '0.20',   // loosened for frequency
+            OB_LEAN:          '0.10',
+            MOM_STRONG_ATR:   '0.3',    // loosened for frequency
             MOM_ALIGN:        'true',
-            ENTRY_TAKER:      'false',  // MAKER entry, 0 fee
+            ENTRY_TAKER:      'false',  // MAKER entry, 0 fee (user: maker both sides)
             BANK_SPLIT:       '0',
             RANGING_ONLY:     'false',
             TRADE_HOURS_UTC:  '',       // all hours (frequency)
@@ -163,18 +170,16 @@ const BOTS: BotConfig[] = [
         botId: 'ETH-DIR', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
         leverage: 100, wallMinNotional: 50_000,
         strategy: {
-            // ETH 2026-07-24 (user: "enter with taker, join the momentum, TP $1
-            // and SL x4 TP"). FLAGGED & RESOLVED WITH USER: taker entry at 100x
-            // leverage on ETH's ~$1900 notional pays ~$0.76 entry fee — at TP $1
-            // that's 76% of the target gone before the trade even moves, breakeven
-            // ~96% (impossible). User chose to keep taker+momentum+4x but size the
-            // TP to absorb the fee instead: TP $3 / SL $12 -> breakeven ~86%, still
-            // high but the fee no longer eats most of the target.
-            TP_MIN_USD:       '3.00',   // user 2026-07-24: TP sized to survive the taker entry fee
-            SL_FIXED_USD:     '12.00',  // SL = 4x TP
-            SL_MAKER:         'true',   // SL exit still maker when it can be
+            // ETH 2026-07-24 (user, explicit 4-point spec, supersedes the taker
+            // experiment): 100% margin, TP $2 / SL $2.5, MAKER BOTH SIDES (user:
+            // "both should be maker for both entry and exit" — reverts ENTRY_TAKER
+            // to false), 200 trades/day minimum (gates loosened, no guarantee).
+            MARGIN_STACK_PCT: '100',    // user 2026-07-24: use full margin
+            TP_MIN_USD:       '2.00',   // user 2026-07-24: $2 TP
+            SL_FIXED_USD:     '2.50',   // user 2026-07-24: $2.50 SL
+            SL_MAKER:         'true',
             MAX_ENTRY_DRIFT:  '0.05',
-            ENTRY_TAKER:      'true',   // user: taker entry, joins momentum immediately (no chase)
+            ENTRY_TAKER:      'false',  // user: maker both sides (reverts the taker experiment)
             DIP_GATE:         'false',  // user 2026-07-24: "remove eth gates, as fast as xau" — no dip/rip cooldown
             TP_ATR_MULT:      '',
             SL_TP_MULT:       '',
@@ -182,17 +187,17 @@ const BOTS: BotConfig[] = [
             SL_FROM_TP_MULT:  '',
             SL_ROI_PCT:       '',
             RISK_PCT_OF_MARGIN: '3',
-            MAX_HOLD_MS:      '300000', // 5min for $0.50 targets
+            MAX_HOLD_MS:      '300000', // 5min
             ENTRY_CHASE_TOTAL_MS: '120000',
             ENTRY_MAX_REQUOTES: '6',
             ENTRY_CHASE_POLL_MS: '3000',
             FILL_POLL_MS:      '1500',
             MAX_CONSEC_LOSSES:'12',
             BE_TRIGGER_PCT:   '0',      // profit-lock disabled (naked-position bug)
-            VWAP_EXT_MAX_PCT: '0.45',   // was 0.30 — its top block; loosen for frequency
-            OB_STRONG:        '0.25',   // was 0.35 — more entries
-            OB_LEAN:          '0.12',
-            MOM_STRONG_ATR:   '0.35',   // was 0.5 — more momentum entries
+            VWAP_EXT_MAX_PCT: '0.50',   // loosened for frequency
+            OB_STRONG:        '0.20',   // loosened for frequency
+            OB_LEAN:          '0.10',
+            MOM_STRONG_ATR:   '0.3',    // loosened for frequency
             MOM_ALIGN:        'true',   // required: enters WITH momentum direction
             BANK_SPLIT:       '0',
             RANGING_ONLY:     'false',
