@@ -1007,7 +1007,7 @@ console.log(`  TP       : $${_tpUsd.toFixed(2)}${_tpMult > 0 ? ` (${_tpMult}x AT
 console.log(`  SL       : $${_slUsd.toFixed(2)}, ${_slMaker ? 'MAKER stop-limit (0 fee, may not fill on a gap)' : 'stop-market (taker on trigger)'}`);
 console.log(`  BREAKEVEN: win ≈ +$${_win.toFixed(2)}/unit, stop-out ≈ -$${_loss.toFixed(2)}/unit incl. fees → 1 loss ≈ ${(_loss / _win).toFixed(1)} wins, breakeven ≈ ${((_loss / (_loss + _win)) * 100).toFixed(0)}% WR`);
 console.log(`  GATES    : RANGING-ONLY | momentum-aligned | flow 5s+60s | funding | OI surge | VWAP value-side | daily break + news blackout`);
-console.log(`  EXIT     : maker TP, stop-market SL, or time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min (hygiene)`);
+console.log(`  EXIT     : maker TP, maker SL${MAX_HOLD_MS > 0 ? `, or time-stop @ ${(MAX_HOLD_MS / 60_000).toFixed(0)}min (hygiene)` : ' — NO TIME-STOP, holds until TP/SL fills'}`);
 console.log(`  ATR GATE : ${process.env.ATR_CEIL_PCT ?? '0.6'}% max | ${process.env.ATR_FLOOR_PCT ?? '0.02'}% min`);
 console.log(`  STACK    : $${getStack().toFixed(4)} | BANKED: $${getBanked().toFixed(4)}`);
 console.log(`  LOG      : ${TRADE_LOG_FILE}`);
