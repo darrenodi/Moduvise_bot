@@ -89,6 +89,15 @@ function getConfig(symbol: string): SymbolConfig {
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
         lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
     };
+    // SOLUSDC — added 2026-07-24 for the $1/$1/$1 ETH/BTC/SOL redesign. Exchange
+    // filters confirmed live: tick $0.01, qty step 0.01, min notional $5, 0% maker.
+    if (s === 'SOLUSDC')  return {
+        tick: 0.01, qtyStep: 0.01, minQty: 0.01, priceDp: 2, qtyDp: 2,
+        maxLeverage: 75, tpFixedUsd: 0.10,
+        entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
+        tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 0.05,
+        lossCooldownMs: 30_000, maxHoldMs: 30 * 60_000,
+    };
     // Default: XAUUSDT — TAKER entry, TP fixed $4 maker, SL fixed $10 stop-market
     return {
         tick: 0.01, qtyStep: 0.001, minQty: 0.001, priceDp: 2, qtyDp: 3,
@@ -677,8 +686,15 @@ export function calcSize(price: number, slDistEst = 0): number {
 // TP_ATR_MULT (default 0.56 = gold's proven, profitable multiple) now sizes the TP
 // off live ATR for any asset. TP_MIN_USD still forces a fixed $ target if set, so
 // existing configs keep working.
-function calcTpDistance(atr5m: number): number {
+function calcTpDistance(atr5m: number, price = 0): number {
     const tickFloor = _cfg.tpMinTicks * _cfg.tick;
+    // Priority 0 (user spec 2026-07-24): TP_PCT — a % of price, the only truly
+    // scale-free mode. Same 0.15% target behaves identically on a $74 SOL trade
+    // and a $64,000 BTC trade, unlike a fixed $ figure that has to be hand-scaled
+    // per asset. Needs `price` (the live entry estimate) to resolve to a $ distance.
+    const tpPct = Number(process.env.TP_PCT || 0);
+    if (tpPct > 0 && price > 0) return tickRound(Math.max(price * tpPct / 100, tickFloor));
+
     const fixedUsd  = Number(process.env.TP_MIN_USD || 0);
     if (fixedUsd > 0) return tickRound(Math.max(fixedUsd, tickFloor));
 
@@ -699,6 +715,11 @@ function calcTpDistance(atr5m: number): number {
 //   3. SL_FIXED_USD — fixed dollars. Meaningless across assets; kept for legacy.
 export function calcSlDistance(entry: number, atr5m = 0, tpDist = 0): number {
     const floor   = _cfg.slMinTicks * _cfg.tick;
+    // Priority 1 (user spec 2026-07-24): SL_PCT — % of PRICE (not margin/leverage),
+    // the scale-free counterpart to TP_PCT. A 0.10% SL is the same relative risk
+    // on SOL, ETH, BTC, and gold — no per-asset hand-tuning needed.
+    const slPct = Number(process.env.SL_PCT || 0);
+    if (slPct > 0) return tickRound(Math.max(entry * slPct / 100, floor));
     // Priority 0 (user spec 2026-07-14, "sl + taker fee = tp x 2"): the EXACT rule —
     // total realized loss including the taker exit fee equals exactly N wins:
     //   slDist = N × tpDist − takerFee×entry     (maker entry pays nothing)
@@ -821,7 +842,7 @@ export async function executeBinanceTrade(
         const ENTRY_TAKER = (process.env.ENTRY_TAKER ?? 'true') === 'true';
         const estPrice = isBuy ? liveAsk : liveBid;
         // Pre-entry SL estimate so sizing can hold dollar-risk constant across ATR.
-        const estTp    = calcTpDistance(signal.atr5m);
+        const estTp    = calcTpDistance(signal.atr5m, estPrice);
         const estSl    = calcSlDistance(estPrice, signal.atr5m, estTp);
         const size     = calcSize(estPrice, estSl);
         const fillStart = Date.now();
@@ -908,7 +929,7 @@ export async function executeBinanceTrade(
         // ── Calculate TP (maker) and SL (stop-market; fixed-$ or %-of-margin) ────
         const takerFeeRate = await getTakerFeeRate();
         const feePerUnit = takerFeeRate * actualEntry;
-        const tpDist  = calcTpDistance(signal.atr5m);
+        const tpDist  = calcTpDistance(signal.atr5m, actualEntry);
         const slDist  = calcSlDistance(actualEntry, signal.atr5m, tpDist);
         let   tpPrice = tickRound(isBuy ? actualEntry + tpDist : actualEntry - tpDist);
         let slPrice = tickRound(isBuy ? actualEntry - slDist : actualEntry + slDist);

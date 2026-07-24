@@ -38,6 +38,9 @@ interface BotConfig {
     wallMinNotional: number;
     /** Strategy env applied to this bot only — overrides the shared .env. */
     strategy:        Record<string, string>;
+    /** Fixed $ allocation at first-ever startup. If unset, splits the remaining
+     *  balance evenly across all bots that also left this unset. */
+    initialStack?:   number;
 }
 
 // TWO SYMBOLS, NOT TWO BOTS ON ONE SYMBOL (2026-07-12). Binance keeps ONE net
@@ -95,122 +98,144 @@ interface BotConfig {
 // adverse excursion, so ordinary wiggle shouldn't tag it.
 const SL_FROM_TP_MULT = '2';   // exact rule: loss + fee = 2 × TP
 const TP_ATR_MULT     = '1.0'; // target one normal candle
+// USER REDESIGN (2026-07-24), replacing the 100x-leverage sniper configs above.
+// User's framework, verbatim reasoning: tonight's 100x + $0.50-$2.50 TP/SL meant a
+// near-random tick decided every trade — the SL was inside normal noise, not a real
+// invalidation level. At 5x-20x, the SAME dollar risk requires MUCH more real price
+// movement to trigger, so a stop-out means the read was actually wrong, not that the
+// spread flickered. Every symbol now uses PERCENTAGE-based TP/SL (TP_PCT/SL_PCT,
+// added to executeTrade.ts) instead of a hand-picked dollar figure — 0.15% TP /
+// 0.10% SL is the SAME relative risk on a $74 SOL trade and a $64,000 BTC trade,
+// which fixes the recurring "gold-shaped constants killing ETH" class of bug from
+// earlier tonight. Breakeven at 0.15%/0.10% with 0% maker fee: ~48% on every symbol
+// (win +0.15%, loss +0.10%+taker-fee-on-SL) — the best math this project has run.
+//
+// Capital: $1 fixed each to ETH/BTC/SOL (user spec), gold gets the remainder.
+// Leverage: 5x everywhere EXCEPT where $1 margin can't clear the exchange's minimum
+// notional floor — ETH needs 20x ($1x20=$20 min) and BTC needs 50x ($1x50=$50 min)
+// purely to make Binance accept the order; SOL and gold clear at 5x ($1x5=$5 min).
+// This was flagged to the user as a real constraint (not a design choice) before
+// building — user chose "raise leverage only on the two that need it" over the
+// alternatives (bigger margin on ETH/BTC, or dropping them entirely).
 const BOTS: BotConfig[] = [
-    // SNIPER MODE (2026-07-14, user demand: maximize accuracy, not just expectancy).
-    // Both bots now run the two measured-best filter stacks from the 150-trade path
-    // dataset — the highest win rates this signal's inputs produce:
-    //   stack A: ranging + OB>=80% + at/behind VWAP            → 81% WR (n=16)
-    //   stack B: any regime + OB>=80% + behind VWAP + mom-align → 81% WR (n=16)
-    // OB>=90% measured WORSE (56%) — extreme imbalance is a trap; 80 is the sweet
-    // spot. Pure-momentum entries are disabled (MOM_STRONG_ATR=99) since the stacks
-    // were measured on OB-led entries only. Frequency drops to ~10% of trades; with
-    // the 1.0/0.8 ATR bracket (breakeven 55%), 81% WR ≈ +$2.06/unit expectancy.
-    // Caveat on the record: stacks were measured on GOLD data; ETH runs stack B
-    // structurally (own ATR/VWAP scale) as an experiment — its old loose config was
-    // a proven coinflip (losers wrong from the first tick), so tightening can't do
-    // worse and the flight recorder will verdict it either way.
     {
-        botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
-        leverage: 100, wallMinNotional: 20_000,
+        botId: 'ETH-SCALP', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
+        leverage: 20, wallMinNotional: 20_000,   // 20x: $1 margin x 20x = $20, clears ETH's $20 min notional
+        initialStack: 1,
         strategy: {
-            // USER 6-POINT SPEC (2026-07-22). High-frequency maker scalping —
-            // 0.00% maker fees make small TPs viable (fee only if the taker SL fires).
-            //  1. Data decides direction: order-book imbalance (a derivative of the
-            //     book — net pressure = ∂(depth)/∂side) + momentum sign. Enforced by
-            //     the existing signal gates.
-            //  2. Maker entry (ENTRY_TAKER=false), chase-to-fill budget 120s (≤2min).
-            //  3. TP set, SL = 2 × TP exactly (SL_TP_MULT=2).
-            //  4. Force-close at 5min if neither hit (MAX_HOLD_MS=300000, maker-first).
-            //  5. Applies to each asset (both bots).
-            //  6. ATR does NOT block trades (ATR_CEIL_PCT raised to 5.0 = flash-crash
-            //     only; no ATR floor exists).
-            // FLAGGED TO USER: SL=2×TP needs ~74-79% WR to break even, above the
-            // ~55-63% the statement measured. SL_TP_MULT is one env line to change if
-            // the live data says so — kept exactly as specced, escape hatch visible.
-            // GOLD 2026-07-24 (user, explicit 4-point spec):
-            //  1. 100% margin deployed (MARGIN_STACK_PCT, set globally below).
-            //  2. TP $2.00 fixed price move.
-            //  3. SL $2.50 fixed price move.
-            //  4. 200 trades/day minimum — gates loosened for frequency; flagged to
-            //     user that a wider $2/$2.50 bracket naturally trades less often
-            //     than the $0.50 config, so entry gates are opened as far as
-            //     reasonable to compensate, but 200/day is not a guarantee.
-            // Breakeven check: win +$2.00 (maker, 0 fee) / loss -$4.12 (SL + fee) ->
-            // breakeven ~67%, in the range this signal has cleared on good stretches.
-            MARGIN_STACK_PCT: '100',    // user 2026-07-24: use full margin
-            TP_MIN_USD:       '2.00',   // user 2026-07-24: $2 TP
-            SL_FIXED_USD:     '2.50',   // user 2026-07-24: $2.50 SL
-            SL_MAKER:         'true',   // maker stop-limit, 0 fee (user: maker both sides)
-            MAX_ENTRY_DRIFT:  '0.05',
-            SL_TP_MULT:       '',       // off — fixed $ SL
-            TP_ATR_MULT:      '',       // off — fixed $ TP
-            SL_ATR_MULT:      '',
-            SL_FROM_TP_MULT:  '',
-            SL_ROI_PCT:       '',
-            RISK_PCT_OF_MARGIN: '3',    // never a crater (statement lesson, kept)
-            MAX_HOLD_MS:      '1800000',// 30min (user 2026-07-24: remove 5min timed loss, enforce 30min)
-            ENTRY_CHASE_TOTAL_MS: '120000',
-            ENTRY_MAX_REQUOTES: '6',
-            ENTRY_CHASE_POLL_MS: '3000',
-            FILL_POLL_MS:      '1500',
-            MAX_CONSEC_LOSSES:'12',     // circuit breaker
-            BE_TRIGGER_PCT:   '0',      // profit-lock DISABLED — its cancel/replace left a naked position 2026-07-23
-            VWAP_EXT_MAX_PCT: '0.50',   // loosened for frequency (user: 200/day min)
-            OB_STRONG:        '0.20',   // loosened for frequency
-            OB_LEAN:          '0.10',
-            MOM_STRONG_ATR:   '0.3',    // loosened for frequency
-            MOM_ALIGN:        'true',
-            ENTRY_TAKER:      'false',  // MAKER entry, 0 fee (user: maker both sides)
-            BANK_SPLIT:       '0',
-            RANGING_ONLY:     'false',
-            TRADE_HOURS_UTC:  '',       // all hours (frequency)
-        },
-    },
-    {
-        // BTC-DIR replaces ETH-DIR (2026-07-24, user: "switch to btc/usdc... we are
-        // transferring from eth. move eth's asset to btc usdc"). ETH-DIR retired
-        // (paused, flat, no orphan orders — confirmed clean before the swap) after
-        // a 547-trade pooled analysis showed its entries running ~47% WR with no
-        // fixable single cause. BTCUSDC confirmed live: 0% maker / 0.04% taker fee
-        // (same edge as XAU/ETH), 125x max leverage, $50 min notional.
-        // TP/SL scaled proportionally from the ETH $2/$2.5 spec by price ratio
-        // (BTC ~34x ETH's price) so the relative move size and breakeven math stay
-        // consistent: $68 TP / $85 SL -> breakeven ~62% (same ballpark as ETH's ~62%
-        // and gold's ~56% under the same $2/$2.5-equivalent framework). Same capital
-        // that was sitting in ETH-DIR's bankroll carries over via the same botId
-        // convention (new botId = new bankroll file; ETH's stack was flat/paused,
-        // nothing to migrate mid-position).
-        botId: 'BTC-DIR', marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc',
-        leverage: 100, wallMinNotional: 50_000,
-        strategy: {
-            MARGIN_STACK_PCT: '100',    // user 2026-07-24: use full margin
-            TP_MIN_USD:       '68',     // scaled from ETH's $2 by BTC/ETH price ratio (~34x)
-            SL_FIXED_USD:     '85',     // scaled from ETH's $2.50, same ratio
-            SL_MAKER:         'true',
-            MAX_ENTRY_DRIFT:  '5',      // scaled from ETH's $0.05 by the same ratio
-            ENTRY_TAKER:      'false',  // maker both sides
-            DIP_GATE:         'false',
-            TP_ATR_MULT:      '',
-            SL_TP_MULT:       '',
-            SL_ATR_MULT:      '',
-            SL_FROM_TP_MULT:  '',
-            SL_ROI_PCT:       '',
-            RISK_PCT_OF_MARGIN: '3',
+            MARGIN_STACK_PCT: '100',    // full $1 stack as margin every trade
+            TP_PCT:           '0.15',   // 0.15% of price, scale-free
+            SL_PCT:           '0.10',   // 0.10% of price — 1.5:1 R:R, breakeven ~48%
+            TP_MIN_USD: '', SL_FIXED_USD: '', SL_TP_MULT: '', TP_ATR_MULT: '',
+            SL_ATR_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
+            SL_MAKER:         'true',   // maker both sides, 0 fee
+            ENTRY_TAKER:      'false',
+            RISK_PCT_OF_MARGIN: '20',   // 20% of the $1 margin per stop-out (small abs $, needs to be a real fraction of a tiny stack to size a position at all)
             MAX_HOLD_MS:      '1800000',// 30min
             ENTRY_CHASE_TOTAL_MS: '120000',
             ENTRY_MAX_REQUOTES: '6',
             ENTRY_CHASE_POLL_MS: '3000',
             FILL_POLL_MS:      '1500',
-            MAX_CONSEC_LOSSES:'12',
-            BE_TRIGGER_PCT:   '0',      // profit-lock disabled (naked-position bug)
+            MAX_CONSEC_LOSSES: '12',
+            BE_TRIGGER_PCT:   '0',
             VWAP_EXT_MAX_PCT: '0.50',
             OB_STRONG:        '0.20',
             OB_LEAN:          '0.10',
             MOM_STRONG_ATR:   '0.3',
-            MOM_ALIGN:        'true',   // required: enters WITH momentum direction
+            MOM_ALIGN:        'true',
             BANK_SPLIT:       '0',
             RANGING_ONLY:     'false',
-            TRADE_HOURS_UTC:  '',       // all hours
+            TRADE_HOURS_UTC:  '',
+        },
+    },
+    {
+        botId: 'BTC-SCALP', marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc',
+        leverage: 50, wallMinNotional: 50_000,   // 50x: $1 x 50x = $50, clears BTC's $50 min notional
+        initialStack: 1,
+        strategy: {
+            MARGIN_STACK_PCT: '100',
+            TP_PCT:           '0.15',
+            SL_PCT:           '0.10',
+            TP_MIN_USD: '', SL_FIXED_USD: '', SL_TP_MULT: '', TP_ATR_MULT: '',
+            SL_ATR_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
+            SL_MAKER:         'true',
+            ENTRY_TAKER:      'false',
+            RISK_PCT_OF_MARGIN: '20',
+            MAX_HOLD_MS:      '1800000',
+            ENTRY_CHASE_TOTAL_MS: '120000',
+            ENTRY_MAX_REQUOTES: '6',
+            ENTRY_CHASE_POLL_MS: '3000',
+            FILL_POLL_MS:      '1500',
+            MAX_CONSEC_LOSSES: '12',
+            BE_TRIGGER_PCT:   '0',
+            VWAP_EXT_MAX_PCT: '0.50',
+            OB_STRONG:        '0.20',
+            OB_LEAN:          '0.10',
+            MOM_STRONG_ATR:   '0.3',
+            MOM_ALIGN:        'true',
+            BANK_SPLIT:       '0',
+            RANGING_ONLY:     'false',
+            TRADE_HOURS_UTC:  '',
+        },
+    },
+    {
+        botId: 'SOL-SCALP', marketSymbol: 'SOLUSDC', displaySymbol: 'SOL/USDC', wsSymbol: 'solusdc',
+        leverage: 5, wallMinNotional: 5_000,     // 5x as specified: $1 x 5x = $5, clears SOL's $5 min notional
+        initialStack: 1,
+        strategy: {
+            MARGIN_STACK_PCT: '100',
+            TP_PCT:           '0.15',
+            SL_PCT:           '0.10',
+            TP_MIN_USD: '', SL_FIXED_USD: '', SL_TP_MULT: '', TP_ATR_MULT: '',
+            SL_ATR_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
+            SL_MAKER:         'true',
+            ENTRY_TAKER:      'false',
+            RISK_PCT_OF_MARGIN: '20',
+            MAX_HOLD_MS:      '1800000',
+            ENTRY_CHASE_TOTAL_MS: '120000',
+            ENTRY_MAX_REQUOTES: '6',
+            ENTRY_CHASE_POLL_MS: '3000',
+            FILL_POLL_MS:      '1500',
+            MAX_CONSEC_LOSSES: '12',
+            BE_TRIGGER_PCT:   '0',
+            VWAP_EXT_MAX_PCT: '0.50',
+            OB_STRONG:        '0.20',
+            OB_LEAN:          '0.10',
+            MOM_STRONG_ATR:   '0.3',
+            MOM_ALIGN:        'true',
+            BANK_SPLIT:       '0',
+            RANGING_ONLY:     'false',
+            TRADE_HOURS_UTC:  '',
+        },
+    },
+    {
+        botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
+        leverage: 5, wallMinNotional: 20_000,    // 5x as specified: gold clears $5 min notional at 5x too
+        // no initialStack — gets 100% of whatever remains after ETH/BTC/SOL's $1 each
+        strategy: {
+            MARGIN_STACK_PCT: '100',
+            TP_PCT:           '0.15',
+            SL_PCT:           '0.10',
+            TP_MIN_USD: '', SL_FIXED_USD: '', SL_TP_MULT: '', TP_ATR_MULT: '',
+            SL_ATR_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
+            SL_MAKER:         'true',
+            ENTRY_TAKER:      'false',
+            RISK_PCT_OF_MARGIN: '20',
+            MAX_HOLD_MS:      '1800000',
+            ENTRY_CHASE_TOTAL_MS: '120000',
+            ENTRY_MAX_REQUOTES: '6',
+            ENTRY_CHASE_POLL_MS: '3000',
+            FILL_POLL_MS:      '1500',
+            MAX_CONSEC_LOSSES: '12',
+            BE_TRIGGER_PCT:   '0',
+            VWAP_EXT_MAX_PCT: '0.50',
+            OB_STRONG:        '0.20',
+            OB_LEAN:          '0.10',
+            MOM_STRONG_ATR:   '0.3',
+            MOM_ALIGN:        'true',
+            BANK_SPLIT:       '0',
+            RANGING_ONLY:     'false',
+            TRADE_HOURS_UTC:  '',
         },
     },
 ];
@@ -344,21 +369,31 @@ function stopEverything(reason: string): void {
     sendAlert(msg).catch(() => {});
 }
 
-// ─── STARTUP: SPLIT THE BALANCE IN HALF ──────────────────────────────────────
+// ─── STARTUP: ALLOCATE CAPITAL PER BOT ───────────────────────────────────────
+// User spec 2026-07-24: $1 fixed each to ETH/BTC/SOL, "the rest on gold" — an
+// explicit unequal split, not the old even-N-way divide. Bots with a fixed
+// initialStack get exactly that; bots without one split whatever balance is
+// left over evenly (today: just gold, so it gets 100% of the remainder).
 async function initBankrolls(): Promise<void> {
     const balance = await getAvailableBalance();
     console.log(`[Orchestrator] Live balance: $${balance.toFixed(4)}`);
 
-    const share = balance / BOTS.length;   // half each, per spec
-    console.log(`[Orchestrator] Splitting $${balance.toFixed(4)} → $${share.toFixed(4)} per bot`);
+    const fixedTotal = BOTS.reduce((sum, cfg) => sum + (cfg.initialStack ?? 0), 0);
+    const flexBots   = BOTS.filter(cfg => cfg.initialStack === undefined);
+    const remainder  = Math.max(0, balance - fixedTotal);
+    const flexShare  = flexBots.length > 0 ? remainder / flexBots.length : 0;
+    if (fixedTotal > balance) {
+        console.warn(`[Orchestrator] ⚠️ Fixed allocations ($${fixedTotal.toFixed(2)}) exceed live balance ($${balance.toFixed(4)}) — bots will be capped by real available margin at trade time.`);
+    }
 
     for (const cfg of BOTS) {
         const existing = loadBankroll(cfg.botId);
         if (existing) {
             console.log(`[Orchestrator] ${cfg.botId}: restored — stack=$${existing.stack.toFixed(4)} banked=$${existing.banked.toFixed(4)}`);
         } else {
-            createBankroll(cfg.botId, share);
-            console.log(`[Orchestrator] ${cfg.botId}: created — stack=$${share.toFixed(4)}`);
+            const stack = cfg.initialStack ?? flexShare;
+            createBankroll(cfg.botId, stack);
+            console.log(`[Orchestrator] ${cfg.botId}: created — stack=$${stack.toFixed(4)}${cfg.initialStack !== undefined ? ' (fixed)' : ' (remainder share)'}`);
         }
     }
 
