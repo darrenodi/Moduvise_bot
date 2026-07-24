@@ -530,8 +530,31 @@ export async function generateSignals(
 ): Promise<GeneratedSignal[]> {
     const signals: GeneratedSignal[] = [];
 
+    // NO-GATES MODE (user 2026-07-24, final decision): "no gates, doesn't matter
+    // what direction, enter trade... continuous execution." Bypasses every filter
+    // in getDirection (blackout, trading hours, session quality, regime, OB
+    // conviction, momentum, VWAP, volume-exhaustion, ATR ceiling/floor — all of
+    // it) and NEVER returns neutral. Direction still has to come from somewhere,
+    // so it uses the simplest raw read available — order-book imbalance sign,
+    // falling back to momentum sign, falling back to long — rather than a coin
+    // flip, but no threshold on conviction is applied. User was shown the
+    // breakeven math (TP 0.47% / SL 0.8% = 64% breakeven) before deciding this.
+    const NO_GATES = (process.env.NO_GATES ?? 'false') === 'true';
+
     for (const asset of assets) {
         const { indicators: ind, price, bid, ask, symbol, regime, regimeReason, klines } = asset;
+
+        if (NO_GATES) {
+            const direction: SignalDirection = ind.obImbalance > 0 ? 'long' : ind.obImbalance < 0 ? 'short'
+                : ind.momentum5m >= 0 ? 'long' : 'short';
+            signals.push({
+                symbol, direction, market_price: price, bid, ask, atr5m: ind.atr5m,
+                target_move: 0.20, confidence: 1, session_size_pct: 1.00,
+                reasoning: `NO-GATES: ${direction} (ob=${(ind.obImbalance*100).toFixed(0)}%, mom=${ind.momentum5m.toFixed(3)})`,
+                suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 100),
+            });
+            continue;
+        }
 
         if (regime !== 'normal') {
             signals.push({

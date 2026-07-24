@@ -746,8 +746,12 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
     // after maxHoldMs, the thesis failed — scratch NOW at a small loss instead of
     // sitting 72 minutes underwater waiting for a reversal that may never come
     // (or the -50%-margin stop). Maker close first, market fallback.
+    // MAX_HOLD_MS<=0 disables the time-stop entirely (user 2026-07-24, final:
+    // "no time limit no 30 minutes... just continuous execution" — hold until TP
+    // or SL fills, however long that takes). Guarded explicitly so 0 means
+    // "disabled," not "instant" (ageMs >= 0 is always true).
     const ageMs = Date.now() - trade.openedAt;
-    if (ageMs >= MAX_HOLD_MS) {
+    if (MAX_HOLD_MS > 0 && ageMs >= MAX_HOLD_MS) {
         if (_closeInProgress) return 'open';
         _closeInProgress = true;
         try {

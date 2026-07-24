@@ -166,25 +166,34 @@ const TP_ATR_MULT     = '1.0'; // target one normal candle
 // once satisfied, then no strategy edit will start until --unfreeze.
 //
 // v2 (2026-07-24): user wants +0.3% EXPECTANCY per trade. At the measured 53% WR
-// (547-trade pooled history), a 1:1 bracket (v1, TP=0.56xATR/SL=0.45xATR) only
-// nets ~+0.06% expectancy — nowhere near 0.3%. The math that gets there is
-// ASYMMETRIC reward:risk, not a higher win rate (which I can't manufacture):
-//   expectancy = WR*avgWin - (1-WR)*avgLoss
-//   at 53% WR, 5:1 R:R -> expectancy = 0.53*5 - 0.47*1 = +2.18R -> comfortably
-//   clears +0.3% even after fees, AND breakeven drops to just 21-33% (huge margin).
-// SL tight (0.3x ATR) / TP wide (1.5x ATR, exactly 5x the SL). Flagged risk: a
-// target 5x further away is far less likely to be reached inside any given
-// window than the old 0.56x target was — hold window extended 30min -> 2h to
-// give the wider target real room; if it still resolves mostly via time-stop,
-// that's the signal telling us the wider TP isn't reachable and the shape needs
-// revisiting, not a reason to shrink it back to 1:1 by reflex.
+// v3 — FINAL, per user (2026-07-24, verbatim): "no gates... doesn't matter what
+// direction... enter trade... TP 0.47% SL 0.8%... no time limit... continuous
+// execution... limit entry orders... protect API." User was shown the math
+// before deciding: TP 0.47% / SL 0.8% is roughly 1:1.7 risk:reward (SL wider
+// than TP), which gives a 64% breakeven — the OPPOSITE shape from v2's 5:1 (17%
+// breakeven) two messages ago. At the bot's measured 53% WR this loses money
+// unless removing every gate meaningfully lifts the win rate above 64%, which
+// is unproven. Built exactly as specified because the user explicitly decided
+// it after seeing that math, not because the math changed.
+//   NO_GATES=true  -> signals.ts bypasses every filter (blackout, hours, regime,
+//                      OB conviction, momentum, VWAP, volume-exhaustion, ATR
+//                      ceiling/floor) and never returns neutral.
+//   TP_PCT/SL_PCT   -> fixed % of price, not ATR — "no ATR" as specified.
+//   MAX_HOLD_MS=0   -> time-stop disabled entirely — holds until TP or SL fills,
+//                      however long that takes.
+//   SL_MAKER=true, ENTRY_TAKER=false -> "limit entry orders... maker" both sides.
+//   Cycle pacing (signals.ts getSession, 4-14s between checks, untouched) is
+//   what keeps this API-safe — a true zero-delay loop across 4 bots would risk
+//   the exact rate-limit problem fixed earlier tonight; this cadence already
+//   ran the whole session without a single rate-limit error.
 const SHARED_STRATEGY: Record<string, string> = {
     MARGIN_STACK_PCT:  '100',
-    TP_ATR_MULT:       '1.5',    // 5x wider than SL — let winners run
-    SL_ATR_MULT:       '0.3',    // tight — losses are meant to be small and frequent
-    TP_PCT: '', SL_PCT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
+    NO_GATES:          'true',   // no gates, direction doesn't matter — just enter
+    TP_PCT:            '0.47',   // 0.47% of price, fixed — no ATR
+    SL_PCT:            '0.8',    // 0.8% of price, fixed — no ATR
+    TP_ATR_MULT: '', SL_ATR_MULT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
     SL_TP_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
-    SL_MAKER:          'true',   // maker both sides, 0 fee
+    SL_MAKER:          'true',   // maker both sides, 0 fee — "limit entry orders"
     ENTRY_TAKER:       'false',
     // CAVEAT (checked 2026-07-24): $0.02 fixed risk is exact on ETH/SOL/gold, but
     // BTC's exchange minQty (0.001) forces a slightly larger real position — actual
@@ -193,15 +202,15 @@ const SHARED_STRATEGY: Record<string, string> = {
     // every symbol at this account size. Re-verify if RISK_USD_PER_TRADE changes.
     RISK_USD_PER_TRADE:'0.02',   // fixed $ risk per stop-out — constant across the fixed-risk phase, not a % of a moving stack
     RISK_PCT_OF_MARGIN:'',       // off — fixed-$ mode takes priority
-    DAILY_LOSS_LIMIT_PCT: '2',   // pause this bot for the day if it's down 2% of day-start stack
-    MAX_HOLD_MS:       '7200000',// 2h — a 1.5x-ATR target needs real room vs the old 0.56x
+    DAILY_LOSS_LIMIT_PCT: '2',   // pause this bot for the day if it's down 2% of day-start stack — the one safety net kept even in no-gates mode
+    MAX_HOLD_MS:       '0',      // DISABLED — "no time limit no 30 minutes... continuous execution"
     ENTRY_CHASE_TOTAL_MS: '120000',
     ENTRY_MAX_REQUOTES: '6',
     ENTRY_CHASE_POLL_MS: '3000',
     FILL_POLL_MS:      '1500',
-    MAX_CONSEC_LOSSES: '12',
+    MAX_CONSEC_LOSSES: '12',     // kept — the one thing standing between "no gates" and a runaway loss streak
     BE_TRIGGER_PCT:    '0',      // profit-lock stays off (past naked-position bug)
-    VWAP_EXT_MAX_PCT:  '0.50',
+    VWAP_EXT_MAX_PCT:  '0.50',   // irrelevant under NO_GATES but left set, harmless
     OB_STRONG:         '0.20',
     OB_LEAN:           '0.10',
     MOM_STRONG_ATR:    '0.3',
@@ -209,7 +218,7 @@ const SHARED_STRATEGY: Record<string, string> = {
     BANK_SPLIT:        '0',
     RANGING_ONLY:      'false',
     TRADE_HOURS_UTC:   '',
-    VOL_EXHAUST_MAX:   '0.85',   // the one filter the 547-trade pooled analysis actually supported
+    VOL_EXHAUST_MAX:   '0.85',   // irrelevant under NO_GATES but left set, harmless
 };
 const BOTS: BotConfig[] = [
     {
