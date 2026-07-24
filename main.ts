@@ -741,6 +741,45 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
         }
     }
 
+    // ── BACKUP TP (user 2026-07-24: "if you miss tp or sl you should probably
+    // set a backup... either use a timer or whatever works") ─────────────────
+    // Mirror of the backup stop above, for the OTHER side of a gap: a maker TP
+    // limit only fills if price actually trades AT it. If price gaps straight
+    // through and keeps running, the position could ride a won move back down
+    // into a loss with nothing capturing the profit. Now with NO time-stop
+    // (MAX_HOLD_MS=0), this is the ONLY thing that can lock in a TP that price
+    // has already earned but the resting maker order missed. Price-triggered
+    // every cycle (not a fixed timer) — reacts the moment it happens rather than
+    // waiting out a delay. Force a taker close to bank the win now.
+    if (trade.tpOrderId && trade.tpPrice > 0) {
+        const tpDist = Math.abs(trade.tpPrice - trade.entryPrice);
+        const beyond = trade.side === 'long'
+            ? pos.currentPrice - trade.tpPrice
+            : trade.tpPrice - pos.currentPrice;
+        const slackMult = Number(process.env.BACKUP_TP_SLACK_MULT ?? 1.0);
+        if (tpDist > 0 && beyond >= tpDist * slackMult) {
+            const stillOpen = await hasOpenOrders();
+            if (stillOpen) {
+                console.warn(`[BackupTP] 🎯 Price $${pos.currentPrice.toFixed(2)} ran ${slackMult}x past TP $${trade.tpPrice.toFixed(2)} and the maker TP hasn't filled — forcing taker close to lock in the win`);
+                await cancelAllOrders(trade.slOrderId);
+                await triggerEmergencyClose(trade.side, trade.size, 'backup-tp: maker TP missed', false);
+                const real = await getRealizedPnlSince(trade.openedAt - 2_000);
+                const pnl  = real ? real.pnl : 0;
+                const won  = pnl >= 0;
+                if (won) stats.tpHits++; else { stats.slHits++; recordLoss(trade.side, pos.currentPrice, trade.atr5m || tpDist); }
+                stats.fills++;
+                await applyTradeResult(pnl);
+                if (_currentTradeId) {
+                    logTradeClose(_currentTradeId, won ? 'tp' : 'sl', pos.currentPrice, pnl, 'backup-tp', false, true);
+                    _currentTradeId = null;
+                }
+                clearActiveTrade();
+                await sendAlert(`🟢🎯 ${_symbol} BACKUP TP — maker TP missed, forced taker close | PnL: $${pnl.toFixed(4)}`).catch(() => {});
+                return won ? 'tp' : 'sl';
+            }
+        }
+    }
+
     // ── Time-stop ─────────────────────────────────────────────────────────────
     // The scalp thesis is "TP fills in seconds-to-minutes". If it hasn't filled
     // after maxHoldMs, the thesis failed — scratch NOW at a small loss instead of
