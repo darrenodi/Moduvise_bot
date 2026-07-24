@@ -202,7 +202,11 @@ const SHARED_STRATEGY: Record<string, string> = {
     // every symbol at this account size. Re-verify if RISK_USD_PER_TRADE changes.
     RISK_USD_PER_TRADE:'0.02',   // fixed $ risk per stop-out — constant across the fixed-risk phase, not a % of a moving stack
     RISK_PCT_OF_MARGIN:'',       // off — fixed-$ mode takes priority
-    DAILY_LOSS_LIMIT_PCT: '2',   // pause this bot for the day if it's down 2% of day-start stack — the one safety net kept even in no-gates mode
+    // User 2026-07-24: "oh no pausing. run everything. no limits. it's coffee
+    // money." Daily loss limit disabled per explicit instruction — this WAS the
+    // safety net that just paused ETH/BTC/gold after the no-gates shape lost on
+    // 3 of 4 bots (25% and 0% win rates). User has decided to accept that risk.
+    DAILY_LOSS_LIMIT_PCT: '0',   // disabled — user explicit: run without a daily pause
     MAX_HOLD_MS:       '0',      // DISABLED — "no time limit no 30 minutes... continuous execution"
     ENTRY_CHASE_TOTAL_MS: '120000',
     ENTRY_MAX_REQUOTES: '6',
