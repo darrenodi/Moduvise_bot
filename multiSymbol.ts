@@ -236,7 +236,15 @@ function spawnBot(entry: ManagedProcess): void {
         return;
     }
 
+    // BANNER BUG (found 2026-07-24): this used to read process.env.MARGIN_STACK_PCT
+    // from the ORCHESTRATOR's own env (25% default), not the per-bot override in
+    // cfg.strategy — so a bot set to 100% margin still displayed the old 25% number
+    // at startup even though the actual child process (env merged below) traded
+    // correctly. Purely cosmetic, but confusing — apply the bot's own override here too.
+    const prevPct = process.env.MARGIN_STACK_PCT;
+    if (cfg.strategy.MARGIN_STACK_PCT) process.env.MARGIN_STACK_PCT = cfg.strategy.MARGIN_STACK_PCT;
     const margin = getCurrentMargin(bankroll);
+    if (prevPct === undefined) delete process.env.MARGIN_STACK_PCT; else process.env.MARGIN_STACK_PCT = prevPct;
 
     const env: NodeJS.ProcessEnv = {
         ...process.env,
