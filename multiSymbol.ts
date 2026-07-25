@@ -186,13 +186,33 @@ const TP_ATR_MULT     = '1.0'; // target one normal candle
 //   what keeps this API-safe — a true zero-delay loop across 4 bots would risk
 //   the exact rate-limit problem fixed earlier tonight; this cadence already
 //   ran the whole session without a single rate-limit error.
+// v4 (2026-07-25): TWO fixes together.
+//   1. MARGIN STARVATION BUG FOUND LIVE: with no time-stop, ETH/BTC's open
+//      positions sat for 9+ hours holding ~$2.30 of the account's $4.36 as
+//      locked margin (Binance Cross-margin is ONE shared pool across all bots
+//      on this account — not something the code can wall off without switching
+//      to isolated margin, a bigger change). Gold's MARGIN_STACK_PCT=100 meant
+//      it always requested ~its FULL stack, so it kept losing the race for the
+//      last sliver of free margin by pennies, every cycle, for 9 hours straight
+//      — "Margin insufficient this instant" on literally every attempt. Fixed
+//      by dropping every bot's request to 60% of its own stack, leaving real
+//      headroom so a bot's own trade fits comfortably even when others are
+//      mid-position, instead of requesting the exact edge of what might be free.
+//   2. TP/SL now ROI-based per user: "set tp to 5% roi and sl to -10% roi for
+//      each. that way it probably can't shoot past." % of MARGIN, leverage-aware
+//      (TP_ROI_PCT, mirrors the existing SL_ROI_PCT formula: priceDist = entry x
+//      (roiPct/100) / leverage). NOTE the leverage-inversion property (documented
+//      elsewhere in this file): HIGHER leverage means a SMALLER price move hits
+//      the same ROI%, so BTC (50x) and gold (5x) will have very different $
+//      distances for the same 5%/10% ROI — that's expected and correct, not a bug.
 const SHARED_STRATEGY: Record<string, string> = {
-    MARGIN_STACK_PCT:  '100',
+    MARGIN_STACK_PCT:  '60',     // was 100 — leaves headroom in the shared Cross-margin pool
     NO_GATES:          'true',   // no gates, direction doesn't matter — just enter
-    TP_PCT:            '0.47',   // 0.47% of price, fixed — no ATR
-    SL_PCT:            '0.8',    // 0.8% of price, fixed — no ATR
+    TP_ROI_PCT:        '5',      // 5% ROI on margin
+    SL_ROI_PCT:        '10',     // -10% ROI on margin (SL_ROI_PCT is always positive; direction is implicit)
+    TP_PCT: '', SL_PCT: '',
     TP_ATR_MULT: '', SL_ATR_MULT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
-    SL_TP_MULT: '', SL_FROM_TP_MULT: '', SL_ROI_PCT: '',
+    SL_TP_MULT: '', SL_FROM_TP_MULT: '',
     SL_MAKER:          'true',   // maker both sides, 0 fee — "limit entry orders"
     ENTRY_TAKER:       'false',
     // CAVEAT (checked 2026-07-24): $0.02 fixed risk is exact on ETH/SOL/gold, but

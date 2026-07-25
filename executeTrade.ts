@@ -714,6 +714,15 @@ function calcTpDistance(atr5m: number, price = 0): number {
     // typical movement" on ANY symbol, which is the fair, apples-to-apples
     // experiment the trader specified. This is now the DEFAULT (TP_PCT/TP_MIN_USD
     // must be explicitly set to override it — left unset in the frozen configs).
+    // TP_ROI_PCT (user 2026-07-25): "set tp to 5% ROI and sl to -10% ROI" — % of
+    // MARGIN, leverage-aware, mirrors the existing SL_ROI_PCT formula exactly:
+    // priceDist = entry × (roiPct/100) / leverage. Higher priority than TP_PCT
+    // since it's the more specific, explicitly-requested mode.
+    const tpRoiPct = Number(process.env.TP_ROI_PCT || 0);
+    if (tpRoiPct > 0 && price > 0) {
+        const raw = price * (tpRoiPct / 100) / STRATEGY.LEVERAGE;
+        return tickRound(Math.max(raw, tickFloor));
+    }
     const tpPct = Number(process.env.TP_PCT || 0);
     if (tpPct > 0 && price > 0) return tickRound(Math.max(price * tpPct / 100, tickFloor));
 
