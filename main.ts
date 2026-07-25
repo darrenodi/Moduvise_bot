@@ -1031,7 +1031,10 @@ const _refPx  = Number(process.env.BANNER_REF_PRICE || _refPriceMap[MARKET_SYMBO
 const _refAtr = Number(process.env.BANNER_REF_ATR   || _refAtrMap[MARKET_SYMBOL]   || 3.60);
 const _tpMult = Number(process.env.TP_ATR_MULT || 0);
 const _tpPct  = Number(process.env.TP_PCT || 0);
-const _tpUsd  = _tpPct > 0 ? _refPx * _tpPct / 100
+const _tpRoiPct = Number(process.env.TP_ROI_PCT || 0);
+const _bannerLev = Number(process.env.BOT_LEVERAGE ?? 100);
+const _tpUsd  = _tpRoiPct > 0 ? _refPx * (_tpRoiPct / 100) / _bannerLev
+              : _tpPct > 0 ? _refPx * _tpPct / 100
               : _tpMult > 0 ? _refAtr * _tpMult
               : Number(process.env.TP_MIN_USD || 4.00);
 const _slUsd  = calcSlDistance(_refPx, _refAtr, _tpUsd);
