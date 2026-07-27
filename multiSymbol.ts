@@ -265,7 +265,15 @@ const BOTS: BotConfig[] = [
     },
     {
         botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
-        leverage: 5, wallMinNotional: 20_000,    // 5x as specified: gold clears $5 min notional at 5x too
+        // 2026-07-27 user: "we want more gold trades." Found the cause: at 5x, the
+        // shared TP_ROI_PCT=5/SL_ROI_PCT=5.5 becomes a 1.0%/1.1% PRICE move for gold
+        // — 10x further than BTC's 0.10% at 50x. Gold only saw 2 entries in ~5.5h
+        // for exactly this reason (target too far away, not a broken signal — its
+        // one closed trade won). Raised to 20x (matches ETH, which fired 47 times
+        // over the same window) so the SAME ROI% target becomes a 0.25%/0.275%
+        // price move — much more reachable — WITHOUT touching TP_ROI_PCT/SL_ROI_PCT
+        // (the user's own 5.5 setting) or any other bot's config.
+        leverage: 20, wallMinNotional: 20_000,
         // no initialStack — gets 100% of whatever remains after ETH/BTC/SOL's $1 each
         strategy: { ...SHARED_STRATEGY },
     },
