@@ -198,7 +198,7 @@ const TP_ATR_MULT     = '1.0'; // target one normal candle
 //      by dropping every bot's request to 60% of its own stack, leaving real
 //      headroom so a bot's own trade fits comfortably even when others are
 //      mid-position, instead of requesting the exact edge of what might be free.
-//   2. TP/SL now ROI-based per user: "set tp to 5% roi and sl to -10% roi for
+//   2. TP/SL now ROI-based per user: "set tp to 5% roi and sl to -5.5% roi for
 //      each. that way it probably can't shoot past." % of MARGIN, leverage-aware
 //      (TP_ROI_PCT, mirrors the existing SL_ROI_PCT formula: priceDist = entry x
 //      (roiPct/100) / leverage). NOTE the leverage-inversion property (documented
@@ -209,7 +209,7 @@ const SHARED_STRATEGY: Record<string, string> = {
     MARGIN_STACK_PCT:  '60',     // was 100 — leaves headroom in the shared Cross-margin pool
     NO_GATES:          'true',   // no gates, direction doesn't matter — just enter
     TP_ROI_PCT:        '5',      // 5% ROI on margin
-    SL_ROI_PCT:        '10',     // -10% ROI on margin (SL_ROI_PCT is always positive; direction is implicit)
+    SL_ROI_PCT:        '5.5',    // -5.5% ROI on margin (SL_ROI_PCT is always positive; direction is implicit)
     TP_PCT: '', SL_PCT: '',
     TP_ATR_MULT: '', SL_ATR_MULT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
     SL_TP_MULT: '', SL_FROM_TP_MULT: '',
