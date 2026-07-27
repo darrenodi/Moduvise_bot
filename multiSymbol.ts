@@ -246,20 +246,30 @@ const SHARED_STRATEGY: Record<string, string> = {
 };
 const BOTS: BotConfig[] = [
     {
+        // 2026-07-27 user: "since sol is performing well we could increase leverage
+        // for sol n eth" — raised, but kept the target LOOSER than BTC's failing
+        // 0.10% shape (the thing that just got BTC removed), not tighter: 35x ->
+        // 0.143% TP, vs BTC's 50x -> 0.100%. Real Binance data since 2026-07-25:
+        // ETH 55 closes, net +$0.48 (the strongest performer).
         botId: 'ETH-SCALP', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
-        leverage: 20, wallMinNotional: 20_000,   // 20x: $1 margin x 20x = $20, clears ETH's $20 min notional
+        leverage: 35, wallMinNotional: 20_000,
         initialStack: 1,
         strategy: { ...SHARED_STRATEGY },
     },
+    // BTC-SCALP REMOVED 2026-07-27, user: "BTC is frying me for real... increase
+    // leverage if the ones that are working properly." Real Binance data since
+    // 2026-07-25: 74 closes, NET -$0.3658 — by far the worst performer, dragging
+    // the whole account from ~$5.17 down toward $4.90 on its own. Diagnosed
+    // earlier as a real math mismatch (56% WR, shorts only 50%, vs the ~65%
+    // breakeven this TP/SL ratio needs) rather than a mechanical bug — the stops
+    // fired correctly, it just doesn't have the edge to clear this bracket. User
+    // decided to cut it rather than keep tuning it.
     {
-        botId: 'BTC-SCALP', marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc',
-        leverage: 50, wallMinNotional: 50_000,   // 50x: $1 x 50x = $50, clears BTC's $50 min notional
-        initialStack: 1,
-        strategy: { ...SHARED_STRATEGY },
-    },
-    {
+        // Same reasoning as ETH: raised but kept looser than BTC's failing shape.
+        // 15x -> 0.333% TP, vs BTC's 0.100%. Real data since 2026-07-25: SOL 11
+        // closes, net +$0.40, 100% WR on the thin sample so far.
         botId: 'SOL-SCALP', marketSymbol: 'SOLUSDC', displaySymbol: 'SOL/USDC', wsSymbol: 'solusdc',
-        leverage: 5, wallMinNotional: 5_000,     // 5x as specified: $1 x 5x = $5, clears SOL's $5 min notional
+        leverage: 15, wallMinNotional: 5_000,
         initialStack: 1,
         strategy: { ...SHARED_STRATEGY },
     },
