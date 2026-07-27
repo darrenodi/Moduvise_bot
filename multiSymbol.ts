@@ -269,7 +269,10 @@ const BOTS: BotConfig[] = [
         // 15x -> 0.333% TP, vs BTC's 0.100%. Real data since 2026-07-25: SOL 11
         // closes, net +$0.40, 100% WR on the thin sample so far.
         botId: 'SOL-SCALP', marketSymbol: 'SOLUSDC', displaySymbol: 'SOL/USDC', wsSymbol: 'solusdc',
-        leverage: 15, wallMinNotional: 5_000,
+        // 2026-07-27 user: raised 15x -> 30x. TP5%/SL5.5% ROI at 30x -> ~0.167%/
+        // 0.183% of price — still looser than BTC's failing 0.10% tier, so this one
+        // doesn't cross into the same danger zone gold's 50x did.
+        leverage: 30, wallMinNotional: 5_000,
         initialStack: 1,
         strategy: { ...SHARED_STRATEGY },
     },
