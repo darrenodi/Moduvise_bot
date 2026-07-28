@@ -285,38 +285,34 @@ const SHARED_STRATEGY: Record<string, string> = {
     VOL_EXHAUST_MAX:   '0.85',   // active independent of NO_GATES (main.ts check) — the one filter with a real, reproducible edge (40% vs 52% WR)
 };
 const BOTS: BotConfig[] = [
-    // 2026-07-28: consolidated to SOL + XAU only. At a $2.94 wallet, ETH's
-    // stack ($0.26) gave an $11.48 notional vs ETHUSDC's $20 minimum, and BTC's
-    // ($0.62) gave $37.40 vs BTCUSDC's $50 minimum -- BOTH physically could not
-    // place an order and would have sat failing silently (the same dead-bot bug
-    // that left gold dormant 9h on 2026-07-27).
-    // SOL ($5 min) and XAU ($5 min) are the cheapest symbols to trade, so they
-    // stay viable even if the account shrinks further. Both also passed the
-    // 40/20 backtest: SOL +3.35bps @38.9% WR, XAU +4.62bps @41.0% WR
-    // (breakeven for 40/20 is 33.3%).
-{
-        // Same reasoning as ETH: raised but kept looser than BTC's failing shape.
-        // 15x -> 0.333% TP, vs BTC's 0.100%. Real data since 2026-07-25: SOL 11
-        // closes, net +$0.40, 100% WR on the thin sample so far.
-        botId: 'SOL-SCALP', marketSymbol: 'SOLUSDC', displaySymbol: 'SOL/USDC', wsSymbol: 'solusdc',
-        // 2026-07-27 user: raised 15x -> 30x. TP5%/SL5.5% ROI at 30x -> ~0.167%/
-        // 0.183% of price — still looser than BTC's failing 0.10% tier, so this one
-        // doesn't cross into the same danger zone gold's 50x did.
-        leverage: 30, wallMinNotional: 5_000,
-        initialStack: 1,
-        strategy: { ...SHARED_STRATEGY },
-    },
-{
-        botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
-        // 2026-07-27 user: raised 20x -> 50x for more trade frequency. FLAGGED TO
-        // USER before applying: 50x puts gold's TP_ROI_PCT=5/SL_ROI_PCT=5.5 target
-        // at ~0.10%/0.11% of price — the SAME tightness as BTC-SCALP's failing
-        // shape (net -$0.37, 56% WR, removed 2026-07-27 for underperforming at
-        // exactly this leverage tier). User chose to proceed anyway. Watch gold's
-        // win rate closely at this setting; if it tracks BTC's pattern, dial back.
-        leverage: 50, wallMinNotional: 20_000,
-        // no initialStack — gets 100% of whatever remains after ETH/BTC/SOL's $1 each
-        strategy: { ...SHARED_STRATEGY },
+    // 2026-07-28 USER DIRECTIVE: BTC ONLY, taker entry following momentum,
+    // ~$50 price target, maker exits. SOL/XAU removed so the whole balance
+    // backs one instrument (also clears BTCUSDC's $50 min notional easily:
+    // $2.91 x 60% x 100x = $174 notional).
+    //
+    // FLAGGED TO USER BEFORE BUILDING (their own numbers, their decision to
+    // proceed): a $50 move on ~$63,800 BTC is 7.8bps, while the taker entry
+    // fee is 4bps -- i.e. the fee consumes ~51% of the gross target, and is
+    // charged win or lose. On a $2 balance at 100x that fee is $0.08 = 4% of
+    // balance per entry. Backtest of this exact shape (taker in / maker out,
+    // 12,000x 1m candles) returned -4.10bps/trade at 49% WR; every bracket
+    // size tested was negative, because breakeven needs 67-75% WR. The user's
+    // spreadsheet showed a profit assuming 85% WR -- that assumption is doing
+    // all the work. Building as specified regardless.
+    {
+        botId: 'BTC-SCALP', marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc',
+        leverage: 100, wallMinNotional: 50_000,
+        strategy: {
+            ...SHARED_STRATEGY,
+            MARGIN_STACK_PCT: '100', // user 2026-07-28: "use 100% of margin in all trades"
+            ENTRY_TAKER:  'true',    // taker IN: instant fill in the momentum direction
+            SL_MAKER:     'true',    // maker OUT: TP limit + stop-limit SL, 0% fee
+            TP_PCT:       '0.0783',  // ~$50 move on BTC
+            SL_PCT:       '0.0400',  // ~$26 move -- stop tighter than target
+            TP_ROI_PCT: '', SL_ROI_PCT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
+            NO_GATES_OB_MIN:   '0',  // pure momentum-following, no order-book gate
+            NO_GATES_VWAP_MIN: '0',
+        },
     },
 ];
 
