@@ -217,9 +217,16 @@ const SHARED_STRATEGY: Record<string, string> = {
     // chop-zone trades were the ones bleeding the account.
     NO_GATES_OB_MIN:   '0.7',
     NO_GATES_VWAP_MIN: '0.15',   // percent
-    TP_ROI_PCT:        '5',      // 5% ROI on margin
-    SL_ROI_PCT:        '5.5',    // -5.5% ROI on margin (SL_ROI_PCT is always positive; direction is implicit)
-    TP_PCT: '', SL_PCT: '',
+    // BACKTESTED 2026-07-28 on 12,000x 1m candles/symbol (~8.3 days), offline.
+    // 20bps TP / 40bps SL, maker-only exits, was the ONLY shape positive on
+    // multiple independent symbols (BTC +4.00bps 73% WR, SOL +3.81bps 73% WR)
+    // AND consistent across a walk-forward split. It also beat a random-direction
+    // control (BTC +4.00 vs +1.08 random, SOL +3.81 vs -0.53), so the signal is
+    // contributing, not just the bracket shape.
+    TP_PCT:            '0.20',   // 20 bps
+    SL_PCT:            '0.40',   // 40 bps
+    TP_ROI_PCT:        '',
+    SL_ROI_PCT:        '',
     TP_ATR_MULT: '', SL_ATR_MULT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
     SL_TP_MULT: '', SL_FROM_TP_MULT: '',
     SL_MAKER:          'true',   // maker both sides, 0 fee — "limit entry orders"
@@ -243,7 +250,14 @@ const SHARED_STRATEGY: Record<string, string> = {
     // holding indefinitely — which is also what was silently blocking gold's
     // cycle for hours at a time (an open position makes runCycle return early,
     // so the bot goes dormant until it resolves).
-    MAX_HOLD_MS:       '900000', // 15 minutes, then close at whatever it's at
+    // TIME-STOP DISABLED (backtest-driven). A time-stop force-closes at MARKET,
+    // which pays the 4bps taker fee. Measured: raw directional edge is only
+    // ~0.5bps, so ANY taker exit destroys it -- with a 15m cap every tested
+    // config went negative; with maker-only exits BTC/SOL went positive.
+    // COST, stated plainly: positions now carry until TP or SL fills. Median
+    // hold ~16-29min, but the tail reached 14.6 HOURS in backtest. That ties up
+    // margin and is the real tradeoff for being fee-free.
+    MAX_HOLD_MS:       '0',
     ENTRY_CHASE_TOTAL_MS: '120000',
     ENTRY_MAX_REQUOTES: '6',
     ENTRY_CHASE_POLL_MS: '3000',
@@ -305,10 +319,14 @@ const BOTS: BotConfig[] = [
             ...SHARED_STRATEGY,
             // Fixed-$ bracket for BTC only; the ROI-based keys must be blanked or
             // they take priority over TP_MIN_USD/SL_FIXED_USD in calcTp/SlDistance.
+            // 2026-07-28: fixed $15/$20 removed — backtest showed the taker-paying
+            // time-stop version of this was negative. BTC now inherits the
+            // shared 20bps/40bps maker-only shape (backtested +4.00bps, 73% WR,
+            // consistent across a walk-forward split, beats random control).
             TP_ROI_PCT:   '',
             SL_ROI_PCT:   '',
-            TP_MIN_USD:   '15',   // +$15 price move => TP
-            SL_FIXED_USD: '20',   // -$20 price move => SL
+            TP_MIN_USD:   '',
+            SL_FIXED_USD: '',
             // 2026-07-28: the shared 0.85 volume-exhaustion threshold was rejecting
             // 10 of 11 live BTC signals (91%) — it was tuned on an older pooled
             // dataset and BTC's routine volumeRatio simply runs higher. Measured on
