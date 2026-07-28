@@ -207,7 +207,16 @@ const TP_ATR_MULT     = '1.0'; // target one normal candle
 //      distances for the same 5%/10% ROI — that's expected and correct, not a bug.
 const SHARED_STRATEGY: Record<string, string> = {
     MARGIN_STACK_PCT:  '60',     // was 100 — leaves headroom in the shared Cross-margin pool
-    NO_GATES:          'true',   // no gates, direction doesn't matter — just enter
+    NO_GATES:          'true',   // bypasses the legacy gate stack (regime/hours/etc)
+    // EDGE FILTERS from the full 1,442-trade history (2026-07-28). These are the
+    // only two effects that survived that sample size:
+    //   |OB|>=0.7        -> 59% WR (n=660)  vs 53% below 0.4
+    //   |VWAPdev|>=0.15% -> 66% WR (n=396)  vs 45% AT vwap (chop)
+    //   both together    -> 63% WR (n=405 of 1442, i.e. ~28% of signals qualify)
+    // Expect a large drop in trade frequency — that is the point; the 45%-WR
+    // chop-zone trades were the ones bleeding the account.
+    NO_GATES_OB_MIN:   '0.7',
+    NO_GATES_VWAP_MIN: '0.15',   // percent
     TP_ROI_PCT:        '5',      // 5% ROI on margin
     SL_ROI_PCT:        '5.5',    // -5.5% ROI on margin (SL_ROI_PCT is always positive; direction is implicit)
     TP_PCT: '', SL_PCT: '',
