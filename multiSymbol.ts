@@ -223,8 +223,18 @@ const SHARED_STRATEGY: Record<string, string> = {
     // AND consistent across a walk-forward split. It also beat a random-direction
     // control (BTC +4.00 vs +1.08 random, SOL +3.81 vs -0.53), so the signal is
     // contributing, not just the bracket shape.
-    TP_PCT:            '0.20',   // 20 bps
-    SL_PCT:            '0.40',   // 40 bps
+    // 2026-07-28 REVERSED after live failure of 20/40. That bracket needed a
+    // 66.7% win rate to break even; backtest showed 68-73% so it looked safe,
+    // but LIVE delivered 58.6% and it bled -$0.64 in ~3h (29 trades, only 1
+    // taker fill -- execution was fine, the BRACKET was wrong).
+    // 40/20 inverts the risk: breakeven drops to 33.3%, so it profits even when
+    // wrong 2 out of 3 times. Backtest WR on 40/20 is 32.8-41% across symbols,
+    // i.e. a real cushion instead of needing everything to go right.
+    // EV at various live WRs: 35%->+1bps, 40%->+4bps, 50%->+10bps.
+    // TRADEOFF: a 40bps target is further away, so fewer trades resolve as TP
+    // and median hold roughly doubles (14-30m -> 15-68m depending on symbol).
+    TP_PCT:            '0.40',   // 40 bps -- WIDER than stop
+    SL_PCT:            '0.20',   // 20 bps -- tight stop
     TP_ROI_PCT:        '',
     SL_ROI_PCT:        '',
     TP_ATR_MULT: '', SL_ATR_MULT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
