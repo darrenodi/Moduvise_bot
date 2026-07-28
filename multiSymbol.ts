@@ -285,79 +285,16 @@ const SHARED_STRATEGY: Record<string, string> = {
     VOL_EXHAUST_MAX:   '0.85',   // active independent of NO_GATES (main.ts check) — the one filter with a real, reproducible edge (40% vs 52% WR)
 };
 const BOTS: BotConfig[] = [
-    {
-        // 2026-07-27 user: "since sol is performing well we could increase leverage
-        // for sol n eth" — raised, but kept the target LOOSER than BTC's failing
-        // 0.10% shape (the thing that just got BTC removed), not tighter: 35x ->
-        // 0.143% TP, vs BTC's 50x -> 0.100%. Real Binance data since 2026-07-25:
-        // ETH 55 closes, net +$0.48 (the strongest performer).
-        botId: 'ETH-SCALP', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
-        // 2026-07-28: 35x -> 75x (user request). REASON IT WAS NECESSARY: after the
-        // 4-way split at a ~$3.59 account, ETH's margin ($0.539) x 35x gave a
-        // notional of only $18.86 -- BELOW ETHUSDC's $20 exchange minimum, so it
-        // could not place an order at all (the same silent-failure mode that left
-        // gold dormant for 9h on 2026-07-27). 75x -> $40.42 notional, clears it.
-        // NOTE: TP/SL are PERCENT-based (20bps/40bps), so leverage does NOT move
-        // the price target -- it only scales position size and therefore $ P&L.
-        // Cost of 75x, stated plainly: one 40bps stop-out = ~18% of ETH's stack
-        // (vs 10.8% at 45x, 24% at 100x). User chose 75x over 100x.
-        leverage: 75, wallMinNotional: 20_000,
-        initialStack: 1,
-        strategy: { ...SHARED_STRATEGY },
-    },
-    {
-        // BTC-SCALP RESTORED 2026-07-28 (user: "bring back btc... $15 price change
-        // ... stop loss at $20 price change... 100x leverage... target at least
-        // 100 trades daily. modify only btc").
-        //
-        // MEASURED on 1000x 1m BTCUSDC candles the day of this change:
-        //   median 1m move $15.20, median 1m high-low range $31
-        //   simulating first-touch of +$15 / -$20: median resolve 1 MINUTE
-        //   (mean 1.5m), every trade resolved inside 120m, ~11% touched both
-        //   levels in the same minute. So 100 trades/day is easily reachable —
-        //   cycle pacing is the limit, not price movement.
-        //
-        // THE CRITICAL DETAIL — why BTC bled before and why this can work now:
-        // BTC's TAKER fee is ~$25.60 per BTC of notional, LARGER than the whole
-        // $20 stop. With a taker stop: win +$15 / lose -$45.60 => needs 75% WR.
-        // Today's sim gave 52-63% => negative expectancy, the same fee-dominance
-        // that made BTC lose $0.37 before. With a MAKER stop-limit (0 fee, which
-        // SHARED_STRATEGY already uses): win +$15 / lose -$20 => breakeven 57%,
-        // which the measured range can actually clear. SL_MAKER stays 'true'.
-        // The gap risk of a maker stop is covered by the existing backup-stop
-        // plus the 15-min time-stop the user just added.
-        //
-        // Direction: deliberately UNCHANGED from the other bots (OB conviction
-        // floor + momentum fallback). User asked whether to add price prediction
-        // or pick randomly; today's sim showed longs 52% / shorts 63%, but that's
-        // one session's drift, not a validated edge — not worth encoding.
-        botId: 'BTC-SCALP', marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc',
-        leverage: 100, wallMinNotional: 50_000,
-        initialStack: 1,
-        strategy: {
-            ...SHARED_STRATEGY,
-            // Fixed-$ bracket for BTC only; the ROI-based keys must be blanked or
-            // they take priority over TP_MIN_USD/SL_FIXED_USD in calcTp/SlDistance.
-            // 2026-07-28: fixed $15/$20 removed — backtest showed the taker-paying
-            // time-stop version of this was negative. BTC now inherits the
-            // shared 20bps/40bps maker-only shape (backtested +4.00bps, 73% WR,
-            // consistent across a walk-forward split, beats random control).
-            TP_ROI_PCT:   '',
-            SL_ROI_PCT:   '',
-            TP_MIN_USD:   '',
-            SL_FIXED_USD: '',
-            // 2026-07-28: the shared 0.85 volume-exhaustion threshold was rejecting
-            // 10 of 11 live BTC signals (91%) — it was tuned on an older pooled
-            // dataset and BTC's routine volumeRatio simply runs higher. Measured on
-            // 500x 5m BTCUSDC candles: p50=0.81, p75=1.27, p85=1.53, p90=1.91.
-            // So 0.85 blocks 47% of ALL candles (not just loud ones), which makes
-            // the user's 100-trades/day target impossible. 1.6 blocks ~13% — the
-            // genuinely extreme top-decile spikes, which is what this filter is
-            // actually for. BTC ONLY; ETH/SOL/gold keep 0.85.
-            VOL_EXHAUST_MAX: '1.6',
-        },
-    },
-    {
+    // 2026-07-28: consolidated to SOL + XAU only. At a $2.94 wallet, ETH's
+    // stack ($0.26) gave an $11.48 notional vs ETHUSDC's $20 minimum, and BTC's
+    // ($0.62) gave $37.40 vs BTCUSDC's $50 minimum -- BOTH physically could not
+    // place an order and would have sat failing silently (the same dead-bot bug
+    // that left gold dormant 9h on 2026-07-27).
+    // SOL ($5 min) and XAU ($5 min) are the cheapest symbols to trade, so they
+    // stay viable even if the account shrinks further. Both also passed the
+    // 40/20 backtest: SOL +3.35bps @38.9% WR, XAU +4.62bps @41.0% WR
+    // (breakeven for 40/20 is 33.3%).
+{
         // Same reasoning as ETH: raised but kept looser than BTC's failing shape.
         // 15x -> 0.333% TP, vs BTC's 0.100%. Real data since 2026-07-25: SOL 11
         // closes, net +$0.40, 100% WR on the thin sample so far.
@@ -369,7 +306,7 @@ const BOTS: BotConfig[] = [
         initialStack: 1,
         strategy: { ...SHARED_STRATEGY },
     },
-    {
+{
         botId: 'XAU-SCALP', marketSymbol: 'XAUUSDT', displaySymbol: 'XAU/USDT', wsSymbol: 'xauusdt',
         // 2026-07-27 user: raised 20x -> 50x for more trade frequency. FLAGGED TO
         // USER before applying: 50x puts gold's TP_ROI_PCT=5/SL_ROI_PCT=5.5 target
