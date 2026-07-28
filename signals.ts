@@ -114,13 +114,20 @@ export function getTradingBlackout(now = new Date()): string | null {
     // Daily settlement break 21:00–22:05 UTC (applies every day, incl. weekends)
     if (mins >= 21 * 60 && mins < 22 * 60 + 5) return 'DAILY BREAK: 21:00–22:05 UTC (frozen index)';
 
-    // Scheduled news windows (weekdays)
-    for (const t of NEWS_BLACKOUT_TIMES) {
-        const [h, m] = t.split(':').map(Number);
-        if (!Number.isFinite(h)) continue;
-        const target = h * 60 + (m || 0);
-        if (Math.abs(mins - target) <= NEWS_BLACKOUT_MIN) {
-            return `NEWS WINDOW: ±${NEWS_BLACKOUT_MIN}min around ${t} UTC`;
+    // Scheduled news windows — WEEKDAYS ONLY. The weekday check was missing
+    // (found in review 2026-07-28): the comment said "weekdays" but the loop ran
+    // every day, so 12:30/14:00/18:00 UTC were blacked out on Sat/Sun too, when
+    // no US data is released. Currently dead code while NO_GATES=true (that path
+    // returns before getDirection runs), but wrong is wrong — fixed.
+    const day = now.getUTCDay();          // 0=Sun, 6=Sat
+    if (day >= 1 && day <= 5) {
+        for (const t of NEWS_BLACKOUT_TIMES) {
+            const [h, m] = t.split(':').map(Number);
+            if (!Number.isFinite(h)) continue;
+            const target = h * 60 + (m || 0);
+            if (Math.abs(mins - target) <= NEWS_BLACKOUT_MIN) {
+                return `NEWS WINDOW: ±${NEWS_BLACKOUT_MIN}min around ${t} UTC`;
+            }
         }
     }
     return null;
@@ -530,28 +537,23 @@ export async function generateSignals(
 ): Promise<GeneratedSignal[]> {
     const signals: GeneratedSignal[] = [];
 
-    // NO-GATES MODE (user 2026-07-24, final decision): "no gates, doesn't matter
-    // what direction, enter trade... continuous execution." Bypasses every filter
-    // in getDirection (blackout, trading hours, session quality, regime, OB
-    // conviction, momentum, VWAP, volume-exhaustion, ATR ceiling/floor — all of
-    // it) and NEVER returns neutral. Direction still has to come from somewhere,
-    // so it uses the simplest raw read available — order-book imbalance sign,
-    // falling back to momentum sign, falling back to long — rather than a coin
-    // flip, but no threshold on conviction is applied. User was shown the
-    // breakeven math (TP 0.47% / SL 0.8% = 64% breakeven) before deciding this.
+    // ── SIMPLE MODE (env flag is still called NO_GATES for config compatibility)
+    // NAMING WARNING (corrected 2026-07-28 after review): this is NOT "no gates".
+    // It bypasses the LEGACY gate stack in getDirection() — blackout, trading
+    // hours, session quality, regime/ranging-only, momentum-align, RSI, funding,
+    // OI, marubozu, liquidity-wall, touch-confirm, flow — but it then applies TWO
+    // deliberate quality filters of its own (OB conviction + VWAP distance, set
+    // below). An accurate name would be SIMPLE_MODE or OB_VWAP_MODE. The original
+    // 2026-07-24 spec really was unfiltered; the filters were added 2026-07-28
+    // after the unfiltered version measured ~38-49% WR. The old comment claiming
+    // "bypasses every filter / never returns neutral / no conviction threshold"
+    // was left stale and is now wrong on all three counts — removed.
+    //
+    // Because this branch always `continue`s, NOTHING in getDirection() executes
+    // while this mode is on. So RANGING_ONLY, MOM_ALIGN, REQUIRE_WALL etc. are
+    // INERT here regardless of their defaults — they are not what limits trade
+    // frequency in this mode; the two filters below are.
     const NO_GATES = (process.env.NO_GATES ?? 'false') === 'true';
-    // SIGNAL IMPROVEMENT (2026-07-28, user: "improve the signal, we still want
-    // lots of trades" after a rough night — ETH/SOL/gold all landed ~38-49% WR,
-    // a coin flip, right where breakeven math predicts a loss). Root cause: the
-    // no-gates direction pick fired on ANY nonzero OB imbalance (even 0.01%
-    // counted as a full signal) — pure noise most of the time. The 547-trade
-    // pooled analysis (2026-07-24) found |OB| needs real magnitude to carry any
-    // edge (0.7+ showed 52-61% WR; below that was noise with no gradient) and
-    // that volumeRatio>=0.85 (chasing an already-loud candle) measured 40% WR vs
-    // 52% below it — the one other real, reproducible finding in that dataset.
-    // NO_GATES_OB_MIN defaults to 0.4 — a real conviction floor, but well below
-    // the stricter 0.7 that measured best, to keep frequency high per the user's
-    // explicit ask. Volume-exhaustion still applies underneath in main.ts.
     const NO_GATES_OB_MIN = Number(process.env.NO_GATES_OB_MIN ?? 0.4);
 
     for (const asset of assets) {
