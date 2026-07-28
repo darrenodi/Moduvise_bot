@@ -263,14 +263,45 @@ const BOTS: BotConfig[] = [
         initialStack: 1,
         strategy: { ...SHARED_STRATEGY },
     },
-    // BTC-SCALP REMOVED 2026-07-27, user: "BTC is frying me for real... increase
-    // leverage if the ones that are working properly." Real Binance data since
-    // 2026-07-25: 74 closes, NET -$0.3658 — by far the worst performer, dragging
-    // the whole account from ~$5.17 down toward $4.90 on its own. Diagnosed
-    // earlier as a real math mismatch (56% WR, shorts only 50%, vs the ~65%
-    // breakeven this TP/SL ratio needs) rather than a mechanical bug — the stops
-    // fired correctly, it just doesn't have the edge to clear this bracket. User
-    // decided to cut it rather than keep tuning it.
+    {
+        // BTC-SCALP RESTORED 2026-07-28 (user: "bring back btc... $15 price change
+        // ... stop loss at $20 price change... 100x leverage... target at least
+        // 100 trades daily. modify only btc").
+        //
+        // MEASURED on 1000x 1m BTCUSDC candles the day of this change:
+        //   median 1m move $15.20, median 1m high-low range $31
+        //   simulating first-touch of +$15 / -$20: median resolve 1 MINUTE
+        //   (mean 1.5m), every trade resolved inside 120m, ~11% touched both
+        //   levels in the same minute. So 100 trades/day is easily reachable —
+        //   cycle pacing is the limit, not price movement.
+        //
+        // THE CRITICAL DETAIL — why BTC bled before and why this can work now:
+        // BTC's TAKER fee is ~$25.60 per BTC of notional, LARGER than the whole
+        // $20 stop. With a taker stop: win +$15 / lose -$45.60 => needs 75% WR.
+        // Today's sim gave 52-63% => negative expectancy, the same fee-dominance
+        // that made BTC lose $0.37 before. With a MAKER stop-limit (0 fee, which
+        // SHARED_STRATEGY already uses): win +$15 / lose -$20 => breakeven 57%,
+        // which the measured range can actually clear. SL_MAKER stays 'true'.
+        // The gap risk of a maker stop is covered by the existing backup-stop
+        // plus the 15-min time-stop the user just added.
+        //
+        // Direction: deliberately UNCHANGED from the other bots (OB conviction
+        // floor + momentum fallback). User asked whether to add price prediction
+        // or pick randomly; today's sim showed longs 52% / shorts 63%, but that's
+        // one session's drift, not a validated edge — not worth encoding.
+        botId: 'BTC-SCALP', marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc',
+        leverage: 100, wallMinNotional: 50_000,
+        initialStack: 1,
+        strategy: {
+            ...SHARED_STRATEGY,
+            // Fixed-$ bracket for BTC only; the ROI-based keys must be blanked or
+            // they take priority over TP_MIN_USD/SL_FIXED_USD in calcTp/SlDistance.
+            TP_ROI_PCT:   '',
+            SL_ROI_PCT:   '',
+            TP_MIN_USD:   '15',   // +$15 price move => TP
+            SL_FIXED_USD: '20',   // -$20 price move => SL
+        },
+    },
     {
         // Same reasoning as ETH: raised but kept looser than BTC's failing shape.
         // 15x -> 0.333% TP, vs BTC's 0.100%. Real data since 2026-07-25: SOL 11
