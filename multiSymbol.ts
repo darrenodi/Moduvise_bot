@@ -300,6 +300,15 @@ const BOTS: BotConfig[] = [
             SL_ROI_PCT:   '',
             TP_MIN_USD:   '15',   // +$15 price move => TP
             SL_FIXED_USD: '20',   // -$20 price move => SL
+            // 2026-07-28: the shared 0.85 volume-exhaustion threshold was rejecting
+            // 10 of 11 live BTC signals (91%) — it was tuned on an older pooled
+            // dataset and BTC's routine volumeRatio simply runs higher. Measured on
+            // 500x 5m BTCUSDC candles: p50=0.81, p75=1.27, p85=1.53, p90=1.91.
+            // So 0.85 blocks 47% of ALL candles (not just loud ones), which makes
+            // the user's 100-trades/day target impossible. 1.6 blocks ~13% — the
+            // genuinely extreme top-decile spikes, which is what this filter is
+            // actually for. BTC ONLY; ETH/SOL/gold keep 0.85.
+            VOL_EXHAUST_MAX: '1.6',
         },
     },
     {
