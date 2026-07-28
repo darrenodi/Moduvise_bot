@@ -801,14 +801,23 @@ async function checkPositionHealth(): Promise<'tp' | 'sl' | 'open' | 'none'> {
             // forcing a fill. If the position is already losing more than one SL's
             // worth at the moment the timer fires, go straight to taker — a known,
             // bounded fee beats an unbounded ride on a maker order that isn't filling.
+            // 2026-07-28 (user: "close if sl or tp isn't hit"): the time-stop must
+            // actually CLOSE. The old maker-only-unless-deep-loss path could leave
+            // an unfilled maker order resting and the position riding well past the
+            // deadline — the exact failure this comment block documents. Now: try
+            // maker briefly (free) via TIMESTOP_MAKER_MS, then force taker so the
+            // position is guaranteed flat at the deadline. TIMESTOP_TAKER=false
+            // restores the old maker-only behaviour if ever wanted.
             const curLoss = trade.side === 'long'
                 ? trade.entryPrice - pos.currentPrice
                 : pos.currentPrice - trade.entryPrice;
             const slDist  = Math.abs(trade.entryPrice - trade.slPrice) || 0;
             const deepLoss = slDist > 0 && curLoss >= slDist;
-            console.log(`[TimeStop] ⏱ ${(ageMs / 60_000).toFixed(1)}min without TP — scratching (${deepLoss ? 'taker: already past SL distance' : 'maker-only, no taker fee'})`);
+            const forceTaker = (process.env.TIMESTOP_TAKER ?? 'true') === 'true';
+            console.log(`[TimeStop] ⏱ ${(ageMs / 60_000).toFixed(1)}min without TP/SL — closing (${forceTaker ? 'maker-first, taker fallback — guaranteed flat' : deepLoss ? 'taker: already past SL distance' : 'maker-only, no taker fee'})`);
             await cancelAllOrders(trade.slOrderId);
-            await triggerEmergencyClose(trade.side, trade.size, `time-stop ${(ageMs / 60_000).toFixed(0)}min`, !deepLoss);
+            // makerOnly=false => triggerEmergencyClose re-quotes maker then crosses.
+            await triggerEmergencyClose(trade.side, trade.size, `time-stop ${(ageMs / 60_000).toFixed(0)}min`, forceTaker ? false : !deepLoss);
             const real = await getRealizedPnlSince(trade.openedAt - 2_000);
             const pnl  = real ? real.pnl : 0;
             const won  = pnl >= 0;

@@ -227,7 +227,14 @@ const SHARED_STRATEGY: Record<string, string> = {
     // safety net that just paused ETH/BTC/gold after the no-gates shape lost on
     // 3 of 4 bots (25% and 0% win rates). User has decided to accept that risk.
     DAILY_LOSS_LIMIT_PCT: '0',   // disabled — user explicit: run without a daily pause
-    MAX_HOLD_MS:       '0',      // DISABLED — "no time limit no 30 minutes... continuous execution"
+    // 2026-07-28 user: "no we are not expecting price to change in 5 minutes. set
+    // it to 15 minutes and then close if sl or tp isn't hit." Re-enables the
+    // time-stop (was 0/disabled since the "no time limit" spec). At 15min a
+    // position that hasn't resolved gets force-closed at market rather than
+    // holding indefinitely — which is also what was silently blocking gold's
+    // cycle for hours at a time (an open position makes runCycle return early,
+    // so the bot goes dormant until it resolves).
+    MAX_HOLD_MS:       '900000', // 15 minutes, then close at whatever it's at
     ENTRY_CHASE_TOTAL_MS: '120000',
     ENTRY_MAX_REQUOTES: '6',
     ENTRY_CHASE_POLL_MS: '3000',
