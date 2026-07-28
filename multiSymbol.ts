@@ -282,7 +282,16 @@ const BOTS: BotConfig[] = [
         // 0.143% TP, vs BTC's 50x -> 0.100%. Real Binance data since 2026-07-25:
         // ETH 55 closes, net +$0.48 (the strongest performer).
         botId: 'ETH-SCALP', marketSymbol: 'ETHUSDC', displaySymbol: 'ETH/USDC', wsSymbol: 'ethusdc',
-        leverage: 35, wallMinNotional: 20_000,
+        // 2026-07-28: 35x -> 75x (user request). REASON IT WAS NECESSARY: after the
+        // 4-way split at a ~$3.59 account, ETH's margin ($0.539) x 35x gave a
+        // notional of only $18.86 -- BELOW ETHUSDC's $20 exchange minimum, so it
+        // could not place an order at all (the same silent-failure mode that left
+        // gold dormant for 9h on 2026-07-27). 75x -> $40.42 notional, clears it.
+        // NOTE: TP/SL are PERCENT-based (20bps/40bps), so leverage does NOT move
+        // the price target -- it only scales position size and therefore $ P&L.
+        // Cost of 75x, stated plainly: one 40bps stop-out = ~18% of ETH's stack
+        // (vs 10.8% at 45x, 24% at 100x). User chose 75x over 100x.
+        leverage: 75, wallMinNotional: 20_000,
         initialStack: 1,
         strategy: { ...SHARED_STRATEGY },
     },
