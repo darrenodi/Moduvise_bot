@@ -540,17 +540,34 @@ export async function generateSignals(
     // flip, but no threshold on conviction is applied. User was shown the
     // breakeven math (TP 0.47% / SL 0.8% = 64% breakeven) before deciding this.
     const NO_GATES = (process.env.NO_GATES ?? 'false') === 'true';
+    // SIGNAL IMPROVEMENT (2026-07-28, user: "improve the signal, we still want
+    // lots of trades" after a rough night — ETH/SOL/gold all landed ~38-49% WR,
+    // a coin flip, right where breakeven math predicts a loss). Root cause: the
+    // no-gates direction pick fired on ANY nonzero OB imbalance (even 0.01%
+    // counted as a full signal) — pure noise most of the time. The 547-trade
+    // pooled analysis (2026-07-24) found |OB| needs real magnitude to carry any
+    // edge (0.7+ showed 52-61% WR; below that was noise with no gradient) and
+    // that volumeRatio>=0.85 (chasing an already-loud candle) measured 40% WR vs
+    // 52% below it — the one other real, reproducible finding in that dataset.
+    // NO_GATES_OB_MIN defaults to 0.4 — a real conviction floor, but well below
+    // the stricter 0.7 that measured best, to keep frequency high per the user's
+    // explicit ask. Volume-exhaustion still applies underneath in main.ts.
+    const NO_GATES_OB_MIN = Number(process.env.NO_GATES_OB_MIN ?? 0.4);
 
     for (const asset of assets) {
         const { indicators: ind, price, bid, ask, symbol, regime, regimeReason, klines } = asset;
 
         if (NO_GATES) {
-            const direction: SignalDirection = ind.obImbalance > 0 ? 'long' : ind.obImbalance < 0 ? 'short'
-                : ind.momentum5m >= 0 ? 'long' : 'short';
+            // Only trust the OB read when it clears a real conviction floor; below
+            // that, fall back to momentum sign, which measured cleaner in the same
+            // pooled data than a near-zero OB tiebreak.
+            const direction: SignalDirection = Math.abs(ind.obImbalance) >= NO_GATES_OB_MIN
+                ? (ind.obImbalance > 0 ? 'long' : 'short')
+                : (ind.momentum5m >= 0 ? 'long' : 'short');
             signals.push({
                 symbol, direction, market_price: price, bid, ask, atr5m: ind.atr5m,
                 target_move: 0.20, confidence: 1, session_size_pct: 1.00,
-                reasoning: `NO-GATES: ${direction} (ob=${(ind.obImbalance*100).toFixed(0)}%, mom=${ind.momentum5m.toFixed(3)})`,
+                reasoning: `NO-GATES: ${direction} (ob=${(ind.obImbalance*100).toFixed(0)}%, mom=${ind.momentum5m.toFixed(3)}, obFloor=${NO_GATES_OB_MIN})`,
                 suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 100),
             });
             continue;

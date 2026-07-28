@@ -242,7 +242,7 @@ const SHARED_STRATEGY: Record<string, string> = {
     BANK_SPLIT:        '0',
     RANGING_ONLY:      'false',
     TRADE_HOURS_UTC:   '',
-    VOL_EXHAUST_MAX:   '0.85',   // irrelevant under NO_GATES but left set, harmless
+    VOL_EXHAUST_MAX:   '0.85',   // active independent of NO_GATES (main.ts check) — the one filter with a real, reproducible edge (40% vs 52% WR)
 };
 const BOTS: BotConfig[] = [
     {
