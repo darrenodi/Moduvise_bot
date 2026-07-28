@@ -597,11 +597,21 @@ export async function generateSignals(
                 continue;
             }
 
-            const direction: SignalDirection = ind.obImbalance > 0 ? 'long' : 'short';
+            // DIRECTION SOURCE (fixed 2026-07-28 after a live bug):
+            // SIGNAL_MODE=momentum -> follow the 5m move (what the user asked for).
+            // SIGNAL_MODE=ob (default) -> order-book imbalance sign (legacy).
+            // The bug: setting NO_GATES_OB_MIN=0 to "disable the OB gate" did NOT
+            // switch the direction source -- it left OB driving direction with no
+            // threshold, so live entries went SHORT on mom=+11.4 and LONG on
+            // mom=-17.6, i.e. straight against momentum on 2 of 3 trades.
+            const SIGNAL_MODE = (process.env.SIGNAL_MODE ?? 'ob').toLowerCase();
+            const direction: SignalDirection = SIGNAL_MODE === 'momentum'
+                ? (ind.momentum5m > 0 ? 'long' : 'short')
+                : (ind.obImbalance > 0 ? 'long' : 'short');
             signals.push({
                 symbol, direction, market_price: price, bid, ask, atr5m: ind.atr5m,
                 target_move: 0.20, confidence: 1, session_size_pct: 1.00,
-                reasoning: `NO-GATES: ${direction} (ob=${(ind.obImbalance*100).toFixed(0)}%, vwapDev=${ind.priceVsVwap.toFixed(3)}%, mom=${ind.momentum5m.toFixed(3)})`,
+                reasoning: `NO-GATES[${SIGNAL_MODE}]: ${direction} (ob=${(ind.obImbalance*100).toFixed(0)}%, vwapDev=${ind.priceVsVwap.toFixed(3)}%, mom=${ind.momentum5m.toFixed(3)})`,
                 suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 100),
             });
             continue;

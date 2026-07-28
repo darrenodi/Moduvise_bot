@@ -305,13 +305,24 @@ const BOTS: BotConfig[] = [
         strategy: {
             ...SHARED_STRATEGY,
             MARGIN_STACK_PCT: '100', // user 2026-07-28: "use 100% of margin in all trades"
+            SIGNAL_MODE:  'momentum', // direction = 5m momentum sign (user spec)
             ENTRY_TAKER:  'true',    // taker IN: instant fill in the momentum direction
             SL_MAKER:     'true',    // maker OUT: TP limit + stop-limit SL, 0% fee
             TP_PCT:       '0.0783',  // ~$50 move on BTC
-            SL_PCT:       '0.0400',  // ~$26 move -- stop tighter than target
+            SL_PCT:       '0.0783',  // ~$50 move -- SAME as TP (user: keep SL at $50, not $25)
             TP_ROI_PCT: '', SL_ROI_PCT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
             NO_GATES_OB_MIN:   '0',  // pure momentum-following, no order-book gate
             NO_GATES_VWAP_MIN: '0',
+            // FOUND IN AUDIT 2026-07-28: SHARED_STRATEGY sets RISK_USD_PER_TRADE=0.02,
+            // which caps qty at risk/slDist. With a $50 stop that is 0.0004 BTC ->
+            // floored up to minQty 0.001 = $63.82 notional, i.e. ~23% of the $278
+            // the user asked for. It directly contradicts "use 100% of margin".
+            // Disabled so leverage x margin alone sizes the position.
+            RISK_USD_PER_TRADE: '',
+            RISK_PCT_OF_MARGIN: '',
+            // Volume-exhaustion filter runs in main.ts independently of NO_GATES and
+            // was rejecting 91% of BTC signals earlier today. Off for momentum mode.
+            VOL_EXHAUST_MAX:    '0',
         },
     },
 ];
