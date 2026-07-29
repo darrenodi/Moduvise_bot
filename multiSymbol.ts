@@ -306,7 +306,14 @@ const BOTS: BotConfig[] = [
             ...SHARED_STRATEGY,
             MARGIN_STACK_PCT: '100', // user 2026-07-28: "use 100% of margin in all trades"
             SIGNAL_MODE:  'momentum', // direction = 5m momentum sign (user spec)
-            ENTRY_TAKER:  'true',    // taker IN: instant fill in the momentum direction
+            // 2026-07-29: taker -> MAKER entry. Live evidence from the momentum-fix
+            // session: 4W/1L (80% WR), gross +$0.3161, fees -$0.3832, NET -$0.0671.
+            // The signal worked; the entry fee ate all of it. A $50 TP on ~$63.8k BTC
+            // is 7.8bps gross while a taker entry costs 4bps -- ~51% of the target,
+            // charged win or lose. Maker entry is 0.00%, so the same 80% win rate
+            // keeps the full $50. Trade-off: a maker limit only fills when price
+            // comes back to it, so some signals will be missed rather than chased.
+            ENTRY_TAKER:  'false',   // maker IN: post-only limit, 0% fee
             SL_MAKER:     'true',    // maker OUT: TP limit + stop-limit SL, 0% fee
             TP_PCT:       '0.0783',  // ~$50 move on BTC
             SL_PCT:       '0.0783',  // ~$50 move -- SAME as TP (user: keep SL at $50, not $25)
