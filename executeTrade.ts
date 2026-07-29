@@ -1004,6 +1004,38 @@ export async function executeBinanceTrade(
             }
         }
 
+        // ── TP LADDER (user spec 2026-07-29) ─────────────────────────────────
+        // "set tp at 5 different points so that we have a fall back plan".
+        // Splits the position across TP_LADDER rungs ($ price moves) so a partial
+        // exit banks profit at each level instead of all-or-nothing at one price.
+        // Only runs when every leg clears the exchange minQty -- at small size the
+        // single primary TP above is already correct and this is skipped.
+        const tpLadderRaw = (process.env.TP_LADDER ?? '').trim();
+        if (tpLadderRaw && tpOrderId) {
+            const rungs = tpLadderRaw.split(',').map(x => Number(x.trim())).filter(x => x > 0);
+            const legQty = size / rungs.length;
+            if (rungs.length > 1 && legQty >= _cfg.minQty) {
+                // Cancel the single full-size TP, replace with laddered legs.
+                await privateDelete('/fapi/v1/order', { symbol: STRATEGY.SYMBOL, orderId: tpOrderId }).catch(() => {});
+                tpOrderId = 0;
+                let placed = 0;
+                for (const move of rungs) {
+                    const px = tickRound(isBuy ? actualEntry + move : actualEntry - move);
+                    try {
+                        const r = await privatePost('/fapi/v1/order', {
+                            symbol: STRATEGY.SYMBOL, side: closeSide, type: 'LIMIT',
+                            timeInForce: 'GTX', price: px.toFixed(_cfg.priceDp),
+                            quantity: legQty.toFixed(_cfg.qtyDp), reduceOnly: 'true',
+                        });
+                        if (r?.orderId) { placed++; if (!tpOrderId) tpOrderId = r.orderId; }
+                    } catch { /* a rung failing is not fatal; others still rest */ }
+                }
+                console.log(`[TP-LADDER] placed ${placed}/${rungs.length} rungs @ +$${rungs.join('/+$')} | ${legQty.toFixed(_cfg.qtyDp)} each`);
+            } else {
+                console.log(`[TP-LADDER] skipped — leg qty ${legQty.toFixed(6)} < minQty ${_cfg.minQty} (need position >= ${(_cfg.minQty * rungs.length).toFixed(3)}); using single $${(rungs[0] ?? 0)} TP`);
+            }
+        }
+
         if (!tpOrderId) {
             console.error(`[TP] ❌ ALL ATTEMPTS FAILED — emergency closing`);
             await sendAlert(`🚨 ${STRATEGY.SYMBOL} TP failed 3x — emergency closing!`);

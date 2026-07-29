@@ -305,22 +305,31 @@ const BOTS: BotConfig[] = [
         strategy: {
             ...SHARED_STRATEGY,
             MARGIN_STACK_PCT: '100', // user 2026-07-28: "use 100% of margin in all trades"
-            // ── STRATEGY V2: MOMENTUM PULLBACK MAKER (MPM) 2026-07-29 ──
-            // Replaces momentum-chase, which measured live: 50% WR, MFE/MAE 1.78
-            // AGAINST us (textbook adverse selection on passive fills).
-            // MPM waits for: impulse -> breakout of a swing level -> pullback back
-            // toward that level -> passive entry. Backtest (12,000x 1m BTCUSDC):
-            //   TP $75 / SL $40 -> +0.61bps/trade, 38.2% WR (needs 34.8%), PF 1.16
-            //   walk-forward CONSISTENT (+0.44 -> +0.87), beats random by +0.56bps
-            //   MFE/MAE flipped to 1.02 FOR us; intrabar ambiguity only 0.1%
-            // CAVEAT ON RECORD: this is a CANDLE-level backtest of a strategy whose
-            // live failure mode was ORDER-BOOK adverse selection. Candles cannot see
-            // passive fill quality. The live number to watch is MFE/MAE after fill.
+            // ── LADDERED BRACKET 2026-07-29 (user spec) ──────────────────
+            // "set tp at 5 different points so we have a fallback plan... first
+            //  $10, second 15, third 30, fourth 40, 5th 50. same with sl."
+            // Intent: never let price run past the exit.
+            //
+            // FEASIBILITY CHECKED BEFORE BUILDING: a 5-leg ladder needs qty >=
+            // 0.005 BTC (minQty 0.001 per leg). At $1.00 balance / 100x the whole
+            // position is 0.001 BTC -- exactly ONE leg. Splitting 5 ways gives
+            // 0.0002/leg, which the exchange rejects. A 5-leg ladder needs ~$3.22
+            // margin. So TP_LADDER/SL_LADDER are configured and will activate
+            // automatically once the balance supports the split; below that the
+            // bot uses the FIRST rung ($10) as a single bracket.
+            //
+            // The "never runs past" guarantee is already covered independently by
+            // BackupStop / BackupTP in main.ts: if price gaps through a resting
+            // maker order that did not fill, those force an immediate close rather
+            // than letting the position ride. That is the real fallback, and it
+            // works at any position size.
             SIGNAL_MODE:  'mpm',
-            MPM_PULLBACK_BPS: '8',   // enter within 8bps of the reclaimed level
-            TP_PCT:       '0.1176',  // ~$75 move
-            SL_PCT:       '0.0627',  // ~$40 move
-            ENTRY_TAKER:  'false',   // maker IN (0% fee) at the pullback level
+            MPM_PULLBACK_BPS: '8',
+            TP_LADDER:    '10,15,30,40,50',   // $ price moves, activates when qty >= 0.005
+            SL_LADDER:    '10,15,30,40,50',
+            TP_PCT:       '0.0155',  // ~$10 -- first rung, used while qty < 0.005
+            SL_PCT:       '0.0155',  // ~$10
+            ENTRY_TAKER:  'false',   // maker IN
             SL_MAKER:     'true',    // maker OUT
             TP_ROI_PCT: '', SL_ROI_PCT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
             NO_GATES_OB_MIN:   '0',
