@@ -343,8 +343,14 @@ const BOTS: BotConfig[] = [
             DAILY_LOSS_LIMIT_PCT: '0',// no daily loss pause
             MPM_PULLBACK_BPS: '8',
             // TP: 5 rungs so a fast move can't blow past a single target.
-            TP_LADDER:    '10,15,30,40,50',   // $ price moves; splits when qty >= 0.005
-            TP_PCT:       '0.0155',  // ~$10 -- first rung, used while qty < 0.005
+            // TP ladder widened 2026-07-29 (user): $64/74/84/94/104 instead of
+            // $10/15/30/40/50. Against the $409.40 stop this drops breakeven from
+            // 97.6% WR (at a $10 TP) to ~83% on the average rung -- the $10 target
+            // was earning 1/41st of what a single stop-out cost.
+            //   $64 -> 1:6.4 R:R, 86.5% breakeven
+            //   $104 -> 1:3.9 R:R, 79.7% breakeven
+            TP_LADDER:    '64,74,84,94,104', // $ price moves; splits when qty >= 0.005
+            TP_PCT:       '0.1000',  // ~$64 -- first rung, used while qty < 0.005
             // SL: ONE stop at 80% of margin (user 2026-07-29). SL_ROI_PCT is
             // leverage-aware: priceDist = entry * (roiPct/100) / leverage, so at
             // 125x this is a ~$410 / 64bps move on BTC -- deliberately far, to
