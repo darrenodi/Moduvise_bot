@@ -924,7 +924,7 @@ async function runCycle(): Promise<void> {
         // exchange's $5 min-notional. (Using literally 100% would deadlock since
         // available is always a hair below the stack.)
         const avail    = await getAvailableBalance();
-        const leverage = Number(process.env.BOT_LEVERAGE ?? 100);
+        const leverage = Number(process.env.BOT_LEVERAGE ?? 5);
         const minMargin = STRATEGY_MIN_NOTIONAL / leverage;   // $5 / leverage
         if (avail < minMargin) {
             stats.skipped++;
@@ -1012,7 +1012,7 @@ process.on('SIGTERM', async () => {
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
 loadState();
-const _lev = Number(process.env.BOT_LEVERAGE ?? 100);
+const _lev = Number(process.env.BOT_LEVERAGE ?? 5);
 const _mar = process.env.MARGIN_PER_TRADE ?? '1';
 console.log(`\n${'═'.repeat(70)}`);
 console.log(`  ${_symbol} SCALPER | ${ENVIRONMENT.toUpperCase()} 🟢`);
@@ -1041,7 +1041,7 @@ const _refAtr = Number(process.env.BANNER_REF_ATR   || _refAtrMap[MARKET_SYMBOL]
 const _tpMult = Number(process.env.TP_ATR_MULT || 0);
 const _tpPct  = Number(process.env.TP_PCT || 0);
 const _tpRoiPct = Number(process.env.TP_ROI_PCT || 0);
-const _bannerLev = Number(process.env.BOT_LEVERAGE ?? 100);
+const _bannerLev = Number(process.env.BOT_LEVERAGE ?? 5);
 const _tpUsd  = _tpRoiPct > 0 ? _refPx * (_tpRoiPct / 100) / _bannerLev
               : _tpPct > 0 ? _refPx * _tpPct / 100
               : _tpMult > 0 ? _refAtr * _tpMult

@@ -1,4 +1,5 @@
 import * as dotenv from 'dotenv';
+import { evaluateLsor, evaluateMpm } from './lsor.js';
 dotenv.config();
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
@@ -581,6 +582,56 @@ export async function generateSignals(
             // that a better signal alone does not fix.
             //
             // priceVsVwap is a PERCENT (main.ts multiplies by 100).
+            // LSOR MODE (2026-07-29, pro-trader spec). Replaces "quote into
+            // momentum" — which measured 50% WR with a 1.78:1 adverse MAE/MFE
+            // ratio, i.e. classic adverse selection on passive fills — with:
+            // sweep a liquidity level -> flow exhausts -> reclaim -> flow flips
+            // -> only then place the passive order. Requires a minimum setup
+            // score (spec: >=5/6 for an unvalidated strategy).
+            const _mode = (process.env.SIGNAL_MODE ?? 'ob').toLowerCase();
+            if (_mode === 'mpm') {
+                const r = evaluateMpm(ind, price, klines, velocityState);
+                const need = Number(process.env.MPM_MIN_SCORE ?? 3);
+                if (r.direction === 'neutral' || r.score < need) {
+                    signals.push({
+                        symbol, direction: 'neutral', market_price: price, bid, ask,
+                        atr5m: ind.atr5m, target_move: 0.20, confidence: 0, session_size_pct: 1.00,
+                        reasoning: `MPM ${r.score}/${r.max} (need ${need}): ${r.reasons.join(', ')}`,
+                        suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 5),
+                    });
+                    continue;
+                }
+                signals.push({
+                    symbol, direction: r.direction, market_price: price, bid, ask,
+                    atr5m: ind.atr5m, target_move: 0.20, confidence: r.score / r.max, session_size_pct: 1.00,
+                    reasoning: `MPM ${r.score}/${r.max} ${r.direction.toUpperCase()}: ${r.reasons.join(', ')}`,
+                    suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 5),
+                });
+                continue;
+            }
+            if (_mode === 'lsor') {
+                const r = evaluateLsor(ind, asset.orderBook, price, klines, velocityState);
+                const need = Number(process.env.LSOR_MIN_SCORE ?? 5);
+                if (r.direction === 'neutral' || r.score < need) {
+                    signals.push({
+                        symbol, direction: 'neutral', market_price: price, bid, ask,
+                        atr5m: ind.atr5m, target_move: 0.20, confidence: 0,
+                        session_size_pct: 1.00,
+                        reasoning: `LSOR ${r.score}/${r.max} (need ${need}): ${r.reasons.join(', ')}`,
+                        suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 5),
+                    });
+                    continue;
+                }
+                signals.push({
+                    symbol, direction: r.direction, market_price: price, bid, ask,
+                    atr5m: ind.atr5m, target_move: 0.20, confidence: r.score / r.max,
+                    session_size_pct: 1.00,
+                    reasoning: `LSOR ${r.score}/${r.max} ${r.direction.toUpperCase()}: ${r.reasons.join(', ')}`,
+                    suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 5),
+                });
+                continue;
+            }
+
             const OB_MIN   = Number(process.env.NO_GATES_OB_MIN ?? NO_GATES_OB_MIN);
             const VWAP_MIN = Number(process.env.NO_GATES_VWAP_MIN ?? 0.15);
             const obOk   = Math.abs(ind.obImbalance) >= OB_MIN;
@@ -592,7 +643,7 @@ export async function generateSignals(
                     atr5m: ind.atr5m, target_move: 0.20, confidence: 0,
                     session_size_pct: 1.00,
                     reasoning: `NO-GATES SKIP: ${!obOk ? `ob ${(ind.obImbalance*100).toFixed(0)}% < ${(OB_MIN*100).toFixed(0)}%` : ''}${!obOk && !vwapOk ? ' + ' : ''}${!vwapOk ? `vwap ${ind.priceVsVwap.toFixed(3)}% < ${VWAP_MIN}% (chop zone, 45% WR)` : ''}`,
-                    suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 100),
+                    suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 5),
                 });
                 continue;
             }
@@ -612,7 +663,7 @@ export async function generateSignals(
                 symbol, direction, market_price: price, bid, ask, atr5m: ind.atr5m,
                 target_move: 0.20, confidence: 1, session_size_pct: 1.00,
                 reasoning: `NO-GATES[${SIGNAL_MODE}]: ${direction} (ob=${(ind.obImbalance*100).toFixed(0)}%, vwapDev=${ind.priceVsVwap.toFixed(3)}%, mom=${ind.momentum5m.toFixed(3)})`,
-                suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 100),
+                suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 5),
             });
             continue;
         }
@@ -629,14 +680,14 @@ export async function generateSignals(
                 confidence:         0,
                 reasoning:          regimeReason,
                 suggested_tp:       0.20,
-                suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 100),
+                suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 5),
                 session_size_pct:   1.00,
             });
             continue;
         }
 
         const sig      = getDirection(ind, asset.orderBook, price, klines, velocityState);
-        const leverage = Number(process.env.BOT_LEVERAGE ?? 100);
+        const leverage = Number(process.env.BOT_LEVERAGE ?? 5);
 
         if (sig.direction !== 'neutral') {
             console.log(`[Signal] 🎯 ${sig.direction.toUpperCase()} | ${sig.reasoning} | ADX=${ind.adx.toFixed(1)} ATR=$${ind.atr5m.toFixed(2)}`);
