@@ -301,10 +301,23 @@ const BOTS: BotConfig[] = [
     // all the work. Building as specified regardless.
     {
         botId: 'BTC-SCALP', marketSymbol: 'BTCUSDC', displaySymbol: 'BTC/USDC', wsSymbol: 'btcusdc',
-        leverage: 100, wallMinNotional: 50_000,
+        // 2026-07-29: 125x. User asked for 150x -- Binance's hard max on BTCUSDC
+        // is 125x (verified via leverageBracket), so 150 would be rejected.
+        // NOTE the exchange steps leverage DOWN as size grows: 125x only covers
+        // notional <= $50,000 (~$400 margin). Beyond that Binance forces 100x
+        // (<= $500k) then 50x. So "125x" holds only while the account is small.
+        leverage: 125, wallMinNotional: 50_000,
         strategy: {
             ...SHARED_STRATEGY,
-            MARGIN_STACK_PCT: '100', // user 2026-07-28: "use 100% of margin in all trades"
+            MARGIN_STACK_PCT: '100', // 100% of stack deployed
+            // "compounding 100% profit until margin is 2000... then stop
+            // compounding and just use max position rotated". Profit above the
+            // cap stays in the stack but is no longer deployed.
+            MARGIN_MAX_USD:   '2000',
+            // "at least 300 trades daily so no harsh atr" -- ATR ceiling raised so
+            // volatility never blocks an entry (only a true flash-crash would).
+            ATR_CEIL_PCT:     '99',
+            ATR_FLOOR_PCT:    '0',
             // ── LADDERED BRACKET 2026-07-29 (user spec) ──────────────────
             // "set tp at 5 different points so we have a fallback plan... first
             //  $10, second 15, third 30, fourth 40, 5th 50. same with sl."

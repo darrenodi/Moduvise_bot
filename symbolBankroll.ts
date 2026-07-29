@@ -83,7 +83,15 @@ export function createBankroll(symbol: string, initialStack: number): SymbolBank
 // the exchange MIN_NOTIONAL floor.
 export function getCurrentMargin(b: SymbolBankroll): number {
     const pct = Number(process.env.MARGIN_STACK_PCT ?? 25) / 100;
-    return b.stack * pct;
+    const raw = b.stack * pct;
+    // MARGIN CAP (user 2026-07-29): "compounding 100% profit until margin is
+    // 2000... then we stop compounding and just be using max position rotated".
+    // Binance's 125x bracket on BTCUSDC only covers notional <= $50,000, so at
+    // 125x the exchange itself caps usable margin around $400 before stepping
+    // leverage down. MARGIN_MAX_USD is the user's own ceiling on top of that;
+    // profit above it accumulates in the stack but is no longer deployed.
+    const cap = Number(process.env.MARGIN_MAX_USD ?? 0);
+    return cap > 0 ? Math.min(raw, cap) : raw;
 }
 
 // Apply win or loss — returns updated bankroll and whether symbol should pause
