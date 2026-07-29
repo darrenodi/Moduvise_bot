@@ -589,6 +589,19 @@ export async function generateSignals(
             // -> only then place the passive order. Requires a minimum setup
             // score (spec: >=5/6 for an unvalidated strategy).
             const _mode = (process.env.SIGNAL_MODE ?? 'ob').toLowerCase();
+            // ALWAYS-IN MODE (user 2026-07-29): "no gates. enter trade at all
+            // times. once one finishes, enter the next." Never returns neutral.
+            // Direction from the 5m momentum sign, defaulting long on a dead tie.
+            if (_mode === 'always') {
+                const dir: SignalDirection = ind.momentum5m >= 0 ? 'long' : 'short';
+                signals.push({
+                    symbol, direction: dir, market_price: price, bid, ask,
+                    atr5m: ind.atr5m, target_move: 0.20, confidence: 1, session_size_pct: 1.00,
+                    reasoning: `ALWAYS-IN: ${dir} (mom=${ind.momentum5m.toFixed(2)}, ob=${(ind.obImbalance*100).toFixed(0)}%)`,
+                    suggested_tp: 0.20, suggested_leverage: Number(process.env.BOT_LEVERAGE ?? 5),
+                });
+                continue;
+            }
             if (_mode === 'mpm') {
                 const r = evaluateMpm(ind, price, klines, velocityState);
                 const need = Number(process.env.MPM_MIN_SCORE ?? 3);

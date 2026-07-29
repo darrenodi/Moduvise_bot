@@ -909,7 +909,9 @@ async function runCycle(): Promise<void> {
         // price has reclaimed ~1×ATR past where we were stopped. Opposite-direction
         // entries are always allowed (if the move flipped, trade the flip). Clears
         // once reclaimed so we don't sit out a genuine resumption.
-        if (_lastLossDir && signal.direction === _lastLossDir) {
+        // DIR_GUARD_MULT=0 disables the same-direction re-entry block entirely
+        // (user 2026-07-29: no gates, enter back-to-back).
+        if (Number(process.env.DIR_GUARD_MULT ?? 1.0) > 0 && _lastLossDir && signal.direction === _lastLossDir) {
             const px = asset.price;
             const reclaimed = _lastLossDir === 'long' ? px >= _lastLossReclaim : px <= _lastLossReclaim;
             if (!reclaimed) {

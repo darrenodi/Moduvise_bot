@@ -336,7 +336,11 @@ const BOTS: BotConfig[] = [
             // maker order that did not fill, those force an immediate close rather
             // than letting the position ride. That is the real fallback, and it
             // works at any position size.
-            SIGNAL_MODE:  'mpm',
+            SIGNAL_MODE:  'always',   // no gates — enter every cycle, back-to-back
+            LOSS_COOLDOWN_MS: '0',    // no pause after a loss
+            DIR_GUARD_MULT:   '0',    // no same-direction re-entry block
+            MAX_CONSEC_LOSSES:'0',    // no consecutive-loss circuit breaker
+            DAILY_LOSS_LIMIT_PCT: '0',// no daily loss pause
             MPM_PULLBACK_BPS: '8',
             TP_LADDER:    '10,15,30,40,50',   // $ price moves, activates when qty >= 0.005
             SL_LADDER:    '10,15,30,40,50',

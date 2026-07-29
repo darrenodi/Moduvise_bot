@@ -127,7 +127,9 @@ const _cfg = getConfig(MARKET_SYMBOL);
 // MAX_HOLD_MS env override (user spec 2026-07-22: "if tp or sl not hit in 5
 // minutes, close trade at whatever value") — force-close window, default per-asset.
 export const ASSET_TIMING = {
-    lossCooldownMs: _cfg.lossCooldownMs,
+    // LOSS_COOLDOWN_MS override (user 2026-07-29: "enter trade at all times.
+    // once one finishes, enter the next"). 0 = no pause after a loss.
+    lossCooldownMs: Number(process.env.LOSS_COOLDOWN_MS ?? _cfg.lossCooldownMs),
     maxHoldMs:      Number(process.env.MAX_HOLD_MS || _cfg.maxHoldMs),
 };
 
