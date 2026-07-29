@@ -342,13 +342,20 @@ const BOTS: BotConfig[] = [
             MAX_CONSEC_LOSSES:'0',    // no consecutive-loss circuit breaker
             DAILY_LOSS_LIMIT_PCT: '0',// no daily loss pause
             MPM_PULLBACK_BPS: '8',
-            TP_LADDER:    '10,15,30,40,50',   // $ price moves, activates when qty >= 0.005
-            SL_LADDER:    '10,15,30,40,50',
+            // TP: 5 rungs so a fast move can't blow past a single target.
+            TP_LADDER:    '10,15,30,40,50',   // $ price moves; splits when qty >= 0.005
             TP_PCT:       '0.0155',  // ~$10 -- first rung, used while qty < 0.005
-            SL_PCT:       '0.0155',  // ~$10
+            // SL: ONE stop at 80% of margin (user 2026-07-29). SL_ROI_PCT is
+            // leverage-aware: priceDist = entry * (roiPct/100) / leverage, so at
+            // 125x this is a ~$410 / 64bps move on BTC -- deliberately far, to
+            // stop getting wicked out. Cost is explicit: one stop-out = 80% of
+            // the deployed margin.
+            SL_ROI_PCT:   '80',
+            SL_LADDER:    '',        // single stop, not laddered
+            SL_PCT:       '',        // off -- SL_ROI_PCT drives it
             ENTRY_TAKER:  'false',   // maker IN
             SL_MAKER:     'true',    // maker OUT
-            TP_ROI_PCT: '', SL_ROI_PCT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
+            TP_ROI_PCT: '', TP_MIN_USD: '', SL_FIXED_USD: '',
             NO_GATES_OB_MIN:   '0',
             NO_GATES_VWAP_MIN: '0',
             RISK_USD_PER_TRADE: '',

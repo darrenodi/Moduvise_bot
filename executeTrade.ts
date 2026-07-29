@@ -84,7 +84,12 @@ function getConfig(symbol: string): SymbolConfig {
     };
     if (s === 'BTCUSDC')  return {
         tick: 0.10, qtyStep: 0.001, minQty: 0.001, priceDp: 1, qtyDp: 3,
-        maxLeverage: 100, tpFixedUsd: 1.00,
+        // maxLeverage 100 -> 125 (2026-07-29): Binance's real BTCUSDC cap is 125x
+        // (verified via leverageBracket). The old 100 was silently CLAMPING the
+        // user's 125x setting, which also made SL_ROI_PCT compute against the
+        // wrong leverage. Note the exchange still steps leverage down as notional
+        // grows (125x only up to $50k notional).
+        maxLeverage: 125, tpFixedUsd: 1.00,
         entryOffsetTicks: 1, slLimitTicks: 5, tp2OffsetTicks: 3,
         tpMinTicks: 2, slMinTicks: 5, maxSpreadUsd: 1.00,
         lossCooldownMs: 30_000, maxHoldMs: 8 * 60_000,
